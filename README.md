@@ -24,6 +24,7 @@ It gives you one place to:
 
 - Setup and first run: [docs/SETUP.md](docs/SETUP.md)
 - Full app walkthrough (settings, ingestion, and chat): [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)
+- System architecture diagram: [docs/DIAGRAM.md](docs/DIAGRAM.md)
 - Core features (entity resolution, graph provenance, context X-Ray): [docs/FEATURES.md](docs/FEATURES.md)
 - License terms: [LICENSE](LICENSE)
 - Commercial licensing: [COMMERCIAL.md](COMMERCIAL.md)
