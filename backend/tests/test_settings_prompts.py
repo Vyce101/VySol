@@ -13,8 +13,8 @@ def test_load_settings_includes_entity_resolution_defaults(tmp_path, monkeypatch
     loaded = config.load_settings()
 
     assert loaded["entity_resolution_top_k"] == 50
-    assert loaded["default_model_entity_chooser"] == "gemini-2.0-flash"
-    assert loaded["default_model_entity_combiner"] == "gemini-2.5-pro-preview-05-06"
+    assert loaded["default_model_entity_chooser"] == "gemini-flash-latest"
+    assert loaded["default_model_entity_combiner"] == "gemini-flash-lite-latest"
     assert loaded["entity_resolution_chooser_prompt"] is None
     assert loaded["entity_resolution_combiner_prompt"] is None
     assert loaded["graph_architect_prompt"] is None

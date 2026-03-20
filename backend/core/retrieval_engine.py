@@ -53,7 +53,7 @@ class RetrievalEngine:
         except (TypeError, ValueError):
             entry_k = top_k
         hops = settings.get("retrieval_graph_hops", 2)
-        max_nodes = settings.get("retrieval_max_nodes", 20)
+        max_nodes = settings.get("retrieval_max_nodes", 50)
 
         total_graph_nodes = self.graph_store.get_node_count()
         force_all = total_graph_nodes > 0 and entry_k >= total_graph_nodes

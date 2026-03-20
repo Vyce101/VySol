@@ -14,9 +14,9 @@ Back to [Walkthrough](../WALKTHROUGH.md).
 
 Notes:
 
-- keys are tied to a project context
-- quotas and limits can differ by project, model, and account state
-- limits can change over time, so always verify current limits in your Google dashboards
+- Keys are tied to a project context
+- Quotas and limits can differ by project, model, and account state
+- Limits can change over time, so always verify current limits in your Google dashboards
 
 ## Add The Key In VySol
 
@@ -29,15 +29,15 @@ If you use multiple keys, VySol can rotate them using `Fail Over` or `Round Robi
 
 ## Basic Key Safety Rules
 
-- never commit live keys to git
-- never paste live keys into public chats, tickets, screenshots, or logs
-- keep keys in local settings or local env files only
-- rotate and replace a key immediately if you think it leaked
+- Never commit live keys to git
+- Never paste live keys into public chats, tickets, screenshots, or logs
+- Keep keys in local settings or local env files only
+- Rotate and replace a key immediately if you think it leaked
 
 ## Limits, Usage, And Abuse
 
-- usage limits are enforced by Google at the project/account level and can vary by model
-- hitting limits can cause throttling, request failures, or temporary blocks
-- abusive or policy-violating traffic can lead to stronger enforcement, including key or account restrictions
+- Usage limits are enforced by Google at the project/account level and can vary by model
+- Hitting limits can cause throttling, request failures, or temporary blocks
+- Abusive or policy-violating traffic can lead to stronger enforcement, including key or account restrictions
 
 Use keys responsibly and monitor usage in your Google tooling so you can catch spikes early.

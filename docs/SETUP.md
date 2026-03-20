@@ -1,5 +1,41 @@
 # Setup
 
+## Start in 60 Seconds
+
+1. Run [VySol.bat](../VySol.bat). It will launch backend/frontend and open a browser tab automatically.
+2. On the home page, click the top-right settings icon.
+3. Add your Gemini API keys.
+4. Leave model defaults as-is for your first run (listed below).
+5. Create a world.
+6. Upload any `.txt` document.
+7. Start ingestion and wait until it shows complete.
+8. Open chat and ask a question.
+
+API key note:
+
+- Limits are tied to project context.
+- Multiple keys from the same project share that project's limits.
+- Splitting keys across projects can help isolate limits, but abusive or policy-violating traffic can still trigger enforcement across your usage.
+
+Default models (current):
+
+- Graph Architect Model: `gemini-flash-lite-latest`
+- Chat Model: `gemini-flash-latest`
+- Entity Chooser Model: `gemini-flash-latest`
+- Entity Combiner Model: `gemini-flash-lite-latest`
+- Default Embedding Model: `gemini-embedding-002-preview`
+
+Default chat settings (current):
+
+- Top K Chunks: `5`
+- Entry Nodes: `5`
+- Graph Hops: `2`
+- Max Graph Nodes: `50`
+- Vector Query (Msgs): `3`
+- Chat History Context (Msgs): `1000`
+
+For full setup details and troubleshooting, use the sections below.
+
 ## Quick Start For Windows
 
 If you are on Windows, the easiest path is:
@@ -52,6 +88,6 @@ By default the frontend talks to `http://localhost:8000`.
 ## First Run Behavior
 
 - `settings/settings.json` is created automatically when the backend first needs a live settings file
-- local worlds, graphs, vectors, and chat history are stored under `saved_worlds/`
+- Local worlds, graphs, vectors, and chat history are stored under `saved_worlds/`
 - Gemini API keys added in the app are stored locally in `settings/settings.json`
-- this public repo does not ship with live secrets, saved worlds, imported corpora, or personal runtime data
+- This public repo does not ship with live secrets, saved worlds, imported corpora, or personal runtime data

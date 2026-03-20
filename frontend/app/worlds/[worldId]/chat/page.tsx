@@ -215,11 +215,11 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [topK, setTopK] = useState(5);
     const [entryTopK, setEntryTopK] = useState(5);
     const [hops, setHops] = useState(2);
-    const [maxNodes, setMaxNodes] = useState(20);
+    const [maxNodes, setMaxNodes] = useState(50);
     const [chatPrompt, setChatPrompt] = useState("");
     const [promptSource, setPromptSource] = useState("default");
-    const [searchContextMsgs, setSearchContextMsgs] = useState(1);
-    const [chatHistoryMsgs, setChatHistoryMsgs] = useState(10);
+    const [searchContextMsgs, setSearchContextMsgs] = useState(3);
+    const [chatHistoryMsgs, setChatHistoryMsgs] = useState(1000);
 
     // Message action states
     const [hoveredMsgIndex, setHoveredMsgIndex] = useState<number | null>(null);

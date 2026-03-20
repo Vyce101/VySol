@@ -38,7 +38,7 @@ def stream_chat(
         retriever = RetrievalEngine(world_id)
 
         # Determine retrieval query context length.
-        context_msgs = settings.get("retrieval_context_messages", 1)
+        context_msgs = settings.get("retrieval_context_messages", 3)
         if isinstance(settings_override, dict) and "retrieval_context_messages" in settings_override:
             context_msgs = settings_override["retrieval_context_messages"]
 
@@ -63,7 +63,7 @@ def stream_chat(
 
         chat_provider = settings.get("chat_provider", "gemini")
 
-        chat_history_msgs = settings.get("chat_history_messages", 10)
+        chat_history_msgs = settings.get("chat_history_messages", 1000)
         if isinstance(settings_override, dict) and "chat_history_messages" in settings_override:
             chat_history_msgs = settings_override["chat_history_messages"]
         sliced_history = history[-chat_history_msgs:] if history else []
@@ -78,7 +78,7 @@ def stream_chat(
                 messages_payload.append({"role": role, "content": turn.get("content", "")})
         messages_payload.append({"role": "user", "content": message})
 
-        model_name = settings.get("default_model_chat", "gemini-2.5-pro-preview-05-06")
+        model_name = settings.get("default_model_chat", "gemini-flash-latest")
         intenserp_model_id = settings.get("intenserp_model_id", "glm-chat")
         captured_at = datetime.now(timezone.utc).isoformat()
 

@@ -340,7 +340,7 @@ async def _choose_matches(
         return [], "No candidates were available."
 
     settings = load_settings()
-    model_name = settings.get("default_model_entity_chooser") or settings.get("default_model_flash", "gemini-2.0-flash")
+    model_name = settings.get("default_model_entity_chooser", "gemini-flash-latest")
     payload = json.dumps(
         {
             "anchor": anchor,
@@ -372,7 +372,7 @@ async def _choose_matches(
 
 async def _combine_entities(nodes: list[dict[str, Any]]) -> tuple[str, str]:
     settings = load_settings()
-    model_name = settings.get("default_model_entity_combiner", "gemini-2.5-pro-preview-05-06")
+    model_name = settings.get("default_model_entity_combiner", "gemini-flash-lite-latest")
     payload = json.dumps({"entities": nodes}, ensure_ascii=False)
 
     try:

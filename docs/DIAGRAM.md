@@ -33,11 +33,21 @@ flowchart TD
   J4 --> J5[Canonical Entities + Rewired Links]
 
   J5 --> K[Chat]
-  K --> K1[Retrieval Settings]
-  K1 --> K2[Top K Chunks]
-  K1 --> K3[Entry Nodes / Graph Hops / Max Graph Nodes]
-  K1 --> K4[Vector Query Msgs / History Msgs]
-  K --> L[Prompt Context Assembly]
+
+  K --> KR[Retrieval Settings]
+  KR --> KR1[Top K Chunks]
+  KR --> KR2[Entry Nodes / Graph Hops / Max Graph Nodes]
+  KR --> KR3[Vector Query Msgs]
+
+  K --> PS[System Prompt]
+  K --> CH[Chat History Context]
+
+  KR1 --> L[Prompt Context Assembly]
+  KR2 --> L
+  KR3 --> L
+  PS --> L
+  CH --> L
+
   L --> M[Model Response]
   M --> N[Context X-Ray Saved Per Message]
 
@@ -59,6 +69,6 @@ flowchart TD
   class B,B1,B2,B3 settings
   class C,C1,D,D1,D2,D3,E,F,G,H,G1,H1,I ingestion
   class J,J1,J2,J3,J4,J5 resolution
-  class K,K1,K2,K3,K4,L,M,N chat
+  class K,KR,KR1,KR2,KR3,PS,CH,L,M,N chat
   class R,R1,R2,R3,R4,R5 recovery
 ```
