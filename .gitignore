@@ -36,6 +36,7 @@ frontend/build/
 frontend/*.tsbuildinfo
 
 # Dumps and local scratch files
+/images/
 backend/Get back end nodes template/
 backend/smoke_settings_tmp/
 backend/tmp_test_safety.py

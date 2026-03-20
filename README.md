@@ -1,5 +1,9 @@
 # VySol
 
+<p align="center">
+  <img src="docs/assets/branding/horizontal.png" alt="VySol logo" width="560">
+</p>
+
 ![License](https://img.shields.io/badge/license-AGPLv3-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![Node](https://img.shields.io/badge/node-18%2B-339933)
