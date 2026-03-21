@@ -24,6 +24,8 @@ frontend/.env.*
 **/.ruff_cache/
 .pytest-t/*
 !.pytest-t/.gitkeep
+.pytest-temp/
+.manual-test-temp/
 .pytest-tmp*/
 pytest-cache-files-*/
 .tmp_logs/

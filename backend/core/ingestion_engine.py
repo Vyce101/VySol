@@ -20,6 +20,7 @@ from .config import (
     world_meta_path,
     world_sources_dir,
 )
+from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
 from .key_manager import get_key_manager
 from .temporal_indexer import stamp_chunks
@@ -45,7 +46,7 @@ ChunkMode = Literal["full", "full_cleanup", "embedding_only"]
 IngestOperation = Literal["default", "rechunk_reingest", "reembed_all"]
 FailureScope = Literal["chunk", "node"]
 _STALE_RUN_GRACE_SECONDS = 15
-_NODE_VECTOR_BATCH_SIZE = 8
+_UNIQUE_NODE_VECTOR_BATCH_SIZE = 8
 
 
 class _StageScheduler:
@@ -412,10 +413,6 @@ def _chunk_id(world_id: str, source_id: str, chunk_idx: int) -> str:
     return f"chunk_{world_id}_{source_id}_{chunk_idx}"
 
 
-def _node_vector_document_id(chunk_id: str, node_id: str) -> str:
-    return f"{chunk_id}::node::{node_id}"
-
-
 def _parse_chunk_id(world_id: str, chunk_id: str) -> tuple[str, int] | None:
     raw = str(chunk_id)
     prefix = f"chunk_{world_id}_"
@@ -458,70 +455,33 @@ def _chunk_node_records(graph_store: GraphStore, chunk_id: str) -> list[dict]:
     return output
 
 
-def _node_embedding_text(node: dict) -> str:
-    display_name = str(node.get("display_name", "")).strip()
-    description = str(node.get("description", "")).strip()
-    claims = node.get("claims", [])
-
-    normalized_claims: list[str] = []
-    seen_claims: set[str] = set()
-    for claim in claims or []:
-        if isinstance(claim, dict):
-            claim_text = str(claim.get("text", "")).strip()
-        else:
-            claim_text = str(claim).strip()
-        if not claim_text or claim_text in seen_claims:
-            continue
-        seen_claims.add(claim_text)
-        normalized_claims.append(claim_text)
-
-    sections: list[str] = []
-    if display_name:
-        sections.append(f"Name: {display_name}")
-    if description:
-        sections.append(f"Description: {description}")
-    if normalized_claims:
-        sections.append("Claims:\n" + "\n".join(f"- {claim_text}" for claim_text in normalized_claims))
-
-    fallback = display_name or description or str(node.get("id", "")).strip() or "Unnamed Node"
-    return "\n\n".join(sections).strip() or fallback
-
-
-async def _upsert_node_vectors_for_chunk(
-    world_id: str,
-    node_vector_store: VectorStore,
+async def _upsert_unique_node_vectors(
+    unique_node_vector_store: VectorStore,
     node_records: list[dict],
     api_key: str,
-    chunk_id: str,
-    source_id: str,
-    book_number: int,
-    chunk_index: int,
     *,
     embeddings: list[list[float]] | None = None,
-    batch_size: int = _NODE_VECTOR_BATCH_SIZE,
+    batch_size: int = _UNIQUE_NODE_VECTOR_BATCH_SIZE,
     vector_lock: asyncio.Lock | None = None,
     abort_check: Callable[[], None] | None = None,
 ) -> int:
     document_ids: list[str] = []
     texts: list[str] = []
     metadatas: list[dict] = []
+    seen_node_ids: set[str] = set()
 
     for node in node_records:
         node_id = str(node.get("id", "")).strip()
-        if not node_id:
+        if not node_id or node_id in seen_node_ids:
             continue
-        document_ids.append(_node_vector_document_id(chunk_id, node_id))
-        texts.append(_node_embedding_text(node))
+        seen_node_ids.add(node_id)
+        document_ids.append(node_id)
+        texts.append(build_unique_node_document(node))
         metadatas.append(
             {
-                "world_id": world_id,
-                "node_id": node_id,
                 "display_name": node.get("display_name", ""),
                 "normalized_id": node.get("normalized_id", ""),
-                "source_id": source_id,
-                "book_number": int(book_number),
-                "chunk_index": int(chunk_index),
-                "parent_chunk_id": chunk_id,
+                "node_id": node_id,
             }
         )
 
@@ -542,7 +502,7 @@ async def _upsert_node_vectors_for_chunk(
 
         if embeddings is None:
             batch_embeddings = await asyncio.to_thread(
-                node_vector_store.embed_texts,
+                unique_node_vector_store.embed_texts,
                 batch_texts,
                 api_key,
             )
@@ -554,7 +514,7 @@ async def _upsert_node_vectors_for_chunk(
 
         if vector_lock is None:
             await asyncio.to_thread(
-                node_vector_store.upsert_documents_embeddings,
+                unique_node_vector_store.upsert_documents_embeddings,
                 document_ids=batch_document_ids,
                 texts=batch_texts,
                 metadatas=batch_metadatas,
@@ -565,7 +525,7 @@ async def _upsert_node_vectors_for_chunk(
                 if abort_check:
                     abort_check()
                 await asyncio.to_thread(
-                    node_vector_store.upsert_documents_embeddings,
+                    unique_node_vector_store.upsert_documents_embeddings,
                     document_ids=batch_document_ids,
                     texts=batch_texts,
                     metadatas=batch_metadatas,
@@ -578,6 +538,34 @@ async def _upsert_node_vectors_for_chunk(
             abort_check()
 
     return total_written
+
+
+async def _rebuild_unique_node_vectors(
+    graph_store: GraphStore,
+    unique_node_vector_store: VectorStore,
+    api_key: str,
+    *,
+    vector_lock: asyncio.Lock | None = None,
+    abort_check: Callable[[], None] | None = None,
+) -> int:
+    node_records = []
+    for node_id in sorted(graph_store.graph.nodes()):
+        if abort_check:
+            abort_check()
+        node = graph_store.get_node(node_id)
+        if node:
+            node_records.append(node)
+
+    unique_node_vector_store.drop_collection()
+    if abort_check:
+        abort_check()
+    return await _upsert_unique_node_vectors(
+        unique_node_vector_store,
+        node_records,
+        api_key,
+        vector_lock=vector_lock,
+        abort_check=abort_check,
+    )
 
 
 def _normalize_index_list(values: list[Any], *, max_index: int | None = None) -> list[int]:
@@ -857,8 +845,8 @@ def _collect_embedded_coverage(world_id: str, vector_store: VectorStore) -> dict
     return by_source
 
 
-def _collect_expected_node_records_by_chunk(world_id: str, graph_store: GraphStore) -> dict[str, list[dict]]:
-    by_chunk: dict[str, list[dict]] = {}
+def _collect_expected_node_records_by_source(world_id: str, graph_store: GraphStore) -> dict[str, list[dict]]:
+    by_source: dict[str, dict[str, dict]] = {}
     for node_id, attrs in graph_store.graph.nodes(data=True):
         source_chunks = attrs.get("source_chunks", [])
         if isinstance(source_chunks, str):
@@ -869,28 +857,32 @@ def _collect_expected_node_records_by_chunk(world_id: str, graph_store: GraphSto
 
         for raw_chunk_id in source_chunks or []:
             chunk_id = str(raw_chunk_id)
-            if not _parse_chunk_id(world_id, chunk_id):
+            parsed = _parse_chunk_id(world_id, chunk_id)
+            if not parsed:
                 continue
-            by_chunk.setdefault(chunk_id, []).append(
-                {
+            source_id, chunk_index = parsed
+            source_nodes = by_source.setdefault(source_id, {})
+            record = source_nodes.get(str(node_id))
+            if record is None or int(record["chunk_index"]) > chunk_index:
+                source_nodes[str(node_id)] = {
                     "id": str(node_id),
                     "display_name": str(attrs.get("display_name", "")),
                     "normalized_id": str(attrs.get("normalized_id", "")),
+                    "chunk_id": chunk_id,
+                    "chunk_index": int(chunk_index),
                 }
-            )
-    return by_chunk
+    return {
+        source_id: sorted(records.values(), key=lambda record: (int(record["chunk_index"]), record["id"]))
+        for source_id, records in by_source.items()
+    }
 
 
-def _collect_node_embedding_coverage(node_vector_store: VectorStore) -> dict[str, set[str]]:
-    by_chunk: dict[str, set[str]] = {}
-    for rec in node_vector_store.get_all_chunk_records():
-        metadata = rec.get("metadata", {}) or {}
-        chunk_id = str(metadata.get("parent_chunk_id") or "").strip()
-        node_id = str(metadata.get("node_id") or rec.get("id") or "").strip()
-        if not chunk_id or not node_id:
-            continue
-        by_chunk.setdefault(chunk_id, set()).add(node_id)
-    return by_chunk
+def _collect_unique_node_embedding_ids(unique_node_vector_store: VectorStore) -> set[str]:
+    return {
+        str(rec.get("id", "")).strip()
+        for rec in unique_node_vector_store.get_all_chunk_records()
+        if str(rec.get("id", "")).strip()
+    }
 
 
 def _collect_orphan_graph_nodes(world_id: str, graph_store: GraphStore) -> list[dict]:
@@ -932,26 +924,26 @@ def audit_ingestion_integrity(
     meta = _load_meta(world_id)
     graph_store = GraphStore(world_id)
     vector_store = VectorStore(world_id)
-    node_vector_store = VectorStore(world_id, collection_suffix="nodes")
+    unique_node_vector_store = VectorStore(world_id, collection_suffix="unique_nodes")
 
     extracted_by_source = _collect_extracted_coverage(world_id, graph_store)
     embedded_by_source = _collect_embedded_coverage(world_id, vector_store)
-    expected_nodes_by_chunk = _collect_expected_node_records_by_chunk(world_id, graph_store)
-    embedded_nodes_by_chunk = _collect_node_embedding_coverage(node_vector_store)
+    expected_nodes_by_source = _collect_expected_node_records_by_source(world_id, graph_store)
+    embedded_unique_node_ids = _collect_unique_node_embedding_ids(unique_node_vector_store)
     orphan_graph_nodes = _collect_orphan_graph_nodes(world_id, graph_store)
+    graph_node_ids = {str(node_id) for node_id in graph_store.graph.nodes()}
 
     summary_sources: list[dict] = []
     summary_failures: list[dict] = []
     expected_total = 0
     extracted_total = 0
     embedded_total = 0
-    expected_node_total = 0
-    embedded_node_total = 0
+    expected_node_total = len(graph_node_ids)
+    embedded_node_total = len(graph_node_ids & embedded_unique_node_ids)
     failed_total = 0
     complete_sources = 0
     partial_sources = 0
     synthesized_total = 0
-    blocking_failure_total = 0
 
     for source in meta.get("sources", []):
         _ensure_source_tracking(source)
@@ -986,8 +978,8 @@ def audit_ingestion_integrity(
             if stage == "extraction" and idx in extracted_set:
                 continue
             if stage == "embedding":
-                if scope == "node" and node_id and parent_chunk_id:
-                    if node_id in embedded_nodes_by_chunk.get(parent_chunk_id, set()):
+                if scope == "node" and node_id:
+                    if node_id in embedded_unique_node_ids:
                         continue
                 elif idx in embedded_set:
                     continue
@@ -1013,17 +1005,13 @@ def audit_ingestion_integrity(
             else:
                 existing_chunk_failure_keys.add((stage, idx, scope))
 
+        expected_nodes = expected_nodes_by_source.get(source_id, [])
         missing_node_vectors: list[dict] = []
-        source_expected_node_total = 0
-        source_embedded_node_total = 0
+        source_expected_node_total = len(expected_nodes)
+        source_embedded_node_total = sum(1 for node in expected_nodes if node["id"] in embedded_unique_node_ids)
 
         for idx in range(expected):
             chunk = _chunk_id(world_id, source_id, idx)
-            expected_nodes = expected_nodes_by_chunk.get(chunk, [])
-            embedded_node_ids = embedded_nodes_by_chunk.get(chunk, set())
-            source_expected_node_total += len(expected_nodes)
-            source_embedded_node_total += sum(1 for node in expected_nodes if node["id"] in embedded_node_ids)
-
             if synthesize_failures:
                 if idx not in extracted_set and ("extraction", idx, "chunk") not in existing_chunk_failure_keys:
                     source["stage_failures"].append(
@@ -1067,42 +1055,42 @@ def audit_ingestion_integrity(
                     existing_chunk_failure_keys.add(("embedding", idx, "chunk"))
                     synthesized_total += 1
 
-                for node in expected_nodes:
-                    if node["id"] in embedded_node_ids or ("embedding", idx, node["id"]) in existing_node_failure_keys:
-                        continue
-                    source["stage_failures"].append(
-                        {
-                            "stage": "embedding",
-                            "scope": "node",
-                            "chunk_index": idx,
-                            "chunk_id": chunk,
-                            "parent_chunk_id": chunk,
-                            "source_id": source_id,
-                            "book_number": book_number,
-                            "error_type": "coverage_gap",
-                            "error_message": "Node missing embedding coverage in node vector store.",
-                            "attempt_count": 0,
-                            "last_attempt_at": _now_iso(),
-                            "node_id": node["id"],
-                            "node_display_name": node.get("display_name", ""),
-                        }
-                    )
-                    existing_node_failure_keys.add(("embedding", idx, node["id"]))
-                    synthesized_total += 1
-
+        if synthesize_failures:
             for node in expected_nodes:
-                if node["id"] not in embedded_node_ids:
-                    missing_node_vectors.append(
-                        {
-                            "chunk_index": idx,
-                            "chunk_id": chunk,
-                            "node_id": node["id"],
-                            "node_display_name": node.get("display_name", ""),
-                        }
-                    )
+                idx = int(node["chunk_index"])
+                if node["id"] in embedded_unique_node_ids or ("embedding", idx, node["id"]) in existing_node_failure_keys:
+                    continue
+                source["stage_failures"].append(
+                    {
+                        "stage": "embedding",
+                        "scope": "node",
+                        "chunk_index": idx,
+                        "chunk_id": node["chunk_id"],
+                        "parent_chunk_id": node["chunk_id"],
+                        "source_id": source_id,
+                        "book_number": book_number,
+                        "error_type": "coverage_gap",
+                        "error_message": "Node missing embedding coverage in unique node vector store.",
+                        "attempt_count": 0,
+                        "last_attempt_at": _now_iso(),
+                        "node_id": node["id"],
+                        "node_display_name": node.get("display_name", ""),
+                    }
+                )
+                existing_node_failure_keys.add(("embedding", idx, node["id"]))
+                synthesized_total += 1
 
-        expected_node_total += source_expected_node_total
-        embedded_node_total += source_embedded_node_total
+        for node in expected_nodes:
+            if node["id"] in embedded_unique_node_ids:
+                continue
+            missing_node_vectors.append(
+                {
+                    "chunk_index": int(node["chunk_index"]),
+                    "chunk_id": node["chunk_id"],
+                    "node_id": node["id"],
+                    "node_display_name": node.get("display_name", ""),
+                }
+            )
 
         _sync_failed_chunks(source)
         _update_source_status_from_coverage(source)
@@ -1141,18 +1129,6 @@ def audit_ingestion_integrity(
             summary_failures.append(failure_row)
 
     blocking_issues: list[dict] = []
-    if orphan_graph_nodes:
-        blocking_failure_total += len(orphan_graph_nodes)
-        blocking_issues.append(
-            {
-                "code": "graph_nodes_missing_chunk_provenance",
-                "message": (
-                    "Some graph nodes have no chunk provenance, so Re-embed All cannot rebuild all node vectors. "
-                    "Use Rechunk And Re-ingest to rebuild the graph and vectors together."
-                ),
-                "count": len(orphan_graph_nodes),
-            }
-        )
 
     any_failures = any(bool(s.get("stage_failures")) for s in meta.get("sources", []))
     all_complete = bool(meta.get("sources")) and all(s.get("status") == "complete" for s in meta.get("sources", []))
@@ -1173,7 +1149,7 @@ def audit_ingestion_integrity(
             "embedded_chunks": embedded_total,
             "expected_node_vectors": expected_node_total,
             "embedded_node_vectors": embedded_node_total,
-            "failed_records": failed_total + blocking_failure_total,
+            "failed_records": failed_total,
             "sources_total": len(meta.get("sources", [])),
             "sources_complete": complete_sources,
             "sources_partial_failure": partial_sources,
@@ -1316,13 +1292,13 @@ async def start_ingestion(
         graph_store = GraphStore(world_id)
         graph_store.clear()
         vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-        node_vector_store = VectorStore(
+        unique_node_vector_store = VectorStore(
             world_id,
             embedding_model=world_ingest_settings["embedding_model"],
-            collection_suffix="nodes",
+            collection_suffix="unique_nodes",
         )
         vector_store.drop_collection()
-        node_vector_store.drop_collection()
+        unique_node_vector_store.drop_collection()
 
         for source in meta.get("sources", []):
             _reset_source_tracking_for_full_rebuild(source)
@@ -1342,13 +1318,13 @@ async def start_ingestion(
             os.remove(str(log_path))
 
         vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-        node_vector_store = VectorStore(
+        unique_node_vector_store = VectorStore(
             world_id,
             embedding_model=world_ingest_settings["embedding_model"],
-            collection_suffix="nodes",
+            collection_suffix="unique_nodes",
         )
         vector_store.drop_collection()
-        node_vector_store.drop_collection()
+        unique_node_vector_store.drop_collection()
 
         for source in meta.get("sources", []):
             _prepare_source_for_reembed(source)
@@ -1382,10 +1358,10 @@ async def start_ingestion(
 
     graph_store = GraphStore(world_id)
     vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-    node_vector_store = VectorStore(
+    unique_node_vector_store = VectorStore(
         world_id,
         embedding_model=world_ingest_settings["embedding_model"],
-        collection_suffix="nodes",
+        collection_suffix="unique_nodes",
     )
 
     ga = GraphArchitectAgent()
@@ -1625,7 +1601,7 @@ async def start_ingestion(
                 )
                 _ensure_not_aborted(world_id, my_event)
                 chunk_embedding = chunk_embeddings[0]
-                node_embedding_count = 0
+                unique_node_embedding_count = 0
 
                 _ensure_not_aborted(world_id, my_event)
                 async with vector_lock:
@@ -1665,15 +1641,10 @@ async def start_ingestion(
                         ),
                     },
                 )
-                node_embedding_count = await _upsert_node_vectors_for_chunk(
-                    world_id=world_id,
-                    node_vector_store=node_vector_store,
+                unique_node_embedding_count = await _upsert_unique_node_vectors(
+                    unique_node_vector_store=unique_node_vector_store,
                     node_records=node_records_for_embedding,
                     api_key=api_key,
-                    chunk_id=chunk,
-                    source_id=source_id,
-                    book_number=book_number,
-                    chunk_index=chunk_idx,
                     vector_lock=vector_lock,
                     abort_check=lambda: _ensure_not_aborted(world_id, my_event),
                 )
@@ -1707,7 +1678,8 @@ async def start_ingestion(
                         "agent": "vector_rebuild" if is_reembed_all else "embedding",
                         "mode": mode,
                         "chunk_vector_count": 1,
-                        "node_vector_count": node_embedding_count,
+                        "node_vector_count": unique_node_embedding_count,
+                        "unique_node_vector_count": unique_node_embedding_count,
                         **_build_progress_event(
                             world_id,
                             meta,
@@ -1856,6 +1828,16 @@ async def start_ingestion(
 
         is_current = _is_current_run(world_id, my_event)
         if not my_event.is_set() and is_current:
+            if is_reembed_all:
+                km = get_key_manager()
+                api_key, _ = km.get_active_key()
+                await _rebuild_unique_node_vectors(
+                    graph_store,
+                    unique_node_vector_store,
+                    api_key,
+                    vector_lock=vector_lock,
+                    abort_check=lambda: _ensure_not_aborted(world_id, my_event),
+                )
             audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
             refreshed = _load_meta(world_id)
             has_failures = audit["world"]["failed_records"] > 0

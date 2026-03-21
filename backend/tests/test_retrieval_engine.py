@@ -72,14 +72,14 @@ def _patch_retrieval_dependencies(
             return [0.1, 0.2, 0.3]
 
         def query_by_embedding(self, query_embedding: list[float], n_results: int) -> list[dict]:
-            if self.collection_suffix == "nodes":
+            if self.collection_suffix == "unique_nodes":
                 telemetry["node_query_n_results"] = n_results
                 return list(node_results or [])
             telemetry["chunk_query_n_results"] = n_results
             return list(chunk_results or [])
 
         def count(self) -> int:
-            if self.collection_suffix == "nodes":
+            if self.collection_suffix == "unique_nodes":
                 if node_vector_count is not None:
                     return node_vector_count
                 return len(graph_nodes or [])
@@ -104,11 +104,6 @@ def _patch_retrieval_dependencies(
             "retrieval_graph_hops": 2,
             "retrieval_max_nodes": 20,
         },
-    )
-    monkeypatch.setattr(
-        retrieval_engine,
-        "load_world_meta",
-        lambda world_id: {"total_chunks": total_chunks},
     )
     resolved_chunk_vectors = chunk_vector_count if chunk_vector_count is not None else len(chunk_results or [])
     resolved_node_vectors = node_vector_count if node_vector_count is not None else len(graph_nodes or [])
@@ -216,6 +211,41 @@ def test_retrieve_uses_node_vectors_for_entry_nodes_not_chunk_provenance(monkeyp
     assert result["retrieval_meta"]["node_seeded_retrieval_used"] is True
 
 
+def test_retrieve_queries_full_unique_node_index_before_selecting_entry_nodes(monkeypatch):
+    telemetry = _patch_retrieval_dependencies(
+        monkeypatch,
+        bfs_nodes=[
+            {"id": "uuid-entry-a", "display_name": "Entry A", "description": "A"},
+            {"id": "uuid-entry-b", "display_name": "Entry B", "description": "B"},
+        ],
+        graph_nodes=[
+            ("uuid-entry-a", {"display_name": "Entry A", "description": "A"}),
+            ("uuid-entry-b", {"display_name": "Entry B", "description": "B"}),
+            ("uuid-entry-c", {"display_name": "Entry C", "description": "C"}),
+        ],
+        chunk_results=[{"id": "chunk-rag", "document": "rag chunk"}],
+        node_results=[
+            {"id": "uuid-entry-a"},
+            {"id": "uuid-entry-b"},
+            {"id": "uuid-entry-c"},
+        ],
+        settings={
+            "retrieval_top_k_chunks": 1,
+            "retrieval_entry_top_k_nodes": 2,
+            "retrieval_graph_hops": 2,
+            "retrieval_max_nodes": 20,
+        },
+        node_vector_count=3,
+    )
+
+    engine = retrieval_engine.RetrievalEngine("world-1")
+    result = engine.retrieve("test query")
+
+    assert telemetry["node_query_n_results"] == 3
+    assert result["retrieval_meta"]["entry_index_kind"] == "unique_nodes"
+    assert result["retrieval_meta"]["selected_entry_nodes"] == 2
+
+
 def test_retrieve_uses_node_id_metadata_for_chunk_scoped_node_vectors(monkeypatch):
     _patch_retrieval_dependencies(
         monkeypatch,
@@ -297,6 +327,106 @@ def test_retrieve_context_keeps_graph_dedup_and_edge_dedup(monkeypatch):
     assert context.count("[B1:C2] Node B, knows, Node B") == 1
 
 
+def test_retrieve_context_sorts_graph_edges_by_book_then_chunk(monkeypatch):
+    _patch_retrieval_dependencies(
+        monkeypatch,
+        bfs_nodes=[
+            {"id": "g1", "display_name": "Node One", "description": "desc1"},
+            {"id": "g2", "display_name": "Node Two", "description": "desc2"},
+            {"id": "g3", "display_name": "Node Three", "description": "desc3"},
+        ],
+        graph_nodes=[
+            ("g1", {"display_name": "Node One", "description": "desc1"}),
+            ("g2", {"display_name": "Node Two", "description": "desc2"}),
+            ("g3", {"display_name": "Node Three", "description": "desc3"}),
+        ],
+        edge_rows=[
+            ("g1", "g2", {"label": "", "description": "late in book one", "source_book": 1, "source_chunk": 57}),
+            ("g2", "g3", {"label": "", "description": "early in book two", "source_book": 2, "source_chunk": 0}),
+            ("g3", "g1", {"label": "", "description": "early in book one", "source_book": 1, "source_chunk": 0}),
+        ],
+        chunk_results=[{"id": "chunk-1", "document": "seed"}],
+        node_results=[{"id": "g1"}],
+        settings={
+            "retrieval_top_k_chunks": 1,
+            "retrieval_entry_top_k_nodes": 1,
+            "retrieval_graph_hops": 2,
+            "retrieval_max_nodes": 20,
+        },
+    )
+
+    engine = retrieval_engine.RetrievalEngine("world-1")
+    result = engine.retrieve("test query")
+    context = result["context_string"]
+
+    first_edge = "[B1:C0] Node Three, early in book one, Node One"
+    second_edge = "[B1:C57] Node One, late in book one, Node Two"
+    third_edge = "[B2:C0] Node Two, early in book two, Node Three"
+
+    assert first_edge in context
+    assert second_edge in context
+    assert third_edge in context
+    assert context.index(first_edge) < context.index(second_edge)
+    assert context.index(second_edge) < context.index(third_edge)
+
+
+def test_retrieve_builds_context_graph_snapshot_from_merged_nodes_and_sorted_edges(monkeypatch):
+    _patch_retrieval_dependencies(
+        monkeypatch,
+        bfs_nodes=[
+            {"id": "entry-1", "display_name": "2B", "description": "Entry desc"},
+            {"id": "g2", "display_name": "9S", "description": "Graph desc one\nGraph desc two"},
+            {"id": "g3", "display_name": "2B", "description": "Graph desc three"},
+        ],
+        graph_nodes=[
+            ("entry-1", {"display_name": "2B", "description": "Entry desc"}),
+            ("g2", {"display_name": "9S", "description": "Graph desc one\nGraph desc two"}),
+            ("g3", {"display_name": "2B", "description": "Graph desc three"}),
+        ],
+        edge_rows=[
+            ("entry-1", "g2", {"label": "", "description": "later edge", "source_book": 1, "source_chunk": 5}),
+            ("g2", "g3", {"label": "", "description": "earlier edge", "source_book": 1, "source_chunk": 0}),
+            ("g2", "g3", {"label": "", "description": "earlier edge", "source_book": 1, "source_chunk": 0}),
+        ],
+        chunk_results=[{"id": "chunk-1", "document": "seed"}],
+        node_results=[{"id": "entry-1"}],
+        settings={
+            "retrieval_top_k_chunks": 1,
+            "retrieval_entry_top_k_nodes": 1,
+            "retrieval_graph_hops": 2,
+            "retrieval_max_nodes": 20,
+        },
+    )
+
+    engine = retrieval_engine.RetrievalEngine("world-1")
+    result = engine.retrieve("test query")
+    context_graph = result["context_graph"]
+
+    assert context_graph["schema_version"] == "context_graph.v1"
+    assert [node["label"] for node in context_graph["nodes"]] == ["2B", "9S"]
+    assert context_graph["nodes"][0]["description"] == "Entry desc Graph desc three"
+    assert context_graph["edges"] == [
+        {
+            "source": "9S",
+            "target": "2B",
+            "description": "earlier edge",
+            "strength": 1,
+            "source_book": 1,
+            "source_chunk": 0,
+        },
+        {
+            "source": "2B",
+            "target": "9S",
+            "description": "later edge",
+            "strength": 1,
+            "source_book": 1,
+            "source_chunk": 5,
+        },
+    ]
+    assert context_graph["nodes"][0]["connection_count"] == 1
+    assert context_graph["nodes"][1]["neighbors"][0]["label"] == "2B"
+
+
 def test_retrieve_entry_nodes_are_excluded_from_graph_nodes_section(monkeypatch):
     _patch_retrieval_dependencies(
         monkeypatch,
@@ -373,7 +503,7 @@ def test_retrieve_blocks_when_node_vectors_are_missing(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         engine.retrieve("test query")
 
-    assert "node embeddings are missing" in str(exc.value)
+    assert "unique graph-node embeddings are missing" in str(exc.value)
 
 
 def test_retrieve_uses_shared_health_summary_instead_of_raw_node_counts(monkeypatch):
@@ -388,7 +518,7 @@ def test_retrieve_uses_shared_health_summary_instead_of_raw_node_counts(monkeypa
         ],
         chunk_results=[{"id": "chunk-1", "document": "seed"}],
         node_results=[{"id": "n1"}],
-        node_vector_count=0,
+        node_vector_count=1,
         settings={
             "retrieval_top_k_chunks": 1,
             "retrieval_entry_top_k_nodes": 1,

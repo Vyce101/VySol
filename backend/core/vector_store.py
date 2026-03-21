@@ -45,6 +45,8 @@ class VectorStore:
     def _infer_collection_kind(self, collection_key: str) -> str:
         if collection_key == "nodes":
             return "node"
+        if collection_key == "unique_nodes":
+            return "unique node"
         if collection_key == "entities":
             return "entity"
         return "chunk"
@@ -388,3 +390,14 @@ class VectorStore:
             return bool(ids)
         except Exception:
             return False
+
+    def delete_document(self, document_id: str) -> None:
+        """Delete a single document by id if it exists."""
+        self.delete_documents([document_id])
+
+    def delete_documents(self, document_ids: list[str]) -> None:
+        """Delete one or more documents by id."""
+        normalized_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
+        if not normalized_ids:
+            return
+        self.collection.delete(ids=normalized_ids)

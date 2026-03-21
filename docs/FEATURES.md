@@ -55,11 +55,35 @@ Context X-Ray lets you open any message and see:
 - All nodes and edges included in context
 - RAG chunks retrieved
 - Chat history sent
+- The exact sent-context graph for newer messages
 
 Each record has two views:
 
 - Byte View: the exact raw content sent, nothing hidden or reformatted
 - Clean View: a readable formatted version of the same data
 
+Newer messages also include a `Context Graph` view.
+
+- It shows the exact node-and-edge graph that was sent in that message's context
+- It uses the same core graph interactions as the main graph view, including pan, zoom, node click, and hover details
+- It is built from the rendered context the model actually saw, including merged display names and deduplicated graph edges
+- Older messages that predate graph capture continue to show the text/X-Ray views without attempting a live reconstruction
+
 X-Ray records are saved per message so you can go back and inspect any point
 in a conversation, not just the most recent one.
+
+## Unique Node Retrieval
+
+Chat retrieval now uses two persistent vector indexes:
+
+- One vector per chunk for RAG chunk retrieval
+- One vector per current graph node for entry-node retrieval
+
+This means `Entry Nodes` now refer to real unique graph entities instead of repeated `(chunk, node)` occurrences.
+
+Important behavior:
+
+- A repeated entity that appears in many chunks no longer crowds out other entry candidates just because it had many chunk-local node records
+- `Re-embed All` rebuilds chunk vectors from the saved chunks and rebuilds unique node vectors from the current saved graph state
+- In `Exact + chooser/combiner`, the unique-node index is rebuilt immediately after the exact pass and then incrementally refreshed after later AI merges
+- Existing worlds can migrate to this retrieval model by running `Re-embed All` once; world recreation is not required

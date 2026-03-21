@@ -2,10 +2,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { Children, cloneElement, isValidElement, useState, useEffect, useRef, use } from "react";
+import { Children, cloneElement, isValidElement, useState, useEffect, useRef, use, useMemo } from "react";
 import { Send, Loader2, ChevronRight, ChevronLeft, AlertTriangle, Trash2, Info, MessageSquare, Plus, MoreVertical, Edit2, RefreshCw, X, Check } from "lucide-react";
 import { ApiError, apiFetch, apiStreamPost } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
+import InteractiveGraphViewer, {
+    GraphViewerNode,
+    GraphViewerLink,
+    GraphViewerNodeDetail,
+} from "@/components/interactive-graph-viewer";
 
 interface Message {
     role: "user" | "model";
@@ -26,6 +31,12 @@ interface ChatThread {
 interface ContextModalData {
     payload: any;
     meta?: any;
+}
+
+interface ContextGraphSnapshot {
+    schema_version: string;
+    nodes: GraphViewerNode[];
+    edges: GraphViewerLink[];
 }
 
 interface ChatDetailResponse {
@@ -105,6 +116,158 @@ function renderHumanContextPayload(payload: any): React.ReactNode {
             {getContextCopyText(payload)}
         </pre>
     );
+}
+
+function getContextGraphSnapshot(meta: any): ContextGraphSnapshot | null {
+    const snapshot = meta?.visualization?.context_graph;
+    if (!snapshot || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) {
+        return null;
+    }
+    return snapshot as ContextGraphSnapshot;
+}
+
+function getSystemInstructionFromPayload(payload: any): string {
+    if (payload && typeof payload.system_instruction === "string") {
+        return payload.system_instruction;
+    }
+    if (payload && Array.isArray(payload.messages)) {
+        const systemMessage = payload.messages.find((message: any) => message?.role === "system");
+        if (systemMessage && typeof systemMessage.content === "string") {
+            return systemMessage.content;
+        }
+    }
+    return "";
+}
+
+function parseContextGraphFromPayload(payload: any): ContextGraphSnapshot | null {
+    const systemInstruction = getSystemInstructionFromPayload(payload);
+    if (!systemInstruction) return null;
+
+    const extractSection = (heading: string, nextHeadings: string[]) => {
+        const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const nextPattern = nextHeadings
+            .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|");
+        const regex = new RegExp(`${escapedHeading}\\n([\\s\\S]*?)(?=\\n(?:${nextPattern})|$)`);
+        const match = systemInstruction.match(regex);
+        return match?.[1]?.trim() || "";
+    };
+
+    const entryNodesSection = extractSection("# Entry Nodes", ["# Graph Nodes", "# Graph Edges", "# RAG Chunks", "# Chat History"]);
+    const graphNodesSection = extractSection("# Graph Nodes", ["# Graph Edges", "# RAG Chunks", "# Chat History"]);
+    const graphEdgesSection = extractSection("# Graph Edges", ["# RAG Chunks", "# Chat History"]);
+
+    const nodeMap = new Map<string, { id: string; label: string; description: string; connection_count: number; neighbors: Array<{ id: string; label: string; description: string }> }>();
+    const ensureNode = (name: string, description = "") => {
+        const trimmedName = name.trim();
+        if (!trimmedName) return null;
+        const existing = nodeMap.get(trimmedName);
+        if (existing) {
+            if (description && !existing.description.includes(description)) {
+                existing.description = existing.description ? `${existing.description} ${description}` : description;
+            }
+            return existing;
+        }
+        const created = {
+            id: trimmedName,
+            label: trimmedName,
+            description: description.trim(),
+            connection_count: 0,
+            neighbors: [] as Array<{ id: string; label: string; description: string }>,
+        };
+        nodeMap.set(trimmedName, created);
+        return created;
+    };
+
+    const parseNodeSection = (section: string) => {
+        for (const line of section.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const separatorIndex = trimmed.indexOf(":");
+            if (separatorIndex === -1) continue;
+            const name = trimmed.slice(0, separatorIndex).trim();
+            const description = trimmed.slice(separatorIndex + 1).trim();
+            ensureNode(name, description);
+        }
+    };
+
+    parseNodeSection(entryNodesSection);
+    parseNodeSection(graphNodesSection);
+
+    const edges: GraphViewerLink[] = [];
+    for (const line of graphEdgesSection.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        const temporalMatch = trimmed.match(/^\[B(\d+):C(\d+)\]\s*(.*)$/);
+        const edgeBody = temporalMatch ? temporalMatch[3].trim() : trimmed;
+        const firstComma = edgeBody.indexOf(",");
+        const lastComma = edgeBody.lastIndexOf(",");
+        if (firstComma === -1 || lastComma === -1 || lastComma <= firstComma) {
+            continue;
+        }
+
+        const sourceName = edgeBody.slice(0, firstComma).trim();
+        const description = edgeBody.slice(firstComma + 1, lastComma).trim();
+        const targetName = edgeBody.slice(lastComma + 1).trim();
+        if (!sourceName || !targetName) continue;
+
+        ensureNode(sourceName);
+        ensureNode(targetName);
+
+        edges.push({
+            source: sourceName,
+            target: targetName,
+            description,
+            strength: 1,
+            source_book: temporalMatch ? Number(temporalMatch[1]) : undefined,
+            source_chunk: temporalMatch ? Number(temporalMatch[2]) : undefined,
+        });
+    }
+
+    if (nodeMap.size === 0 && edges.length === 0) {
+        return null;
+    }
+
+    const neighborMap = new Map<string, Map<string, string>>();
+    for (const edge of edges) {
+        const sourceName = edge.source;
+        const targetName = edge.target;
+        const description = edge.description || "";
+
+        if (!neighborMap.has(sourceName)) neighborMap.set(sourceName, new Map());
+        if (!neighborMap.has(targetName)) neighborMap.set(targetName, new Map());
+
+        if (!neighborMap.get(sourceName)?.has(targetName)) {
+            neighborMap.get(sourceName)?.set(targetName, description);
+        }
+        if (!neighborMap.get(targetName)?.has(sourceName)) {
+            neighborMap.get(targetName)?.set(sourceName, description);
+        }
+    }
+
+    const nodes = Array.from(nodeMap.values())
+        .sort((a, b) => a.label.localeCompare(b.label))
+        .map((node) => {
+            const neighbors = Array.from(neighborMap.get(node.id)?.entries() || [])
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([neighborName, description]) => ({
+                    id: neighborName,
+                    label: neighborName,
+                    description,
+                }));
+            return {
+                ...node,
+                connection_count: neighbors.length,
+                neighbors,
+            };
+        });
+
+    return {
+        schema_version: "context_graph.fallback.v1",
+        nodes,
+        edges,
+    };
 }
 
 const DIALOGUE_PATTERN = /\u201C[^\u201D\n]+\u201D|"[^"\n]+"/g;
@@ -229,7 +392,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [editBubbleHeight, setEditBubbleHeight] = useState(140);
     const [contextModalData, setContextModalData] = useState<ContextModalData | null>(null);
     const [contextMetaOpen, setContextMetaOpen] = useState(false);
-    const [contextViewMode, setContextViewMode] = useState<"rendered" | "json">("rendered");
+    const [contextViewMode, setContextViewMode] = useState<"rendered" | "graph" | "json">("rendered");
 
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const messageBubbleRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -598,6 +761,10 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
     const modalPayload = contextModalData?.payload;
     const modalMeta = contextModalData?.meta;
+    const modalContextGraph = useMemo(
+        () => getContextGraphSnapshot(modalMeta) || parseContextGraphFromPayload(modalPayload),
+        [modalMeta, modalPayload]
+    );
 
     return (
         <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
@@ -982,18 +1149,47 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             {/* Context Modal */}
             {contextModalData && (
                 <div style={{ position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "var(--overlay-strong)" }} onClick={() => { setContextModalData(null); setContextMetaOpen(false); setContextViewMode("rendered"); }}>
-                    <div style={{ width: "100%", maxWidth: 900, maxHeight: "90vh", background: "var(--card)", borderRadius: "var(--radius)", border: "1px solid var(--border)", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }} onClick={e => e.stopPropagation()}>
+                    <div style={{ width: "100%", maxWidth: contextViewMode === "graph" ? 1280 : 900, height: contextViewMode === "graph" ? "90vh" : "auto", maxHeight: "90vh", background: "var(--card)", borderRadius: "var(--radius)", border: "1px solid var(--border)", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }} onClick={e => e.stopPropagation()}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px", borderBottom: "1px solid var(--border)" }}>
                             <h2 style={{ fontSize: 16, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
                                 <Info size={18} style={{ color: "var(--primary)" }} /> Exact Model Context
                             </h2>
-                            <div style={{ display: "flex", gap: 8 }}>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                                 <button onClick={() => setContextViewMode("rendered")} style={{ display: "flex", alignItems: "center", gap: 6, background: contextViewMode === "rendered" ? "var(--primary)" : "var(--background)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, color: contextViewMode === "rendered" ? "white" : "var(--text-primary)" }}>
                                     Rendered
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        if (modalContextGraph) {
+                                            setContextViewMode("graph");
+                                        }
+                                    }}
+                                    disabled={!modalContextGraph}
+                                    title={modalContextGraph ? "View exact sent-context graph" : "Available for new messages only"}
+                                    style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        background: contextViewMode === "graph" ? "var(--primary)" : "var(--background)",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: 6,
+                                        padding: "6px 12px",
+                                        cursor: modalContextGraph ? "pointer" : "not-allowed",
+                                        fontSize: 12,
+                                        color: contextViewMode === "graph" ? "white" : "var(--text-primary)",
+                                        opacity: modalContextGraph ? 1 : 0.55,
+                                    }}
+                                >
+                                    Context Graph
                                 </button>
                                 <button onClick={() => setContextViewMode("json")} style={{ display: "flex", alignItems: "center", gap: 6, background: contextViewMode === "json" ? "var(--primary)" : "var(--background)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, color: contextViewMode === "json" ? "white" : "var(--text-primary)" }}>
                                     Exact JSON
                                 </button>
+                                {!modalContextGraph && (
+                                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                                        Graph view available for new messages only
+                                    </span>
+                                )}
                                 {modalMeta && (
                                     <button onClick={() => setContextMetaOpen((prev) => !prev)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--background)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, color: "var(--text-primary)" }}>
                                         <Info size={14} /> i
@@ -1011,8 +1207,37 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                                 </button>
                             </div>
                         </div>
-                        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-                            {contextViewMode === "json" ? (
+                        <div style={{ flex: 1, minHeight: 0, display: contextViewMode === "graph" ? "flex" : "block", overflow: contextViewMode === "graph" ? "hidden" : "auto", padding: contextViewMode === "graph" ? 0 : 20 }}>
+                            {contextViewMode === "graph" ? (
+                                modalContextGraph ? (
+                                    <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex" }}>
+                                        <InteractiveGraphViewer
+                                            nodes={modalContextGraph.nodes}
+                                            edges={modalContextGraph.edges}
+                                            resolveNodeDetail={(node) => {
+                                                const detailNode = modalContextGraph.nodes.find((candidate) => candidate.id === node.id);
+                                                if (!detailNode) return null;
+                                                return {
+                                                    id: detailNode.id,
+                                                    display_name: detailNode.label,
+                                                    description: detailNode.description,
+                                                    connection_count: detailNode.connection_count,
+                                                    claims: detailNode.claims || [],
+                                                    neighbors: detailNode.neighbors || [],
+                                                } as GraphViewerNodeDetail;
+                                            }}
+                                            emptyStateTitle="No context graph captured."
+                                            emptyStateSubtitle="This message did not store a context-graph snapshot."
+                                            panelPlaceholderTitle="Click a context node to inspect"
+                                            panelPlaceholderSubtitle="This graph only shows what was sent in this message's context"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div style={{ padding: 20, color: "var(--text-muted)", fontSize: 13 }}>
+                                        Context graph available for new messages only.
+                                    </div>
+                                )
+                            ) : contextViewMode === "json" ? (
                                 <pre style={{ margin: 0, fontFamily: "monospace", fontSize: 13, color: "var(--text-primary)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                                     {getContextCopyText(modalPayload)}
                                 </pre>

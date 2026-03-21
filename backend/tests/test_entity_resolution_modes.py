@@ -41,8 +41,15 @@ def test_exact_only_mode_stops_after_normalized_match_pass(tmp_path, monkeypatch
     async def _fail_combine(*args, **kwargs):
         raise AssertionError("Combiner should not run in exact-only mode.")
 
+    rebuild_calls: list[list[str]] = []
+
+    def _fake_rebuild_unique_node_index(_world_id, active_store):
+        rebuild_calls.append(sorted(active_store.graph.nodes()))
+        return object()
+
     monkeypatch.setattr(engine, "_choose_matches", _fail_choose)
     monkeypatch.setattr(engine, "_combine_entities", _fail_combine)
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
 
     asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
 
@@ -56,6 +63,7 @@ def test_exact_only_mode_stops_after_normalized_match_pass(tmp_path, monkeypatch
     assert status["unresolved_entities"] == 1
     assert status["auto_resolved_pairs"] == 1
     assert reloaded.get_node_count() == 2
+    assert rebuild_calls == [["node-a", "node-c"]]
     assert all(event.get("phase") not in {"candidate_search", "chooser", "combiner"} for event in events)
 
 
@@ -67,8 +75,20 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
     store.save()
 
-    def _fake_query_candidates(_world_id, active_store, anchor_id, remaining_ids, _top_k):
+    rebuild_calls: list[list[str]] = []
+    refreshed_merges: list[tuple[str, list[str]]] = []
+    fake_unique_node_store = object()
+
+    def _fake_rebuild_unique_node_index(_world_id, active_store):
+        rebuild_calls.append(sorted(active_store.graph.nodes()))
+        return fake_unique_node_store
+
+    def _fake_refresh_unique_node_index_after_merge(_vector_store, _active_store, winner_id, loser_ids):
+        refreshed_merges.append((winner_id, list(loser_ids)))
+
+    def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k):
         assert active_store.world_id == world_id
+        assert unique_node_vector_store is fake_unique_node_store
         assert anchor_id == "node-a"
         assert "node-b" in remaining_ids
         candidate = engine._node_snapshot(active_store, "node-b")
@@ -88,6 +108,8 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "_query_candidates", _fake_query_candidates)
     monkeypatch.setattr(engine, "_choose_matches", _fake_choose)
     monkeypatch.setattr(engine, "_combine_entities", _fake_combine)
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+    monkeypatch.setattr(engine, "_refresh_unique_node_index_after_merge", _fake_refresh_unique_node_index_after_merge)
 
     asyncio.run(engine.start_entity_resolution(world_id, 25, False, True, "exact_then_ai"))
 
@@ -100,8 +122,53 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     assert status["resolved_entities"] == 3
     assert status["unresolved_entities"] == 0
     assert reloaded.get_node_count() == 2
+    assert rebuild_calls == [["node-a", "node-b", "node-c"]]
+    assert refreshed_merges == [("node-a", ["node-b"])]
     assert any(event.get("phase") == "chooser" for event in events)
     assert any(event.get("phase") == "combiner" for event in events)
+
+
+def test_exact_then_ai_rebuilds_unique_index_after_exact_pass_before_candidate_search(tmp_path, monkeypatch):
+    world_id = "world-exact-pass-index-refresh"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-c", display_name="Alicia", description="Possible duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-d", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    rebuild_calls: list[list[str]] = []
+    fake_unique_node_store = object()
+
+    def _fake_rebuild_unique_node_index(_world_id, active_store):
+        rebuild_calls.append(sorted(active_store.graph.nodes()))
+        return fake_unique_node_store
+
+    def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k):
+        assert unique_node_vector_store is fake_unique_node_store
+        assert sorted(active_store.graph.nodes()) == ["node-a", "node-c", "node-d"]
+        assert anchor_id == "node-c"
+        return []
+
+    async def _fail_choose(*args, **kwargs):
+        raise AssertionError("Chooser should not run when no candidates are returned.")
+
+    async def _fail_combine(*args, **kwargs):
+        raise AssertionError("Combiner should not run when no candidates are returned.")
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+    monkeypatch.setattr(engine, "_query_candidates", _fake_query_candidates)
+    monkeypatch.setattr(engine, "_choose_matches", _fail_choose)
+    monkeypatch.setattr(engine, "_combine_entities", _fail_combine)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 25, False, True, "exact_then_ai"))
+
+    status = engine.get_resolution_status(world_id)
+    reloaded = graph_store.GraphStore(world_id)
+
+    assert status["status"] == "complete"
+    assert reloaded.get_node_count() == 3
+    assert rebuild_calls == [["node-a", "node-c", "node-d"]]
 
 
 def test_legacy_metadata_without_resolution_mode_maps_safely(tmp_path, monkeypatch):

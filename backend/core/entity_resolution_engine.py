@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from .agents import _call_agent
 from .config import load_settings, world_meta_path
+from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
 from .key_manager import get_key_manager
 from .vector_store import VectorStore
@@ -26,6 +27,7 @@ _states: dict[str, dict[str, Any]] = {}
 _state_locks: dict[str, threading.Lock] = {}
 _active_runs: set[str] = set()
 _STALE_RUN_GRACE_SECONDS = 15
+_UNIQUE_NODE_REBUILD_BATCH_SIZE = 32
 
 EntityResolutionMode = Literal["exact_only", "exact_then_ai", "ai_only"]
 
@@ -266,11 +268,7 @@ def _node_snapshot(graph_store: GraphStore, node_id: str) -> dict[str, Any] | No
 
 
 def _entity_document(node: dict[str, Any]) -> str:
-    display_name = str(node.get("display_name", "")).strip()
-    description = str(node.get("description", "")).strip()
-    if display_name and description:
-        return f"{display_name}\n\n{description}"
-    return display_name or description
+    return build_unique_node_document(node)
 
 
 def _pick_fallback_name(nodes: list[dict[str, Any]]) -> str:
@@ -299,37 +297,84 @@ def _get_embedding_api_key() -> str:
     return api_key
 
 
-def _rebuild_entity_index(
-    world_id: str,
-    graph_store: GraphStore,
-    remaining_ids: list[str],
-) -> VectorStore:
-    vector_store = VectorStore(world_id, collection_suffix="entities")
-    vector_store.drop_collection()
+def _build_unique_node_metadata(node: dict[str, Any]) -> dict[str, Any]:
+    node_id = str(node.get("node_id", "")).strip()
+    return {
+        "node_id": node_id,
+        "display_name": str(node.get("display_name", "")).strip(),
+        "normalized_name": str(node.get("normalized_name", "")).strip(),
+    }
 
-    if not remaining_ids:
-        return vector_store
+
+def _get_unique_node_vector_store(world_id: str) -> VectorStore:
+    return VectorStore(world_id, collection_suffix="unique_nodes")
+
+
+def _upsert_unique_node_snapshots(
+    unique_node_vector_store: VectorStore,
+    node_snapshots: list[dict[str, Any]],
+) -> int:
+    normalized_nodes: list[dict[str, Any]] = []
+    seen_node_ids: set[str] = set()
+    for node in node_snapshots:
+        node_id = str(node.get("node_id", "")).strip()
+        if not node_id or node_id in seen_node_ids:
+            continue
+        seen_node_ids.add(node_id)
+        normalized_nodes.append(node)
+
+    if not normalized_nodes:
+        return 0
 
     api_key = _get_embedding_api_key()
-    for node_id in remaining_ids:
-        node = _node_snapshot(graph_store, node_id)
-        if not node:
-            continue
-        vector_store.upsert_document(
-            node_id,
-            _entity_document(node),
-            {
-                "display_name": node["display_name"],
-                "normalized_name": node["normalized_name"],
-            },
-            api_key,
+    total_written = 0
+    for start in range(0, len(normalized_nodes), _UNIQUE_NODE_REBUILD_BATCH_SIZE):
+        batch = normalized_nodes[start:start + _UNIQUE_NODE_REBUILD_BATCH_SIZE]
+        texts = [_entity_document(node) for node in batch]
+        embeddings = unique_node_vector_store.embed_texts(texts, api_key)
+        unique_node_vector_store.upsert_documents_embeddings(
+            document_ids=[str(node["node_id"]) for node in batch],
+            texts=texts,
+            metadatas=[_build_unique_node_metadata(node) for node in batch],
+            embeddings=embeddings,
         )
-    return vector_store
+        total_written += len(batch)
+    return total_written
+
+
+def _rebuild_unique_node_index(
+    world_id: str,
+    graph_store: GraphStore,
+) -> VectorStore:
+    unique_node_vector_store = _get_unique_node_vector_store(world_id)
+    unique_node_vector_store.drop_collection()
+
+    node_snapshots = [
+        node
+        for node in (_node_snapshot(graph_store, node_id) for node_id in sorted(graph_store.graph.nodes()))
+        if node
+    ]
+    _upsert_unique_node_snapshots(unique_node_vector_store, node_snapshots)
+    return unique_node_vector_store
+
+
+def _refresh_unique_node_index_after_merge(
+    unique_node_vector_store: VectorStore,
+    graph_store: GraphStore,
+    winner_id: str,
+    loser_ids: list[str],
+) -> None:
+    unique_node_vector_store.delete_documents(loser_ids)
+    winner = _node_snapshot(graph_store, winner_id)
+    if winner:
+        _upsert_unique_node_snapshots(unique_node_vector_store, [winner])
+    else:
+        unique_node_vector_store.delete_document(winner_id)
 
 
 def _query_candidates(
-    world_id: str,
     graph_store: GraphStore,
+    unique_node_vector_store: VectorStore,
     anchor_id: str,
     remaining_ids: list[str],
     top_k: int,
@@ -338,17 +383,25 @@ def _query_candidates(
     if not anchor:
         return []
 
-    vector_store = _rebuild_entity_index(world_id, graph_store, remaining_ids)
-    if vector_store.count() <= 1:
+    collection_count = unique_node_vector_store.count()
+    if collection_count <= 1:
         return []
 
     api_key = _get_embedding_api_key()
-    raw_results = vector_store.query(_entity_document(anchor), api_key=api_key, n_results=min(len(remaining_ids), top_k + 1))
+    remaining_set = set(remaining_ids)
+    raw_results = unique_node_vector_store.query(
+        _entity_document(anchor),
+        api_key=api_key,
+        n_results=collection_count,
+    )
 
     candidates: list[dict[str, Any]] = []
     for result in raw_results:
+        metadata = result.get("metadata", {}) or {}
         node_id = result.get("id")
-        if not isinstance(node_id, str) or node_id == anchor_id or node_id not in remaining_ids:
+        if isinstance(metadata, dict):
+            node_id = metadata.get("node_id") or node_id
+        if not isinstance(node_id, str) or node_id == anchor_id or node_id not in remaining_set:
             continue
         node = _node_snapshot(graph_store, node_id)
         if not node:
@@ -576,6 +629,7 @@ async def start_entity_resolution(
         remaining_ids = list(initial_ids)
         processed_count = 0
         auto_resolved_pairs = 0
+        unique_node_vector_store: VectorStore | None = None
 
         if include_exact_pass:
             state = _set_state(world_id, phase="exact_match_pass", message="Running exact match pass after normalization.")
@@ -622,6 +676,18 @@ async def start_entity_resolution(
             if pending_exact_saves:
                 graph_store.save()
 
+            state = _set_state(
+                world_id,
+                phase="index_refresh",
+                message="Refreshing unique node index after exact match pass.",
+                resolved_entities=processed_count,
+                unresolved_entities=len(remaining_ids),
+                auto_resolved_pairs=auto_resolved_pairs,
+            )
+            _update_meta_from_state(world_id, state, graph_store)
+            push_sse_event(world_id, {"event": "progress", **state})
+            unique_node_vector_store = _rebuild_unique_node_index(world_id, graph_store)
+
         if not use_ai_pass:
             state = _set_state(
                 world_id,
@@ -638,6 +704,19 @@ async def start_entity_resolution(
             _update_meta_from_state(world_id, state, graph_store)
             push_sse_event(world_id, {"event": "complete", **state})
             return
+
+        if unique_node_vector_store is None:
+            state = _set_state(
+                world_id,
+                phase="index_refresh",
+                message="Preparing unique node index for AI candidate search.",
+                resolved_entities=processed_count,
+                unresolved_entities=len(remaining_ids),
+                auto_resolved_pairs=auto_resolved_pairs,
+            )
+            _update_meta_from_state(world_id, state, graph_store)
+            push_sse_event(world_id, {"event": "progress", **state})
+            unique_node_vector_store = _rebuild_unique_node_index(world_id, graph_store)
 
         while remaining_ids:
             _ensure_not_aborted(world_id, abort_event)
@@ -669,7 +748,7 @@ async def start_entity_resolution(
             state = _set_state(
                 world_id,
                 phase="candidate_search",
-                message=f"Building candidate index for {anchor['display_name']}.",
+                message=f"Searching candidate entities for {anchor['display_name']}.",
                 current_anchor=anchor,
                 current_candidates=[],
                 resolved_entities=processed_count,
@@ -679,7 +758,7 @@ async def start_entity_resolution(
             _update_meta_from_state(world_id, state, graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
 
-            candidates = _query_candidates(world_id, graph_store, anchor_id, remaining_ids, top_k)
+            candidates = _query_candidates(graph_store, unique_node_vector_store, anchor_id, remaining_ids, top_k)
             state = _set_state(
                 world_id,
                 phase="candidate_search",
@@ -712,6 +791,7 @@ async def start_entity_resolution(
                 display_name, description = await _combine_entities(nodes)
                 _merge_group(graph_store, anchor_id, chosen_ids, display_name, description)
                 graph_store.save()
+                _refresh_unique_node_index_after_merge(unique_node_vector_store, graph_store, anchor_id, chosen_ids)
 
                 processed_count += len(group_ids)
                 remaining_ids = [node_id for node_id in remaining_ids if node_id not in group_ids]

@@ -73,7 +73,6 @@ def _build_node_vector_records(graph_chunk_ids: list[str], vector_records: list[
             {
                 "id": node_id,
                 "metadata": {
-                    "parent_chunk_id": chunk_id,
                     "node_id": node_id,
                 },
             }
@@ -93,7 +92,7 @@ def _patch_audit_dependencies(monkeypatch, meta, *, graph_chunk_ids: list[str], 
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
             world_id,
-            node_vector_records if collection_suffix == "nodes" else vector_records,
+            node_vector_records if collection_suffix == "unique_nodes" else vector_records,
             collection_suffix=collection_suffix,
         ),
     )
@@ -218,7 +217,7 @@ def test_audit_clears_out_of_range_failures_when_current_coverage_is_complete(mo
     assert source["stage_failures"] == []
 
 
-def test_audit_marks_orphan_graph_nodes_as_blocking_partial_failure(monkeypatch):
+def test_audit_reports_orphan_graph_nodes_without_blocking_full_coverage(monkeypatch):
     meta = {
         "world_id": "world-1",
         "ingestion_status": "complete",
@@ -289,8 +288,12 @@ def test_audit_marks_orphan_graph_nodes_as_blocking_partial_failure(monkeypatch)
     ]
     node_records = [
         {
-            "id": "chunk_world-1_source-a_0::node::n0",
-            "metadata": {"parent_chunk_id": "chunk_world-1_source-a_0", "node_id": "n0"},
+            "id": "n0",
+            "metadata": {"node_id": "n0"},
+        },
+        {
+            "id": "orphan",
+            "metadata": {"node_id": "orphan"},
         },
     ]
 
@@ -302,16 +305,16 @@ def test_audit_marks_orphan_graph_nodes_as_blocking_partial_failure(monkeypatch)
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: AuditVectorStore(
             world_id,
-            node_records if collection_suffix == "nodes" else chunk_records,
+            node_records if collection_suffix == "unique_nodes" else chunk_records,
         ),
     )
 
     summary = ingestion_engine.audit_ingestion_integrity("world-1", synthesize_failures=True, persist=True)
 
     assert summary["world"]["orphan_graph_nodes"] == 1
-    assert summary["world"]["failed_records"] == 1
-    assert summary["blocking_issues"][0]["code"] == "graph_nodes_missing_chunk_provenance"
-    assert saved["meta"]["ingestion_status"] == "partial_failure"
+    assert summary["world"]["failed_records"] == 0
+    assert summary["blocking_issues"] == []
+    assert saved["meta"]["ingestion_status"] == "complete"
 
 
 def test_build_chunk_plan_respects_stage_retry_modes():
@@ -471,7 +474,7 @@ def test_recover_stale_ingestion_marks_partial_failure_when_embeddings_are_missi
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
             world_id,
-            node_records if collection_suffix == "nodes" else chunk_records,
+            node_records if collection_suffix == "unique_nodes" else chunk_records,
             collection_suffix=collection_suffix,
         ),
     )
@@ -522,7 +525,7 @@ def test_recover_stale_ingestion_marks_complete_when_coverage_is_full(monkeypatc
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
             world_id,
-            node_records if collection_suffix == "nodes" else chunk_records,
+            node_records if collection_suffix == "unique_nodes" else chunk_records,
             collection_suffix=collection_suffix,
         ),
     )
@@ -567,7 +570,7 @@ def test_checkpoint_recovers_stale_in_progress_world_into_resumable_state(monkey
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
             world_id,
-            node_records if collection_suffix == "nodes" else chunk_records,
+            node_records if collection_suffix == "unique_nodes" else chunk_records,
             collection_suffix=collection_suffix,
         ),
     )
@@ -681,7 +684,7 @@ def test_abort_ingestion_persists_terminal_state_for_stale_run(monkeypatch):
         "VectorStore",
         lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
             world_id,
-            node_records if collection_suffix == "nodes" else chunk_records,
+            node_records if collection_suffix == "unique_nodes" else chunk_records,
             collection_suffix=collection_suffix,
         ),
     )
@@ -787,7 +790,7 @@ def test_stage_scheduler_abort_wakes_waiter_during_cooldown():
     asyncio.run(scenario())
 
 
-def test_node_vector_upsert_stops_between_batches_when_aborted():
+def test_unique_node_vector_upsert_stops_between_batches_when_aborted():
     async def scenario():
         store = RecordingNodeVectorStore()
         node_records = [
@@ -812,15 +815,10 @@ def test_node_vector_upsert_stops_between_batches_when_aborted():
         store.upsert_documents_embeddings = mark_abort_after_first_batch  # type: ignore[method-assign]
 
         with pytest.raises(asyncio.CancelledError):
-            await ingestion_engine._upsert_node_vectors_for_chunk(
-                world_id="world-1",
-                node_vector_store=store,  # type: ignore[arg-type]
+            await ingestion_engine._upsert_unique_node_vectors(
+                unique_node_vector_store=store,  # type: ignore[arg-type]
                 node_records=node_records,
                 api_key="test-key",
-                chunk_id="chunk-1",
-                source_id="source-a",
-                book_number=1,
-                chunk_index=0,
                 embeddings=embeddings,
                 batch_size=3,
                 abort_check=abort_check,
@@ -831,27 +829,22 @@ def test_node_vector_upsert_stops_between_batches_when_aborted():
     asyncio.run(scenario())
 
 
-def test_node_vector_upsert_uses_chunk_scoped_document_ids():
+def test_unique_node_vector_upsert_uses_graph_node_document_ids():
     async def scenario():
         store = RecordingNodeVectorStore()
-        await ingestion_engine._upsert_node_vectors_for_chunk(
-            world_id="world-1",
-            node_vector_store=store,  # type: ignore[arg-type]
+        await ingestion_engine._upsert_unique_node_vectors(
+            unique_node_vector_store=store,  # type: ignore[arg-type]
             node_records=[
                 {"id": "node-a", "display_name": "Node A", "normalized_id": "node-a"},
                 {"id": "node-b", "display_name": "Node B", "normalized_id": "node-b"},
             ],
             api_key="test-key",
-            chunk_id="chunk_world-1_source-a_0",
-            source_id="source-a",
-            book_number=1,
-            chunk_index=0,
             embeddings=[[0.1], [0.2]],
         )
 
         assert store.upsert_document_ids == [
-            "chunk_world-1_source-a_0::node::node-a",
-            "chunk_world-1_source-a_0::node::node-b",
+            "node-a",
+            "node-b",
         ]
 
     asyncio.run(scenario())

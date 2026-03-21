@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from core import config, ingestion_engine
+from core import config, entity_text, ingestion_engine
 from routers import ingestion as ingestion_router
 
 
@@ -128,8 +128,8 @@ def test_reembed_endpoint_rejects_when_extraction_is_incomplete(monkeypatch):
     assert "Cannot re-embed while extraction coverage is incomplete" in exc.value.detail
 
 
-def test_node_embedding_text_includes_claims_deterministically():
-    text = ingestion_engine._node_embedding_text(
+def test_unique_node_document_uses_display_name_and_description_only():
+    text = entity_text.build_unique_node_document(
         {
             "id": "node-1",
             "display_name": "2B",
@@ -142,14 +142,10 @@ def test_node_embedding_text_includes_claims_deterministically():
         }
     )
 
-    assert "Name: 2B" in text
-    assert "Description: YoRHa combat android" in text
-    assert "- Carries a sword." in text
-    assert text.count("Carries a sword.") == 1
-    assert "- Travels with 9S." in text
+    assert text == "2B\n\nYoRHa combat android"
 
 
-def test_upsert_node_vectors_for_chunk_batches_node_embeddings():
+def test_upsert_unique_node_vectors_batches_node_embeddings():
     class DummyNodeVectorStore:
         def __init__(self):
             self.embed_calls: list[dict] = []
@@ -188,15 +184,10 @@ def test_upsert_node_vectors_for_chunk_batches_node_embeddings():
     ]
 
     embedded_count = asyncio.run(
-        ingestion_engine._upsert_node_vectors_for_chunk(
-            world_id="world-1",
-            node_vector_store=node_store,  # type: ignore[arg-type]
+        ingestion_engine._upsert_unique_node_vectors(
+            unique_node_vector_store=node_store,  # type: ignore[arg-type]
             node_records=records,
             api_key="test-key",
-            chunk_id="chunk_world-1_source-a_0",
-            source_id="source-a",
-            book_number=1,
-            chunk_index=0,
         )
     )
 
@@ -204,8 +195,8 @@ def test_upsert_node_vectors_for_chunk_batches_node_embeddings():
     assert len(node_store.embed_calls) == 1
     assert len(node_store.upsert_calls) == 1
     assert node_store.upsert_calls[0]["document_ids"] == [
-        "chunk_world-1_source-a_0::node::node-a",
-        "chunk_world-1_source-a_0::node::node-b",
+        "node-a",
+        "node-b",
     ]
-    assert "Name: 2B" in node_store.upsert_calls[0]["texts"][0]
-    assert "Name: 9S" in node_store.upsert_calls[0]["texts"][1]
+    assert node_store.upsert_calls[0]["texts"][0] == "2B\n\nYoRHa combat android"
+    assert node_store.upsert_calls[0]["texts"][1] == "9S\n\nYoRHa scanner android"

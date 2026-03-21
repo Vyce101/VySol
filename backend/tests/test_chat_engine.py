@@ -46,6 +46,11 @@ def test_stream_chat_gemini_emits_exact_context_payload_and_separate_meta(monkey
                     "# RAG Chunks\nChunk text"
                 ),
                 "graph_nodes": [{"id": "a", "display_name": "A", "entity_type": "Unknown"}],
+                "context_graph": {
+                    "schema_version": "context_graph.v1",
+                    "nodes": [{"id": "A", "label": "A", "description": "entry desc", "connection_count": 1, "neighbors": []}],
+                    "edges": [{"source": "A", "target": "B", "description": "knows", "strength": 1, "source_book": 1, "source_chunk": 2}],
+                },
                 "retrieval_meta": {
                     "requested_entry_nodes": 5,
                     "selected_entry_nodes": 3,
@@ -126,7 +131,9 @@ def test_stream_chat_gemini_emits_exact_context_payload_and_separate_meta(monkey
     assert done["context_meta"]["provider"] == "gemini"
     assert done["context_meta"]["model"] == "gemini-test-model"
     assert done["context_meta"]["retrieval"]["requested_entry_nodes"] == 5
+    assert done["context_meta"]["visualization"]["context_graph"]["schema_version"] == "context_graph.v1"
     assert "context_meta" not in done["context_payload"]
+    assert "visualization" not in done["context_payload"]
     assert "captured_at" in done["context_meta"]
 
 
@@ -139,6 +146,11 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
             return {
                 "context_string": "# Entry Nodes\nA: entry desc\n\n# Graph Nodes\nA: node desc",
                 "graph_nodes": [{"id": "a", "display_name": "A", "entity_type": "Unknown"}],
+                "context_graph": {
+                    "schema_version": "context_graph.v1",
+                    "nodes": [{"id": "A", "label": "A", "description": "entry desc", "connection_count": 0, "neighbors": []}],
+                    "edges": [],
+                },
                 "retrieval_meta": {
                     "requested_entry_nodes": 7,
                     "selected_entry_nodes": 4,
@@ -187,5 +199,7 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
     assert done["context_meta"]["provider"] == "intenserp"
     assert done["context_meta"]["model"] == "glm-chat-test"
     assert done["context_meta"]["retrieval"]["requested_entry_nodes"] == 7
+    assert done["context_meta"]["visualization"]["context_graph"]["schema_version"] == "context_graph.v1"
     assert "context_meta" not in done["context_payload"]
+    assert "visualization" not in done["context_payload"]
     assert "captured_at" in done["context_meta"]

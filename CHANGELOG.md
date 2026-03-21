@@ -13,6 +13,7 @@ All notable user-visible changes to this project will be documented in this file
 - Added entity resolution run modes, including `Exact only` and `Exact + chooser/combiner`.
 - Added per-key Gemini API key toggles and a dedicated repo-local pytest temp folder.
 - Added the VySol browser/header branding icon using the square logo asset.
+- Added a per-message `Context Graph` view in Context X-Ray for newer chat messages.
 
 ### Changed
 
@@ -21,6 +22,7 @@ All notable user-visible changes to this project will be documented in this file
 - Documented entity resolution run modes.
 - Documented API key toggle behavior in the walkthrough and Google AI Studio key guide.
 - Renamed the default embedding model to `gemini-embedding-2-preview`.
+- Changed retrieval entry-node indexing to use one persistent vector per current graph node, with `Re-embed All` rebuilding from the current saved graph state.
 
 ### Fixed
 
@@ -29,6 +31,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed Gemini chat payload assembly for the Gemini SDK request shape.
 - Fixed graph edge hover details to show source and target names plus provenance in the graph viewer.
 - Fixed graph viewer startup layout so first-open graphs spread correctly and auto-fit no longer hijacks manual navigation.
+- Fixed graph node hitboxes, shared graph-viewer modal sizing, context-graph interaction regressions, and uniform edge hover behavior across the graph tab and Context Graph.
 
 ### Removed
 

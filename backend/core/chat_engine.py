@@ -69,6 +69,7 @@ def stream_chat(
         context_string = retrieval_result["context_string"]
         nodes_used = retrieval_result.get("graph_nodes", [])
         retrieval_meta = retrieval_result.get("retrieval_meta", {})
+        context_graph = retrieval_result.get("context_graph")
 
         system_prompt = load_prompt("chat_system_prompt")
         full_system = f"{system_prompt}\n\n{context_string}" if context_string else system_prompt
@@ -116,6 +117,10 @@ def stream_chat(
         }
         if retrieval_meta:
             gemini_context_meta["retrieval"] = retrieval_meta
+        if context_graph:
+            gemini_context_meta["visualization"] = {
+                "context_graph": context_graph,
+            }
         intenserp_context_payload = {
             "messages": messages_payload,
         }
@@ -128,6 +133,10 @@ def stream_chat(
         }
         if retrieval_meta:
             intenserp_context_meta["retrieval"] = retrieval_meta
+        if context_graph:
+            intenserp_context_meta["visualization"] = {
+                "context_graph": context_graph,
+            }
 
         if chat_provider == "intenserp":
             for chunk in stream_intenserp_chat(
