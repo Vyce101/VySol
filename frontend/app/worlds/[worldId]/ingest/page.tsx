@@ -51,6 +51,7 @@ interface Checkpoint {
     reason: string | null;
     stage_counters?: StageCounters;
     failures?: StageFailure[];
+    safety_review_summary?: SafetyReviewSummary;
     active_ingestion_run?: boolean;
     progress_phase?: "extracting" | "embedding" | "aborting" | "idle";
     completed_chunks_current_phase?: number;
@@ -82,6 +83,7 @@ interface WorldResponse {
     ingest_settings?: IngestSettings;
     active_ingestion_run?: boolean;
     reembed_eligibility?: ReembedEligibility;
+    safety_review_summary?: SafetyReviewSummary;
 }
 
 interface SettingsResponse {
@@ -104,6 +106,8 @@ interface LogEntry {
     chunk_vector_count?: number;
     node_vector_count?: number;
     safety_reason?: string;
+    review_id?: string;
+    safety_review_summary?: SafetyReviewSummary;
     chunk_text?: string;
     error_type?: string;
     message?: string;
@@ -122,6 +126,63 @@ interface ProgressState {
     phase: "extracting" | "embedding" | "aborting" | "idle";
     agent: string;
     operation: string;
+}
+
+interface SafetyReviewSummary {
+    total_reviews: number;
+    unresolved_reviews: number;
+    resolved_reviews: number;
+    active_override_reviews: number;
+    blocked_reviews: number;
+    draft_reviews: number;
+    testing_reviews: number;
+    blocks_rebuild: boolean;
+    blocking_message?: string | null;
+}
+
+interface SafetyReviewItem {
+    review_id: string;
+    world_id?: string;
+    source_id: string;
+    book_number: number;
+    chunk_index: number;
+    chunk_id: string;
+    status: "blocked" | "draft" | "testing" | "resolved";
+    original_error_kind?: string;
+    original_safety_reason: string;
+    original_raw_text: string;
+    original_prefixed_text: string;
+    draft_raw_text: string;
+    last_test_outcome: "not_tested" | "still_safety_blocked" | "transient_failure" | "other_failure" | "passed";
+    last_test_error_kind?: string | null;
+    last_test_error_message?: string | null;
+    last_tested_at?: string | null;
+    test_attempt_count?: number;
+    active_override_raw_text: string;
+    review_origin?: string;
+    display_name: string;
+    source_status?: string;
+    prefix_label: string;
+}
+
+interface SafetyReviewResponse {
+    reviews: SafetyReviewItem[];
+    summary: SafetyReviewSummary;
+}
+
+interface RetryResponse {
+    status: string;
+    world_id: string;
+    retry_stage: "extraction" | "embedding" | "all";
+    source_id?: string | null;
+    skipped_safety_review_chunks?: number;
+    retry_notice?: string | null;
+}
+
+interface ManualRescueResponse {
+    reviews: SafetyReviewItem[];
+    safety_review_summary: SafetyReviewSummary;
+    checkpoint: Checkpoint;
 }
 
 function normalizeGleanAmount(value: unknown): number {
@@ -165,9 +226,45 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [gleanAmountDraft, setGleanAmountDraft] = useState("1");
     const [prompts, setPrompts] = useState<Record<string, { value: string; source: string }>>({});
     const [blockedChunkData, setBlockedChunkData] = useState<{ text: string; reason: string } | null>(null);
+    const [safetyReviews, setSafetyReviews] = useState<SafetyReviewItem[]>([]);
+    const [safetyReviewSummary, setSafetyReviewSummary] = useState<SafetyReviewSummary | null>(null);
+    const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
+    const [savingReviewIds, setSavingReviewIds] = useState<Record<string, boolean>>({});
+    const [testingReviewIds, setTestingReviewIds] = useState<Record<string, boolean>>({});
+    const [discardingReviewIds, setDiscardingReviewIds] = useState<Record<string, boolean>>({});
+    const [retryNotice, setRetryNotice] = useState<string | null>(null);
+    const [pendingFocusReviewId, setPendingFocusReviewId] = useState<string | null>(null);
+    const [isRescuingCollapsedFailures, setIsRescuingCollapsedFailures] = useState(false);
 
     const resetProgress = () => setProgress(initialProgress);
     const isTerminalIngestionStatus = (status?: string | null) => Boolean(status && status !== "in_progress");
+    const syncSafetyReviewState = (reviews: SafetyReviewItem[], summary?: SafetyReviewSummary | null) => {
+        setSafetyReviews(reviews);
+        setSafetyReviewSummary(summary ?? null);
+        setReviewDrafts((prev) => {
+            const next: Record<string, string> = {};
+            for (const review of reviews) {
+                next[review.review_id] = prev[review.review_id]
+                    ?? review.draft_raw_text
+                    ?? review.active_override_raw_text
+                    ?? review.original_raw_text;
+            }
+            return next;
+        });
+    };
+
+    const focusSafetyReview = (reviewId: string) => {
+        const card = document.getElementById(`safety-review-${reviewId}`);
+        const textarea = document.getElementById(`safety-review-textarea-${reviewId}`) as HTMLTextAreaElement | null;
+        card?.scrollIntoView({ behavior: "smooth", block: "center" });
+        window.setTimeout(() => {
+            textarea?.focus();
+            if (textarea) {
+                const end = textarea.value.length;
+                textarea.setSelectionRange(end, end);
+            }
+        }, 120);
+    };
 
     const syncProgressFromPayload = (payload?: Partial<Checkpoint & LogEntry>) => {
         if (!payload) return;
@@ -205,6 +302,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
             setReembedEligibility(data.reembed_eligibility ?? null);
+            if (data.safety_review_summary) {
+                setSafetyReviewSummary(data.safety_review_summary);
+            }
             if (data.ingest_settings) {
                 setSavedIngestSettings(data.ingest_settings);
                 setChunkSize(data.ingest_settings.chunk_size_chars);
@@ -237,6 +337,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             setCheckpoint(data);
             syncProgressFromPayload(data);
             setIsAborting(data.progress_phase === "aborting");
+            if (data.safety_review_summary) {
+                setSafetyReviewSummary(data.safety_review_summary);
+            }
+        } catch { /* ignore */ }
+    }
+
+    async function loadSafetyReviews() {
+        try {
+            const data = await apiFetch<SafetyReviewResponse>(`/worlds/${worldId}/ingest/safety-reviews`);
+            syncSafetyReviewState(data.reviews, data.summary);
         } catch { /* ignore */ }
     }
 
@@ -278,9 +388,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 const entry = data as LogEntry;
                 setLogEntries((prev) => [...prev, entry]);
                 syncProgressFromPayload(entry);
+                if (entry.safety_review_summary) {
+                    setSafetyReviewSummary(entry.safety_review_summary);
+                }
                 if (entry.event === "aborting" || entry.progress_phase === "aborting") {
                     setIsAborting(true);
                     setIngesting(true);
+                }
+                if (entry.error_type === "safety_block") {
+                    void loadSafetyReviews();
+                    void loadCheckpoint();
                 }
                 const terminalStatus = entry.ingestion_status || entry.status;
                 const isTerminalEvent = (
@@ -295,6 +412,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     void loadWorld();
                     void loadSources();
                     void loadCheckpoint();
+                    void loadSafetyReviews();
                 }
             },
             () => {
@@ -304,6 +422,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 void loadWorld();
                 void loadSources();
                 void loadCheckpoint();
+                void loadSafetyReviews();
             },
             (err) => {
                 esRef.current?.close();
@@ -312,6 +431,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 void loadWorld();
                 void loadSources();
                 void loadCheckpoint();
+                void loadSafetyReviews();
                 setLogEntries((prev) => [...prev, { event: "error", message: err.message }]);
             }
         );
@@ -325,6 +445,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 loadWorld(),
                 loadSources(),
                 loadCheckpoint(),
+                loadSafetyReviews(),
                 loadSettings(),
                 loadPrompts(),
             ]);
@@ -332,6 +453,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         void initializePage();
     }, [worldId]);
     /* eslint-enable react-hooks/exhaustive-deps */
+    useEffect(() => {
+        if (!pendingFocusReviewId) return;
+        if (!safetyReviews.some((review) => review.review_id === pendingFocusReviewId)) return;
+        focusSafetyReview(pendingFocusReviewId);
+        setPendingFocusReviewId(null);
+    }, [pendingFocusReviewId, safetyReviews]);
     useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logEntries]);
 
     const buildIngestSettingsPayload = (override?: Partial<IngestSettings>) => ({
@@ -346,6 +473,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         overrideSettings?: Partial<IngestSettings>,
     ) => {
         resetProgress();
+        setRetryNotice(null);
         setIngesting(true);
         setLogEntries([]);
         try {
@@ -366,17 +494,65 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const retryFailures = async (stage: "extraction" | "embedding" | "all") => {
         resetProgress();
+        setRetryNotice(null);
         setIngesting(true);
         setLogEntries([]);
         try {
-            await apiFetch(`/worlds/${worldId}/ingest/retry`, {
+            const data = await apiFetch<RetryResponse>(`/worlds/${worldId}/ingest/retry`, {
                 method: "POST",
                 body: JSON.stringify({ stage }),
             });
+            if (data.retry_notice) {
+                const noticeMessage = data.retry_notice;
+                setRetryNotice(noticeMessage);
+                setLogEntries((prev) => [{ event: "status", message: noticeMessage }, ...prev]);
+            }
             connectToSSE();
         } catch (err: unknown) {
             setIngesting(false);
             alert((err as Error).message);
+        }
+    };
+
+    const rescueCollapsedFailures = async (failures: StageFailure[]) => {
+        if (failures.length === 0) return;
+        const groupedBySource = failures.reduce<Record<string, number[]>>((groups, failure) => {
+            if (!groups[failure.source_id]) groups[failure.source_id] = [];
+            groups[failure.source_id].push(failure.chunk_index);
+            return groups;
+        }, {});
+
+        setIsRescuingCollapsedFailures(true);
+        try {
+            let firstReviewId: string | null = null;
+            for (const [sourceId, chunkIndices] of Object.entries(groupedBySource)) {
+                const data = await apiFetch<ManualRescueResponse>(
+                    `/worlds/${worldId}/ingest/safety-reviews/manual-rescue`,
+                    {
+                        method: "POST",
+                        body: JSON.stringify({
+                            source_id: sourceId,
+                            chunk_indices: chunkIndices,
+                        }),
+                    }
+                );
+                if (!firstReviewId) {
+                    firstReviewId = data.reviews[0]?.review_id ?? null;
+                }
+            }
+            await Promise.all([
+                loadWorld(),
+                loadSources(),
+                loadCheckpoint(),
+                loadSafetyReviews(),
+            ]);
+            if (firstReviewId) {
+                setPendingFocusReviewId(firstReviewId);
+            }
+        } catch (err: unknown) {
+            alert((err as Error).message);
+        } finally {
+            setIsRescuingCollapsedFailures(false);
         }
     };
 
@@ -436,11 +612,149 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setGleanAmountDraft(String(normalized));
     };
 
+    const setReviewBusy = (
+        setter: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
+        reviewId: string,
+        busy: boolean,
+    ) => {
+        setter((prev) => {
+            const next = { ...prev };
+            if (busy) next[reviewId] = true;
+            else delete next[reviewId];
+            return next;
+        });
+    };
+
+    const isMissingSafetyReviewError = (err: unknown) => (
+        (err as Error)?.message?.toLowerCase().includes("safety review item not found")
+    );
+
+    const refreshAfterMissingSafetyReview = async (reviewId?: string) => {
+        if (reviewId) {
+            setReviewDrafts((prev) => {
+                const next = { ...prev };
+                delete next[reviewId];
+                return next;
+            });
+        }
+        await Promise.all([
+            loadWorld(),
+            loadSources(),
+            loadCheckpoint(),
+            loadSafetyReviews(),
+        ]);
+    };
+
+    const reviewDraftValue = (review: SafetyReviewItem) => (
+        reviewDrafts[review.review_id]
+        ?? review.draft_raw_text
+        ?? review.active_override_raw_text
+        ?? review.original_raw_text
+    );
+
+    const saveReviewDraft = async (review: SafetyReviewItem, draftRawText?: string) => {
+        const nextDraft = draftRawText ?? reviewDraftValue(review);
+        setReviewBusy(setSavingReviewIds, review.review_id, true);
+        try {
+            const data = await apiFetch<{ review: SafetyReviewItem; summary: SafetyReviewSummary }>(
+                `/worlds/${worldId}/ingest/safety-reviews/${review.review_id}`,
+                {
+                    method: "PATCH",
+                    body: JSON.stringify({ draft_raw_text: nextDraft }),
+                }
+            );
+            syncSafetyReviewState(
+                safetyReviews.map((item) => item.review_id === data.review.review_id ? data.review : item),
+                data.summary,
+            );
+            setReviewDrafts((prev) => ({ ...prev, [review.review_id]: nextDraft }));
+            return true;
+        } catch (err: unknown) {
+            if (isMissingSafetyReviewError(err)) {
+                await refreshAfterMissingSafetyReview(review.review_id);
+                return false;
+            }
+            alert((err as Error).message);
+            return false;
+        } finally {
+            setReviewBusy(setSavingReviewIds, review.review_id, false);
+        }
+    };
+
+    const resetReviewDraft = async (review: SafetyReviewItem) => {
+        const resetText = review.original_raw_text;
+        setReviewDrafts((prev) => ({ ...prev, [review.review_id]: resetText }));
+        await saveReviewDraft(review, resetText);
+    };
+
+    const testReviewDraft = async (review: SafetyReviewItem) => {
+        const currentDraft = reviewDraftValue(review);
+        const didSave = await saveReviewDraft(review, currentDraft);
+        if (!didSave) return;
+        setReviewBusy(setTestingReviewIds, review.review_id, true);
+        try {
+            await apiFetch(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/test`, {
+                method: "POST",
+            });
+            await Promise.all([
+                loadWorld(),
+                loadSources(),
+                loadCheckpoint(),
+                loadSafetyReviews(),
+            ]);
+        } catch (err: unknown) {
+            if (isMissingSafetyReviewError(err)) {
+                await refreshAfterMissingSafetyReview(review.review_id);
+                return;
+            }
+            alert((err as Error).message);
+            await Promise.all([loadCheckpoint(), loadSafetyReviews()]);
+        } finally {
+            setReviewBusy(setTestingReviewIds, review.review_id, false);
+        }
+    };
+
+    const discardReview = async (review: SafetyReviewItem) => {
+        const hasActiveOverride = Boolean(review.active_override_raw_text?.trim());
+        const confirmMessage = hasActiveOverride
+            ? "This will remove the saved override for this repaired chunk so rebuild actions can use the original source again. Continue?"
+            : "This will remove this safety review item from the queue. The underlying ingest failure record will still remain until you retry or rebuild. Continue?";
+        if (!confirm(confirmMessage)) return;
+
+        setReviewBusy(setDiscardingReviewIds, review.review_id, true);
+        try {
+            await apiFetch(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/discard`, {
+                method: "POST",
+            });
+            await Promise.all([
+                loadWorld(),
+                loadCheckpoint(),
+                loadSafetyReviews(),
+            ]);
+        } catch (err: unknown) {
+            if (isMissingSafetyReviewError(err)) {
+                await refreshAfterMissingSafetyReview(review.review_id);
+                return;
+            }
+            alert((err as Error).message);
+        } finally {
+            setReviewBusy(setDiscardingReviewIds, review.review_id, false);
+        }
+    };
+
+    const failureRecords = checkpoint?.failures || [];
+    const safetyReviewByChunkId = safetyReviews.reduce<Record<string, SafetyReviewItem>>((lookup, review) => {
+        lookup[review.chunk_id] = review;
+        return lookup;
+    }, {});
+    const collapsedCoverageGapFailures = failureRecords.filter((failure) => (
+        failure.stage === "extraction"
+        && failure.error_type === "coverage_gap"
+        && !safetyReviewByChunkId[failure.chunk_id]
+    ));
     const hasPending = sources.some((s) => s.status === "pending" || s.status === "ingesting");
-    const hasRetryableFailures = sources.some(
-        (s) => s.status === "partial_failure"
-            || (s.failed_chunks?.length ?? 0) > 0
-            || (s.stage_failures?.length ?? 0) > 0
+    const hasRetryableFailures = failureRecords.some(
+        (failure) => !(failure.stage === "extraction" && safetyReviewByChunkId[failure.chunk_id])
     );
     const hasAnyIngested = sources.some((s) => s.chunk_count > 0 || s.ingested_at !== null || s.status === "partial_failure" || s.status === "complete");
     const allComplete = sources.length > 0 && sources.every((s) => s.status === "complete");
@@ -451,10 +765,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         && savedIngestSettings?.embedding_model
     );
     const chunkSettingsChanged = Boolean(savedIngestSettings) && (
-        chunkSize !== savedIngestSettings.chunk_size_chars
-        || chunkOverlap !== savedIngestSettings.chunk_overlap_chars
+        chunkSize !== (savedIngestSettings?.chunk_size_chars ?? chunkSize)
+        || chunkOverlap !== (savedIngestSettings?.chunk_overlap_chars ?? chunkOverlap)
     );
-    const embeddingModelChanged = Boolean(savedIngestSettings) && embeddingModel.trim() !== savedIngestSettings.embedding_model;
+    const embeddingModelChanged = Boolean(savedIngestSettings)
+        && embeddingModel.trim() !== (savedIngestSettings?.embedding_model ?? embeddingModel.trim());
     const showRechunkAction = !ingesting && hasAnyIngested;
     const showReembedAction = !ingesting && hasAnyIngested;
     const canReembedAll = Boolean(
@@ -475,9 +790,13 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const canResolveEntities = !ingesting && !hasPending && hasAnyIngested;
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
     const stageCounters = checkpoint?.stage_counters;
-    const failureRecords = checkpoint?.failures || [];
+    const reviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
+    const blocksRebuild = Boolean(safetyReviewSummary?.blocks_rebuild);
+    const rebuildBlockedReason = safetyReviewSummary?.blocking_message
+        || "Safety review work is still pending for this world.";
     const hasProgress = progress.total > 0;
     const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !showResume;
+    const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && safetyReviews.length === 0 && !hasProgress;
     const progressLabel = progress.phase === "aborting"
         ? "Aborting"
         : progress.phase === "embedding"
@@ -511,6 +830,17 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             },
         ]
         : agentPipeline;
+    const groupedSafetyReviews = safetyReviews.reduce<Record<string, SafetyReviewItem[]>>((groups, review) => {
+        const key = `${review.display_name}::${review.source_id}`;
+        groups[key] = groups[key] || [];
+        groups[key].push(review);
+        return groups;
+    }, {});
+    const openReviewForFailure = (failure: StageFailure) => {
+        const review = safetyReviewByChunkId[failure.chunk_id];
+        if (!review) return;
+        setPendingFocusReviewId(review.review_id);
+    };
 
     return (
         <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
@@ -593,7 +923,19 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             <button onClick={() => startIngestion(true)} style={{ ...btnStyle, background: "var(--success)", color: "var(--primary-contrast)", flex: 1 }}>
                                 Resume
                             </button>
-                            <button onClick={() => { if(confirm("This will erase all graph and vector data for this world, then rebuild it using the currently shown world settings. Are you sure?")) startIngestion(false); }} style={{ ...btnStyle, background: "var(--status-error-bg)", color: "var(--status-error-fg)", flex: 1 }}>
+                            <button
+                                onClick={() => { if (confirm("This will erase all graph and vector data for this world, then rebuild it using the currently shown world settings. Are you sure?")) startIngestion(false); }}
+                                disabled={blocksRebuild}
+                                title={blocksRebuild ? rebuildBlockedReason : undefined}
+                                style={{
+                                    ...btnStyle,
+                                    background: "var(--status-error-bg)",
+                                    color: "var(--status-error-fg)",
+                                    flex: 1,
+                                    opacity: blocksRebuild ? 0.45 : 1,
+                                    cursor: blocksRebuild ? "not-allowed" : "pointer",
+                                }}
+                            >
                                 Start Over
                             </button>
                         </>
@@ -635,7 +977,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                     if (!confirm("This will clear this world's graph and vectors, then fully rebuild it using the previously locked ingest settings from the last clean ingest. Chats and other non-ingest data stay intact. Continue?")) return;
                                     startIngestion(false, "rechunk_reingest", savedIngestSettings);
                                 }}
-                                style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}
+                                disabled={blocksRebuild}
+                                title={blocksRebuild ? rebuildBlockedReason : undefined}
+                                style={{
+                                    ...btnStyle,
+                                    background: "var(--primary)",
+                                    color: "var(--primary-contrast)",
+                                    width: "100%",
+                                    opacity: blocksRebuild ? 0.45 : 1,
+                                    cursor: blocksRebuild ? "not-allowed" : "pointer",
+                                }}
                             >
                                 Re-ingest With Previous Settings
                             </button>
@@ -645,7 +996,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 if (!confirm("This will clear this world's graph and vectors, then re-chunk, re-extract, rebuild the graph, and re-embed everything for this world. Chats and other non-ingest data stay intact. Continue?")) return;
                                 startIngestion(false, "rechunk_reingest");
                             }}
-                            style={{ ...btnStyle, background: "var(--status-progress-bg)", color: "var(--primary-contrast)", width: "100%" }}
+                            disabled={blocksRebuild}
+                            title={blocksRebuild ? rebuildBlockedReason : undefined}
+                            style={{
+                                ...btnStyle,
+                                background: "var(--status-progress-bg)",
+                                color: "var(--primary-contrast)",
+                                width: "100%",
+                                opacity: blocksRebuild ? 0.45 : 1,
+                                cursor: blocksRebuild ? "not-allowed" : "pointer",
+                            }}
                         >
                             Rechunk And Re-ingest (Current Settings)
                         </button>
@@ -690,6 +1050,21 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     </div>
                 )}
 
+                {blocksRebuild && (
+                    <div style={{
+                        marginTop: 10,
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        background: "rgba(248,113,113,0.08)",
+                        border: "1px solid rgba(248,113,113,0.25)",
+                        fontSize: 12,
+                        color: "#fecaca",
+                        lineHeight: 1.5,
+                    }}>
+                        {rebuildBlockedReason}
+                    </div>
+                )}
+
                 {!ingesting && failureRecords.length > 0 && (
                     <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
                         <button onClick={() => retryFailures("embedding")} style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}>
@@ -701,10 +1076,28 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         <button onClick={() => retryFailures("all")} style={{ ...btnStyle, background: "var(--background-tertiary)", color: "var(--text-primary)", width: "100%" }}>
                             Retry All Failures
                         </button>
+                        {collapsedCoverageGapFailures.length > 0 && (
+                            <button
+                                onClick={() => void rescueCollapsedFailures(collapsedCoverageGapFailures)}
+                                disabled={isRescuingCollapsedFailures}
+                                style={{
+                                    ...btnStyle,
+                                    background: "var(--status-warning-soft-bg)",
+                                    color: "var(--status-progress-fg)",
+                                    width: "100%",
+                                    opacity: isRescuingCollapsedFailures ? 0.6 : 1,
+                                    cursor: isRescuingCollapsedFailures ? "not-allowed" : "pointer",
+                                }}
+                            >
+                                {isRescuingCollapsedFailures
+                                    ? "Recovering Blocked Chunks..."
+                                    : `Recover ${collapsedCoverageGapFailures.length} Collapsed Blocked Chunk(s) For Editing`}
+                            </button>
+                        )}
                     </div>
                 )}
 
-                {hasPendingWorldSettingChange && !ingesting && (
+                {(hasPendingWorldSettingChange || retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
                     <div style={{
                         marginTop: 10,
                         padding: "10px 12px",
@@ -715,7 +1108,22 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         color: "#fcd34d",
                         lineHeight: 1.5,
                     }}>
-                        Retry buttons only fix failures in the currently locked ingest. Use the rebuild actions above to intentionally apply new chunk settings or a new embedding model.
+                        {hasPendingWorldSettingChange && (
+                            <div>
+                                Retry buttons only fix failures in the currently locked ingest. Use the rebuild actions above to intentionally apply new chunk settings or a new embedding model.
+                            </div>
+                        )}
+                        <div>
+                            Retry Extraction Failures and Retry All Failures skip chunks that are already in the Safety Review queue.
+                        </div>
+                        {retryNotice && (
+                            <div>{retryNotice}</div>
+                        )}
+                        {collapsedCoverageGapFailures.length > 0 && (
+                            <div>
+                                The recover button above converts the current collapsed `coverage_gap` extraction failures into editable safety-review items for this world only.
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -777,6 +1185,22 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 </div>
                                 <div style={{ color: "var(--text-subtle)" }}>
                                     {failure.error_type}: {failure.error_message}
+                                </div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                    {safetyReviewByChunkId[failure.chunk_id] && failure.stage === "extraction" && (
+                                        <button
+                                            onClick={() => openReviewForFailure(failure)}
+                                            style={{
+                                                ...btnStyle,
+                                                background: "var(--primary)",
+                                                color: "var(--primary-contrast)",
+                                                padding: "4px 10px",
+                                                fontSize: 11,
+                                            }}
+                                        >
+                                            Edit Blocked Chunk
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         ))}
@@ -872,19 +1296,23 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
             {/* Right Panel — Progress */}
             <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-                {!ingesting && logEntries.length === 0 ? (
+                {showIdlePlaceholder ? (
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)" }}>
                         <Upload size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
                         <p style={{ fontSize: 16 }}>
-                            {hasRetryableFailures
+                            {safetyReviewSummary?.unresolved_reviews
+                                ? "This world has safety review items waiting for edits."
+                                : hasRetryableFailures
                                 ? "This world has retryable ingest failures."
                                 : hasAnyIngested
                                     ? "Ingestion complete for this world."
                                     : "Start ingestion to see progress."}
                         </p>
-                        {(hasAnyIngested || hasRetryableFailures) && (
+                        {(hasAnyIngested || hasRetryableFailures || Boolean(safetyReviewSummary?.unresolved_reviews)) && (
                             <p style={{ fontSize: 13, marginTop: 6 }}>
-                                Retry failures or use Re-embed All / Re-ingest With Previous Settings / Rechunk And Re-ingest from the left panel.
+                                {safetyReviewSummary?.unresolved_reviews
+                                    ? "Use the Safety Review Queue below or the left-panel recover/edit actions to fix blocked chunks."
+                                    : "Retry failures or use Re-embed All / Re-ingest With Previous Settings / Rechunk And Re-ingest from the left panel."}
                             </p>
                         )}
                     </div>
@@ -940,6 +1368,37 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             </>
                         )}
 
+                        {ingesting && reviewCount > 0 && (
+                            <div style={{
+                                marginBottom: 24,
+                                padding: "12px 14px",
+                                borderRadius: 10,
+                                border: "1px solid rgba(248,113,113,0.25)",
+                                background: "rgba(248,113,113,0.08)",
+                                color: "#fecaca",
+                                lineHeight: 1.5,
+                            }}>
+                                Safety review available. {safetyReviewSummary?.unresolved_reviews ?? reviewCount} blocked chunk(s) have been queued for repair.
+                                Let the current ingest run finish, then edit and test them from the review queue below.
+                            </div>
+                        )}
+
+                        {!ingesting && safetyReviews.length > 0 && (
+                            <SafetyReviewPanel
+                                groupedReviews={groupedSafetyReviews}
+                                summary={safetyReviewSummary}
+                                drafts={reviewDrafts}
+                                savingReviewIds={savingReviewIds}
+                                testingReviewIds={testingReviewIds}
+                                discardingReviewIds={discardingReviewIds}
+                                onDraftChange={(reviewId, value) => setReviewDrafts((prev) => ({ ...prev, [reviewId]: value }))}
+                                onDraftBlur={saveReviewDraft}
+                                onReset={resetReviewDraft}
+                                onTest={testReviewDraft}
+                                onDiscard={discardReview}
+                            />
+                        )}
+
                         {failureRecords.length > 0 && (
                             <div style={{ marginBottom: 24 }}>
                                 <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Failure Details</div>
@@ -978,6 +1437,22 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             </div>
                                             <div style={{ color: "var(--text-muted)" }}>
                                                 Attempts: {failure.attempt_count}
+                                            </div>
+                                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                                {safetyReviewByChunkId[failure.chunk_id] && failure.stage === "extraction" && (
+                                                    <button
+                                                        onClick={() => openReviewForFailure(failure)}
+                                                        style={{
+                                                            ...btnStyle,
+                                                            background: "var(--primary)",
+                                                            color: "var(--primary-contrast)",
+                                                            padding: "4px 10px",
+                                                            fontSize: 11,
+                                                        }}
+                                                    >
+                                                        Edit Blocked Chunk
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                     ))}
@@ -1138,12 +1613,287 @@ function LogEntryRow({ entry, onViewBlocked }: { entry: LogEntry, onViewBlocked:
                 )}
                 {entry.event === "complete" && entry.status === "partial_failure" && "Retry finished. Some failures remain."}
                 {entry.event === "complete" && entry.status !== "partial_failure" && "Ingestion complete!"}
+                {entry.event === "status" && entry.message && !entry.ingestion_status && entry.message}
                 {entry.event === "status" && entry.ingestion_status === "complete" && "Ingestion complete!"}
                 {entry.event === "status" && entry.ingestion_status === "partial_failure" && "Retry finished. Some failures remain."}
                 {entry.event === "status" && entry.ingestion_status === "error" && "Ingestion failed."}
                 {isAborting && "Aborting... waiting for in-flight work to stop."}
                 {entry.event === "aborted" && `Ingestion aborted`}
             </span>
+        </div>
+    );
+}
+
+function safetyReviewStatusPresentation(review: SafetyReviewItem): { label: string; bg: string; fg: string } {
+    if (review.status === "resolved") {
+        return { label: "Resolved", bg: "rgba(34,197,94,0.16)", fg: "#86efac" };
+    }
+    if (review.status === "testing") {
+        return { label: "Testing", bg: "rgba(59,130,246,0.16)", fg: "#bfdbfe" };
+    }
+    if (review.status === "draft") {
+        return { label: "Draft", bg: "rgba(251,191,36,0.16)", fg: "#fde68a" };
+    }
+    return { label: "Blocked", bg: "rgba(248,113,113,0.16)", fg: "#fecaca" };
+}
+
+function safetyReviewOutcomePresentation(review: SafetyReviewItem): { label: string; color: string } | null {
+    if (review.last_test_outcome === "passed") {
+        return { label: "Passed extraction and embedding.", color: "#86efac" };
+    }
+    if (review.last_test_outcome === "still_safety_blocked") {
+        return { label: "Still safety blocked.", color: "#fecaca" };
+    }
+    if (review.last_test_outcome === "transient_failure") {
+        return { label: "Latest test hit a transient failure such as rate limiting.", color: "#fde68a" };
+    }
+    if (review.last_test_outcome === "other_failure") {
+        return { label: "Latest test failed for another reason.", color: "#bfdbfe" };
+    }
+    return null;
+}
+
+function SafetyReviewPanel({
+    groupedReviews,
+    summary,
+    drafts,
+    savingReviewIds,
+    testingReviewIds,
+    discardingReviewIds,
+    onDraftChange,
+    onDraftBlur,
+    onReset,
+    onTest,
+    onDiscard,
+}: {
+    groupedReviews: Record<string, SafetyReviewItem[]>;
+    summary: SafetyReviewSummary | null;
+    drafts: Record<string, string>;
+    savingReviewIds: Record<string, boolean>;
+    testingReviewIds: Record<string, boolean>;
+    discardingReviewIds: Record<string, boolean>;
+    onDraftChange: (reviewId: string, value: string) => void;
+    onDraftBlur: (review: SafetyReviewItem, draftRawText?: string) => Promise<boolean> | boolean | void;
+    onReset: (review: SafetyReviewItem) => Promise<void> | void;
+    onTest: (review: SafetyReviewItem) => Promise<void> | void;
+    onDiscard: (review: SafetyReviewItem) => Promise<void> | void;
+}) {
+    const groups = Object.entries(groupedReviews);
+
+    return (
+        <div style={{ marginBottom: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 12 }}>
+                <div>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>Safety Review Queue</div>
+                    <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4 }}>
+                        {summary?.unresolved_reviews ?? 0} unresolved, {summary?.resolved_reviews ?? 0} resolved, {summary?.active_override_reviews ?? 0} active overrides
+                    </div>
+                </div>
+                {summary?.blocks_rebuild && (
+                    <div style={{
+                        maxWidth: 360,
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        background: "rgba(248,113,113,0.08)",
+                        border: "1px solid rgba(248,113,113,0.2)",
+                        color: "#fecaca",
+                        fontSize: 12,
+                        lineHeight: 1.45,
+                    }}>
+                        {summary.blocking_message}
+                    </div>
+                )}
+            </div>
+
+            <div style={{ display: "grid", gap: 14 }}>
+                {groups.map(([groupKey, reviews]) => (
+                    <div key={groupKey} style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius)",
+                        background: "var(--background)",
+                        overflow: "hidden",
+                    }}>
+                        <div style={{
+                            padding: "12px 14px",
+                            borderBottom: "1px solid var(--border)",
+                            background: "var(--background-secondary)",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 12,
+                        }}>
+                            <div style={{ fontSize: 14, fontWeight: 700 }}>{reviews[0]?.display_name}</div>
+                            <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>{reviews.length} review item(s)</div>
+                        </div>
+
+                        <div style={{ display: "grid", gap: 0 }}>
+                            {reviews.map((review, index) => {
+                                const draftValue = drafts[review.review_id]
+                                    ?? review.draft_raw_text
+                                    ?? review.active_override_raw_text
+                                    ?? review.original_raw_text;
+                                const statusChip = safetyReviewStatusPresentation(review);
+                                const lastOutcome = safetyReviewOutcomePresentation(review);
+                                const hasActiveOverride = Boolean(review.active_override_raw_text?.trim());
+                                const isEditingAwayFromLiveOverride = hasActiveOverride && draftValue !== review.active_override_raw_text;
+                                const isSaving = Boolean(savingReviewIds[review.review_id]);
+                                const isTesting = Boolean(testingReviewIds[review.review_id]) || review.status === "testing";
+                                const isDiscarding = Boolean(discardingReviewIds[review.review_id]);
+                                const isBusy = isSaving || isTesting || isDiscarding;
+
+                                return (
+                                    <div id={`safety-review-${review.review_id}`} key={review.review_id} style={{
+                                        padding: "14px",
+                                        borderTop: index === 0 ? "none" : "1px solid var(--border)",
+                                        display: "grid",
+                                        gap: 12,
+                                    }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                                            <div>
+                                                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+                                                    {review.prefix_label} • {review.display_name}
+                                                </div>
+                                                <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4 }}>
+                                                    Safety reason: {review.original_safety_reason}
+                                                </div>
+                                            </div>
+                                            <span style={{
+                                                padding: "3px 10px",
+                                                borderRadius: 9999,
+                                                fontSize: 11,
+                                                fontWeight: 700,
+                                                background: statusChip.bg,
+                                                color: statusChip.fg,
+                                                whiteSpace: "nowrap",
+                                            }}>
+                                                {statusChip.label}
+                                            </span>
+                                        </div>
+
+                                        {lastOutcome && (
+                                            <div style={{
+                                                padding: "10px 12px",
+                                                borderRadius: 8,
+                                                background: "rgba(15,23,42,0.22)",
+                                                border: "1px solid var(--border)",
+                                                fontSize: 12,
+                                                color: lastOutcome.color,
+                                                lineHeight: 1.45,
+                                            }}>
+                                                {lastOutcome.label}
+                                                {review.last_test_error_message && (
+                                                    <div style={{ marginTop: 6, color: "var(--text-subtle)" }}>
+                                                        {review.last_test_error_message}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {isEditingAwayFromLiveOverride && (
+                                            <div style={{
+                                                padding: "10px 12px",
+                                                borderRadius: 8,
+                                                background: "rgba(251,191,36,0.08)",
+                                                border: "1px solid rgba(251,191,36,0.2)",
+                                                fontSize: 12,
+                                                color: "#fde68a",
+                                                lineHeight: 1.45,
+                                            }}>
+                                                The current graph is still using the last passed version for this chunk. Test this draft to replace it.
+                                            </div>
+                                        )}
+
+                                        <div style={{ display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+                                                Read-only Prefix
+                                            </div>
+                                            <div style={{
+                                                fontSize: 12,
+                                                fontFamily: "monospace",
+                                                padding: "9px 10px",
+                                                borderRadius: 8,
+                                                border: "1px solid var(--border)",
+                                                background: "var(--background-secondary)",
+                                                color: "var(--text-primary)",
+                                            }}>
+                                                {review.prefix_label}
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+                                                Raw Chunk
+                                            </div>
+                                            <textarea
+                                                id={`safety-review-textarea-${review.review_id}`}
+                                                value={draftValue}
+                                                readOnly={isBusy}
+                                                onChange={(e) => onDraftChange(review.review_id, e.target.value)}
+                                                onBlur={() => { void onDraftBlur(review, draftValue); }}
+                                                rows={10}
+                                                style={{
+                                                    width: "100%",
+                                                    resize: "vertical",
+                                                    fontFamily: "monospace",
+                                                    fontSize: 12,
+                                                    lineHeight: 1.5,
+                                                }}
+                                            />
+                                        </div>
+
+                                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                            <button
+                                                onClick={() => void onTest(review)}
+                                                disabled={isBusy}
+                                                style={{
+                                                    ...btnStyle,
+                                                    background: "var(--primary)",
+                                                    color: "var(--primary-contrast)",
+                                                    opacity: isBusy ? 0.6 : 1,
+                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                }}
+                                            >
+                                                {isTesting ? "Testing..." : "Test"}
+                                            </button>
+                                            <button
+                                                onClick={() => void onReset(review)}
+                                                disabled={isBusy}
+                                                style={{
+                                                    ...btnStyle,
+                                                    background: "var(--background-tertiary)",
+                                                    color: "var(--text-primary)",
+                                                    opacity: isBusy ? 0.6 : 1,
+                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                }}
+                                            >
+                                                {isSaving ? "Saving..." : "Reset"}
+                                            </button>
+                                            <button
+                                                onClick={() => void onDiscard(review)}
+                                                disabled={isBusy}
+                                                style={{
+                                                    ...btnStyle,
+                                                    background: hasActiveOverride ? "var(--status-error-bg)" : "var(--border)",
+                                                    color: hasActiveOverride ? "var(--status-error-fg)" : "var(--text-primary)",
+                                                    opacity: isBusy ? 0.6 : 1,
+                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                }}
+                                            >
+                                                {isDiscarding ? "Discarding..." : "Discard"}
+                                            </button>
+                                            {review.test_attempt_count !== undefined && review.test_attempt_count > 0 && (
+                                                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                                                    Tests: {review.test_attempt_count}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }

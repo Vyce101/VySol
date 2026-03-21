@@ -17,6 +17,26 @@ from .key_manager import get_key_manager
 logger = logging.getLogger(__name__)
 
 
+class AgentCallError(RuntimeError):
+    """Structured provider/runtime failure for ingestion agents."""
+
+    def __init__(
+        self,
+        kind: str,
+        message: str,
+        *,
+        safety_reason: str | None = None,
+        blocked_prefixed_text: str | None = None,
+        blocked_raw_text: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = str(kind or "provider_error")
+        self.message = str(message or "")
+        self.safety_reason = str(safety_reason) if safety_reason else None
+        self.blocked_prefixed_text = blocked_prefixed_text
+        self.blocked_raw_text = blocked_raw_text
+
+
 # ── Output models ──────────────────────────────────────────────────────
 
 class NodeOut(BaseModel):
@@ -76,7 +96,7 @@ async def _call_agent(
     Call a Gemini agent with retry logic and key rotation.
 
     Returns (parsed_json_output, usage_metadata).
-    Raises RuntimeError on rate_limit/safety_block.
+    Raises AgentCallError on classified provider/runtime failures.
     """
     km = get_key_manager()
     settings = load_settings()
@@ -120,13 +140,18 @@ async def _call_agent(
                     reason = response.prompt_feedback.block_reason
                     details = []
                     if hasattr(response.prompt_feedback, "safety_ratings"):
-                        for rating in response.prompt_feedback.safety_ratings:
+                        for rating in (response.prompt_feedback.safety_ratings or []):
                             if rating.probability != "NEGLIGIBLE":
                                 details.append(f"{rating.category}: {rating.probability}")
                     detail_str = f" ({', '.join(details)})" if details else ""
-                    error_msg = f"safety_block|{reason}{detail_str}|{user_content}"
-                    raise RuntimeError(error_msg)
-                raise RuntimeError("empty_response")
+                    reason_text = f"{reason}{detail_str}"
+                    raise AgentCallError(
+                        "safety_block",
+                        f"Provider safety block: {reason_text}",
+                        safety_reason=reason_text,
+                        blocked_prefixed_text=user_content,
+                    )
+                raise AgentCallError("empty_response", "Provider returned an empty response.")
 
             # Parse JSON
             text = response.text.strip()
@@ -151,9 +176,8 @@ async def _call_agent(
         except json.JSONDecodeError as e:
             logger.warning(f"Agent {prompt_key} attempt {attempt+1}: JSON parse error — {e}")
             last_error = e
-        except RuntimeError as e:
-            error_str = str(e)
-            if "safety_block" in error_str:
+        except AgentCallError as e:
+            if e.kind == "safety_block":
                 raise e
             last_error = e
         except Exception as e:
@@ -164,7 +188,7 @@ async def _call_agent(
                     logger.warning(f"Agent {prompt_key} attempt {attempt+1}: 429 rate limit. Backoff {backoff[attempt]}s")
                     await asyncio.sleep(backoff[attempt])
                     continue
-                raise RuntimeError("rate_limit")
+                raise AgentCallError("rate_limit", "Provider rate limit encountered.")
             elif "500" in error_str:
                 km.report_error(key_idx, "500")
             else:
@@ -176,7 +200,22 @@ async def _call_agent(
             await asyncio.sleep(backoff[attempt])
 
     logger.error(f"Agent {prompt_key}: all {max_retries} retries failed. Last error: {last_error}")
-    return {}, {}
+    if isinstance(last_error, AgentCallError):
+        raise last_error
+    if isinstance(last_error, json.JSONDecodeError):
+        raise AgentCallError(
+            "parse_error",
+            f"Provider returned invalid JSON after {max_retries} attempts: {last_error}",
+        ) from last_error
+    if last_error is not None:
+        raise AgentCallError(
+            "provider_error",
+            f"Provider call failed after {max_retries} attempts: {last_error}",
+        ) from last_error
+    raise AgentCallError(
+        "provider_error",
+        f"Provider call failed after {max_retries} attempts.",
+    )
 
 
 # ── Agent classes ──────────────────────────────────────────────────────

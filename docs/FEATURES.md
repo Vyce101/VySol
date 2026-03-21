@@ -102,6 +102,22 @@ Important behavior:
 - When that happens, the UI points you to either `Retry`, `Resume`, `Re-ingest With Previous Settings`, or `Rechunk And Re-ingest` depending on what changed
 - `Re-ingest With Previous Settings` gives you a clean full rebuild path that reuses the world's locked prior chunk settings instead of the current draft values shown in the form
 
+## Safety Review Queue
+
+VySol now keeps extraction safety blocks in a durable review queue instead of leaving them as manual text-hunting work.
+
+Important behavior:
+
+- Safety-blocked chunks warn in the live ingest log as soon as they are detected
+- The queue groups blocked chunks by source and keeps the original source text separate from your editable repair draft
+- Each item shows a read-only provenance prefix plus one editable `Raw Chunk` field
+- `Reset` always restores the original source chunk, not your last attempted edit
+- A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
+- If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
+- Retry actions skip unresolved safety-review chunks so they do not silently fall back to original source text
+- Manual one-shot recovery for already-collapsed blocked chunks is world-local and temporary; it only exists to restore those chunks to the review queue for editing
+- Full rebuild and re-embed actions are blocked while live repaired-chunk overrides still exist, because those overrides are part of the current ingest state
+
 ## Chunk-Local Graph Binding
 
 During extraction, a chunk's nodes and edges are now bound together using the exact node UUIDs created for that chunk write.

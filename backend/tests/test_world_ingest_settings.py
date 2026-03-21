@@ -281,6 +281,22 @@ def test_get_reembed_eligibility_blocks_partially_ingested_source():
     assert eligibility["requires_full_rebuild"] is False
 
 
+def test_manual_rescue_active_overrides_still_block_reembed():
+    summary = ingestion_engine._safety_review_summary_from_reviews(
+        [
+            {
+                "status": "resolved",
+                "review_origin": "manual_rescue",
+                "active_override_raw_text": "edited chunk text",
+            }
+        ]
+    )
+
+    assert summary["active_override_reviews"] == 1
+    assert summary["blocks_rebuild"] is True
+    assert "active repaired-chunk overrides" in summary["blocking_message"]
+
+
 def test_reembed_endpoint_rejects_when_chunk_settings_differ_from_locked_settings(monkeypatch):
     meta = {
         "world_id": "world-1",

@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from .agents import GraphArchitectAgent
+from .agents import AgentCallError, GraphArchitectAgent
 from .chunker import RecursiveChunker
 from .config import (
     get_world_ingest_settings,
@@ -19,12 +19,13 @@ from .config import (
     world_checkpoint_path,
     world_log_path,
     world_meta_path,
+    world_safety_reviews_path,
     world_sources_dir,
 )
 from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
 from .key_manager import get_key_manager
-from .temporal_indexer import stamp_chunks
+from .temporal_indexer import TemporalChunk, stamp_chunks
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,14 @@ RetryStage = Literal["extraction", "embedding", "all"]
 ChunkMode = Literal["full", "full_cleanup", "embedding_only"]
 IngestOperation = Literal["default", "rechunk_reingest", "reembed_all"]
 FailureScope = Literal["chunk", "node"]
+SafetyReviewStatus = Literal["blocked", "draft", "testing", "resolved"]
+SafetyReviewOutcome = Literal["not_tested", "still_safety_blocked", "transient_failure", "other_failure", "passed"]
 _STALE_RUN_GRACE_SECONDS = 15
 _UNIQUE_NODE_VECTOR_BATCH_SIZE = 8
+
+
+class ExtractionCoverageError(RuntimeError):
+    """Raised when extraction completed without producing durable graph coverage."""
 
 
 class _StageScheduler:
@@ -353,6 +360,353 @@ def _clear_checkpoint(world_id: str) -> None:
         os.remove(str(path))
 
 
+def _load_safety_review_cache(world_id: str) -> dict:
+    path = world_safety_reviews_path(world_id)
+    if not path.exists():
+        return {"version": 1, "reviews": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"version": 1, "reviews": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "reviews": []}
+    reviews = data.get("reviews")
+    if not isinstance(reviews, list):
+        data["reviews"] = []
+    data["version"] = 1
+    return data
+
+
+def _save_safety_review_cache(world_id: str, data: dict) -> None:
+    path = world_safety_reviews_path(world_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "reviews": list(data.get("reviews", [])) if isinstance(data, dict) else [],
+    }
+    tmp = path.with_suffix(".tmp.json")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(str(tmp), str(path))
+
+
+def _review_id_for_chunk(chunk_id: str) -> str:
+    return str(chunk_id)
+
+
+def _sorted_safety_reviews(reviews: list[dict]) -> list[dict]:
+    status_order = {"blocked": 0, "draft": 1, "testing": 2, "resolved": 3}
+    return sorted(
+        [review for review in reviews if isinstance(review, dict)],
+        key=lambda review: (
+            status_order.get(str(review.get("status") or "blocked"), 99),
+            int(review.get("book_number", 0) or 0),
+            int(review.get("chunk_index", 0) or 0),
+            str(review.get("source_id") or ""),
+        ),
+    )
+
+
+def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
+    total_reviews = len(reviews)
+    unresolved_reviews = 0
+    resolved_reviews = 0
+    active_override_reviews = 0
+    blocked_reviews = 0
+    draft_reviews = 0
+    testing_reviews = 0
+    blocking_unresolved_reviews = 0
+    blocking_active_override_reviews = 0
+
+    for review in reviews:
+        status = str(review.get("status") or "blocked")
+        if status == "resolved":
+            resolved_reviews += 1
+        else:
+            unresolved_reviews += 1
+        if status == "blocked":
+            blocked_reviews += 1
+        elif status == "draft":
+            draft_reviews += 1
+        elif status == "testing":
+            testing_reviews += 1
+        has_active_override = bool(str(review.get("active_override_raw_text") or "").strip())
+        if has_active_override:
+            active_override_reviews += 1
+        if status != "resolved":
+            blocking_unresolved_reviews += 1
+        if has_active_override:
+            blocking_active_override_reviews += 1
+
+    blocks_rebuild = blocking_unresolved_reviews > 0 or blocking_active_override_reviews > 0
+    blocking_message = None
+    if blocks_rebuild:
+        if blocking_unresolved_reviews > 0 and blocking_active_override_reviews > 0:
+            blocking_message = (
+                "Safety review work is still pending and this world also has active repaired-chunk overrides. "
+                "Resolve or discard the review queue before running Start Over, Rechunk And Re-ingest, or Re-embed All."
+            )
+        elif blocking_unresolved_reviews > 0:
+            blocking_message = (
+                "This world has unresolved safety review items. Resolve or discard them before running Start Over, "
+                "Rechunk And Re-ingest, or Re-embed All."
+            )
+        else:
+            blocking_message = (
+                "This world has active repaired-chunk overrides. Discard those overrides before running Start Over, "
+                "Rechunk And Re-ingest, or Re-embed All, or the rebuild would lose the repaired chunk text."
+            )
+
+    return {
+        "total_reviews": total_reviews,
+        "unresolved_reviews": unresolved_reviews,
+        "resolved_reviews": resolved_reviews,
+        "active_override_reviews": active_override_reviews,
+        "blocked_reviews": blocked_reviews,
+        "draft_reviews": draft_reviews,
+        "testing_reviews": testing_reviews,
+        "blocks_rebuild": blocks_rebuild,
+        "blocking_message": blocking_message,
+    }
+
+
+def _manual_rescue_fingerprint(
+    world_id: str,
+    source: dict,
+    ingest_settings: dict,
+) -> dict | None:
+    snapshot = _build_source_ingest_snapshot(world_id, source, ingest_settings)
+    if snapshot is None:
+        return None
+    return {
+        "source_id": str(source.get("source_id") or ""),
+        "vault_filename": str(snapshot.get("vault_filename") or ""),
+        "file_size": int(snapshot.get("file_size", 0) or 0),
+        "file_sha256": str(snapshot.get("file_sha256") or ""),
+        "chunk_size_chars": int(snapshot.get("chunk_size_chars", 0) or 0),
+        "chunk_overlap_chars": int(snapshot.get("chunk_overlap_chars", 0) or 0),
+    }
+
+
+def _source_has_chunk_stage_failure(
+    source: dict,
+    *,
+    stage: Literal["extraction", "embedding"],
+    chunk_id: str,
+    chunk_index: int,
+) -> bool:
+    for failure in _stage_failures_for(source, stage):
+        try:
+            failure_index = int(failure.get("chunk_index", -1))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if failure_index != int(chunk_index):
+            continue
+        if str(failure.get("chunk_id") or "") == str(chunk_id or ""):
+            return True
+    return False
+
+
+def _prune_stale_manual_rescue_reviews(world_id: str, *, meta: dict | None = None) -> bool:
+    cache = _load_safety_review_cache(world_id)
+    reviews = list(cache.get("reviews", []))
+    if not reviews:
+        return False
+
+    meta_data = meta or _load_meta(world_id)
+    source_lookup = {
+        str(source.get("source_id") or ""): source
+        for source in meta_data.get("sources", [])
+        if isinstance(source, dict)
+    }
+    world_ingest_settings = get_world_ingest_settings(meta=meta_data)
+    changed = False
+    kept_reviews: list[dict] = []
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            changed = True
+            continue
+        if str(review.get("review_origin") or "") != "manual_rescue":
+            kept_reviews.append(review)
+            continue
+
+        source_id = str(review.get("source_id") or "")
+        source = source_lookup.get(source_id)
+        if source is None:
+            changed = True
+            continue
+
+        stored_fingerprint = review.get("manual_rescue_fingerprint")
+        current_fingerprint = _manual_rescue_fingerprint(world_id, source, world_ingest_settings)
+        if not isinstance(stored_fingerprint, dict) or current_fingerprint is None:
+            changed = True
+            continue
+        if any(stored_fingerprint.get(key) != current_fingerprint.get(key) for key in current_fingerprint.keys()):
+            changed = True
+            continue
+
+        chunk_id = str(review.get("chunk_id") or "")
+        try:
+            chunk_index = int(review.get("chunk_index", -1))
+        except (TypeError, ValueError):
+            changed = True
+            continue
+
+        if str(review.get("status") or "") != "resolved" and not _source_has_chunk_stage_failure(
+            source,
+            stage="extraction",
+            chunk_id=chunk_id,
+            chunk_index=chunk_index,
+        ):
+            changed = True
+            continue
+
+        kept_reviews.append(review)
+
+    if changed:
+        cache["reviews"] = kept_reviews
+        _save_safety_review_cache(world_id, cache)
+    return changed
+
+
+def _clear_manual_rescue_reviews(world_id: str) -> int:
+    cache = _load_safety_review_cache(world_id)
+    before = len(cache.get("reviews", []))
+    cache["reviews"] = [
+        review
+        for review in cache.get("reviews", [])
+        if str(review.get("review_origin") or "") != "manual_rescue"
+    ]
+    removed = before - len(cache.get("reviews", []))
+    if removed > 0:
+        _save_safety_review_cache(world_id, cache)
+    return removed
+
+
+def get_safety_review_summary(world_id: str) -> dict:
+    _prune_stale_manual_rescue_reviews(world_id)
+    cache = _load_safety_review_cache(world_id)
+    changed = False
+    for review in cache.get("reviews", []):
+        if isinstance(review, dict) and _set_review_pending_status(review):
+            changed = True
+    if changed:
+        _save_safety_review_cache(world_id, cache)
+    reviews = _sorted_safety_reviews(list(cache.get("reviews", [])))
+    return _safety_review_summary_from_reviews(reviews)
+
+
+def get_safety_review_rebuild_guard(world_id: str) -> dict:
+    summary = get_safety_review_summary(world_id)
+    return {
+        "can_rebuild": not bool(summary.get("blocks_rebuild")),
+        "message": summary.get("blocking_message"),
+        **summary,
+    }
+
+
+def list_safety_reviews(world_id: str) -> list[dict]:
+    meta = _load_meta(world_id)
+    _prune_stale_manual_rescue_reviews(world_id, meta=meta)
+    meta = _load_meta(world_id)
+    source_lookup = {
+        str(source.get("source_id") or ""): source
+        for source in meta.get("sources", [])
+        if isinstance(source, dict)
+    }
+    cache = _load_safety_review_cache(world_id)
+    changed = False
+    for review in cache.get("reviews", []):
+        if isinstance(review, dict) and _set_review_pending_status(review):
+            changed = True
+    if changed:
+        _save_safety_review_cache(world_id, cache)
+    output: list[dict] = []
+    for review in _sorted_safety_reviews(list(cache.get("reviews", []))):
+        source_id = str(review.get("source_id") or "")
+        source = source_lookup.get(source_id, {})
+        output.append(
+            {
+                **review,
+                "display_name": str(source.get("display_name") or source_id or "Unknown source"),
+                "source_status": str(source.get("status") or ""),
+                "prefix_label": f"[B{int(review.get('book_number', 0) or 0)}:C{int(review.get('chunk_index', 0) or 0)}]",
+            }
+        )
+    return output
+
+
+def _normalize_review_text(value: Any) -> str:
+    return str(value or "").replace("\r\n", "\n")
+
+
+def _review_baseline_raw_text(review: dict) -> str:
+    active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
+    if active_override_raw_text.strip():
+        return active_override_raw_text
+    return _normalize_review_text(review.get("original_raw_text"))
+
+
+def _review_editor_raw_text(review: dict) -> str:
+    draft_raw_text = _normalize_review_text(review.get("draft_raw_text"))
+    if draft_raw_text.strip():
+        return draft_raw_text
+    return _review_baseline_raw_text(review)
+
+
+def _set_review_pending_status(review: dict) -> bool:
+    changed = False
+    original_raw_text = _normalize_review_text(review.get("original_raw_text"))
+    if review.get("original_raw_text") != original_raw_text:
+        review["original_raw_text"] = original_raw_text
+        changed = True
+
+    original_prefixed_text = _normalize_review_text(review.get("original_prefixed_text"))
+    if review.get("original_prefixed_text") != original_prefixed_text:
+        review["original_prefixed_text"] = original_prefixed_text
+        changed = True
+
+    active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
+    if review.get("active_override_raw_text") != active_override_raw_text:
+        review["active_override_raw_text"] = active_override_raw_text
+        changed = True
+
+    draft_raw_text = _review_editor_raw_text(review)
+    if review.get("draft_raw_text") != draft_raw_text:
+        review["draft_raw_text"] = draft_raw_text
+        changed = True
+
+    test_in_progress = bool(review.get("test_in_progress"))
+    if review.get("test_in_progress") != test_in_progress:
+        review["test_in_progress"] = test_in_progress
+        changed = True
+
+    next_status: SafetyReviewStatus
+    if test_in_progress:
+        next_status = "testing"
+    elif active_override_raw_text.strip() and draft_raw_text == active_override_raw_text:
+        next_status = "resolved"
+    elif draft_raw_text != _review_baseline_raw_text(review):
+        next_status = "draft"
+    else:
+        next_status = "blocked"
+
+    if review.get("status") != next_status:
+        review["status"] = next_status
+        changed = True
+
+    return changed
+
+
+def _get_safety_review_item(world_id: str, review_id: str) -> dict | None:
+    for review in list_safety_reviews(world_id):
+        if str(review.get("review_id") or "") == str(review_id or ""):
+            return review
+    return None
+
+
 def _append_log(world_id: str, entry: dict) -> None:
     path = world_log_path(world_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -432,6 +786,185 @@ def _parse_chunk_id(world_id: str, chunk_id: str) -> tuple[str, int] | None:
     return source_id, idx
 
 
+def _build_prefixed_chunk_text(book_number: int, chunk_index: int, raw_text: str) -> str:
+    return f"[B{book_number}:C{chunk_index}] {raw_text}"
+
+
+def _classify_exception_kind(exc: Exception) -> str:
+    if isinstance(exc, ExtractionCoverageError):
+        return "no_extraction_coverage"
+    if isinstance(exc, AgentCallError):
+        return exc.kind
+    message = str(exc).lower()
+    if "429" in message or "resource has been exhausted" in message or "rate limit" in message:
+        return "rate_limit"
+    if "empty_response" in message:
+        return "empty_response"
+    if isinstance(exc, json.JSONDecodeError) or ("json" in message and "parse" in message):
+        return "parse_error"
+    return "provider_error"
+
+
+def _review_outcome_for_error_kind(error_kind: str) -> SafetyReviewOutcome:
+    if error_kind == "safety_block":
+        return "still_safety_blocked"
+    if error_kind == "rate_limit":
+        return "transient_failure"
+    return "other_failure"
+
+
+def _find_safety_review(cache: dict, review_id: str) -> dict | None:
+    normalized_review_id = str(review_id or "")
+    for review in cache.get("reviews", []):
+        if str(review.get("review_id") or "") == normalized_review_id:
+            return review
+    return None
+
+
+def _unresolved_safety_review_chunk_ids(world_id: str) -> set[str]:
+    _prune_stale_manual_rescue_reviews(world_id)
+    cache = _load_safety_review_cache(world_id)
+    changed = False
+    for review in cache.get("reviews", []):
+        if isinstance(review, dict) and _set_review_pending_status(review):
+            changed = True
+    if changed:
+        _save_safety_review_cache(world_id, cache)
+    return {
+        str(review.get("chunk_id") or "")
+        for review in cache.get("reviews", [])
+        if str(review.get("status") or "") in {"blocked", "draft", "testing"}
+    }
+
+
+def _get_active_override_map(world_id: str) -> dict[str, str]:
+    cache = _load_safety_review_cache(world_id)
+    output: dict[str, str] = {}
+    for review in cache.get("reviews", []):
+        chunk_id = str(review.get("chunk_id") or "")
+        override_text = _normalize_review_text(review.get("active_override_raw_text"))
+        if chunk_id and override_text.strip():
+            output[chunk_id] = override_text
+    return output
+
+
+def _upsert_safety_review(
+    world_id: str,
+    *,
+    source_id: str,
+    book_number: int,
+    chunk_index: int,
+    chunk_id: str,
+    original_raw_text: str,
+    original_prefixed_text: str,
+    safety_reason: str,
+    original_error_kind: str = "safety_block",
+    review_origin: str = "safety_block",
+    manual_rescue_fingerprint: dict | None = None,
+) -> dict:
+    cache = _load_safety_review_cache(world_id)
+    reviews = list(cache.get("reviews", []))
+    review_id = _review_id_for_chunk(chunk_id)
+    now = _now_iso()
+    review = _find_safety_review({"reviews": reviews}, review_id)
+
+    if review is None:
+        review = {
+            "review_id": review_id,
+            "world_id": world_id,
+            "source_id": source_id,
+            "book_number": int(book_number),
+            "chunk_index": int(chunk_index),
+            "chunk_id": chunk_id,
+            "status": "blocked",
+            "original_error_kind": original_error_kind,
+            "original_safety_reason": safety_reason,
+            "original_raw_text": original_raw_text,
+            "original_prefixed_text": original_prefixed_text,
+            "review_origin": review_origin,
+            "manual_rescue_fingerprint": manual_rescue_fingerprint if isinstance(manual_rescue_fingerprint, dict) else None,
+            "draft_raw_text": _normalize_review_text(original_raw_text),
+            "last_test_outcome": "not_tested",
+            "last_test_error_kind": None,
+            "last_test_error_message": None,
+            "last_tested_at": None,
+            "test_attempt_count": 0,
+            "test_in_progress": False,
+            "active_override_raw_text": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        reviews.append(review)
+    else:
+        review["world_id"] = world_id
+        review["source_id"] = source_id
+        review["book_number"] = int(book_number)
+        review["chunk_index"] = int(chunk_index)
+        review["chunk_id"] = chunk_id
+        review["original_error_kind"] = original_error_kind
+        review["original_safety_reason"] = safety_reason
+        if not _normalize_review_text(review.get("original_raw_text")).strip():
+            review["original_raw_text"] = _normalize_review_text(original_raw_text)
+        if not _normalize_review_text(review.get("original_prefixed_text")).strip():
+            review["original_prefixed_text"] = _normalize_review_text(original_prefixed_text)
+        review["review_origin"] = review_origin
+        review["manual_rescue_fingerprint"] = manual_rescue_fingerprint if isinstance(manual_rescue_fingerprint, dict) else None
+        if review.get("test_in_progress") is None:
+            review["test_in_progress"] = False
+        review["updated_at"] = now
+        if review.get("last_test_outcome") == "passed" and str(review.get("status") or "") != "resolved":
+            review["last_test_outcome"] = "not_tested"
+            review["last_test_error_kind"] = None
+            review["last_test_error_message"] = None
+            review["last_tested_at"] = None
+
+    _set_review_pending_status(review)
+
+    cache["reviews"] = reviews
+    _save_safety_review_cache(world_id, cache)
+    return review
+
+
+def _delete_safety_review(world_id: str, review_id: str) -> bool:
+    cache = _load_safety_review_cache(world_id)
+    before = len(cache.get("reviews", []))
+    cache["reviews"] = [
+        review
+        for review in cache.get("reviews", [])
+        if str(review.get("review_id") or "") != str(review_id or "")
+    ]
+    changed = len(cache.get("reviews", [])) != before
+    if changed:
+        _save_safety_review_cache(world_id, cache)
+    return changed
+
+
+def _apply_active_chunk_overrides(
+    world_id: str,
+    temporal_chunks: list[TemporalChunk],
+) -> list[TemporalChunk]:
+    override_map = _get_active_override_map(world_id)
+    if not override_map:
+        return temporal_chunks
+
+    updated_chunks: list[TemporalChunk] = []
+    for chunk in temporal_chunks:
+        chunk_id = _chunk_id(world_id, chunk.source_id, chunk.chunk_index)
+        override_text = override_map.get(chunk_id)
+        if not override_text:
+            updated_chunks.append(chunk)
+            continue
+        updated_chunks.append(
+            chunk.model_copy(
+                update={
+                    "raw_text": override_text,
+                    "prefixed_text": _build_prefixed_chunk_text(chunk.book_number, chunk.chunk_index, override_text),
+                }
+            )
+        )
+    return updated_chunks
+
+
 def _chunk_node_ids(graph_store: GraphStore, chunk_id: str) -> list[str]:
     node_ids: list[str] = []
     for node_id, attrs in graph_store.graph.nodes(data=True):
@@ -454,6 +987,44 @@ def _chunk_node_records(graph_store: GraphStore, chunk_id: str) -> list[dict]:
         if node:
             output.append(node)
     return output
+
+
+def _chunk_has_graph_coverage(graph_store: GraphStore, chunk_id: str) -> bool:
+    return bool(_chunk_node_ids(graph_store, chunk_id))
+
+
+async def _cleanup_chunk_retry_artifacts(
+    *,
+    graph_store: GraphStore,
+    vector_store: VectorStore,
+    unique_node_vector_store: VectorStore,
+    chunk_id: str,
+    source_book: int,
+    source_chunk: int,
+    graph_lock: asyncio.Lock,
+    vector_lock: asyncio.Lock,
+) -> dict:
+    async with graph_lock:
+        pre_cleanup_node_ids = set(_chunk_node_ids(graph_store, chunk_id))
+        cleanup = graph_store.remove_chunk_artifacts(
+            chunk_id=chunk_id,
+            source_book=source_book,
+            source_chunk=source_chunk,
+        )
+        remaining_node_ids = {node_id for node_id in pre_cleanup_node_ids if node_id in graph_store.graph.nodes}
+
+    removed_node_ids = sorted(pre_cleanup_node_ids - remaining_node_ids)
+    async with vector_lock:
+        await asyncio.to_thread(vector_store.delete_document, chunk_id)
+        if removed_node_ids:
+            await asyncio.to_thread(unique_node_vector_store.delete_documents, removed_node_ids)
+
+    return {
+        **cleanup,
+        "removed_chunk_vectors": 1,
+        "removed_unique_node_vectors": len(removed_node_ids),
+        "removed_node_ids": removed_node_ids,
+    }
 
 
 def _normalize_chunk_local_ref(value: str | None) -> str:
@@ -885,6 +1456,38 @@ def _build_source_ingest_snapshot(
     }
 
 
+def _load_source_temporal_chunks(
+    world_id: str,
+    source: dict,
+    chunker: RecursiveChunker,
+    *,
+    apply_active_overrides: bool = True,
+) -> list[TemporalChunk]:
+    source_id = str(source.get("source_id") or "")
+    book_number = int(source.get("book_number") or 0)
+    vault_filename = str(source.get("vault_filename") or "")
+    source_path = world_sources_dir(world_id) / vault_filename
+    text = source_path.read_text(encoding="utf-8")
+    raw_chunks = chunker.chunk(text)
+    temporal_chunks = stamp_chunks(
+        chunks=[
+            {
+                "text": chunk.text,
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+                "index": chunk.index,
+            }
+            for chunk in raw_chunks
+        ],
+        book_number=book_number,
+        source_id=source_id,
+        world_id=world_id,
+    )
+    if not apply_active_overrides:
+        return temporal_chunks
+    return _apply_active_chunk_overrides(world_id, temporal_chunks)
+
+
 def _source_snapshot_chunk_settings_match(snapshot: dict, ingest_settings: dict) -> bool:
     try:
         return (
@@ -901,6 +1504,18 @@ def get_reembed_eligibility(
     meta: dict | None = None,
     audit_summary: dict | None = None,
 ) -> dict:
+    review_guard = get_safety_review_rebuild_guard(world_id)
+    if not review_guard.get("can_rebuild"):
+        return {
+            "can_reembed_all": False,
+            "reason_code": "safety_review_pending",
+            "message": str(review_guard.get("message") or "Safety review work is still pending for this world."),
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
     if meta is None:
         audit_summary = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
         meta = _load_meta(world_id)
@@ -1481,6 +2096,7 @@ def _select_sources_for_run(
 
 
 def _build_chunk_plan(
+    world_id: str,
     source: dict,
     *,
     chunks_total: int,
@@ -1492,6 +2108,7 @@ def _build_chunk_plan(
 ) -> dict[int, ChunkMode]:
     _ensure_source_tracking(source)
     plan: dict[int, ChunkMode] = {}
+    skipped_extraction_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
 
     if reembed_all:
         return {idx: "embedding_only" for idx in range(max(0, chunks_total))}
@@ -1519,6 +2136,8 @@ def _build_chunk_plan(
             continue
         stage = str(rec.get("stage", "")).lower()
         if stage == "extraction":
+            if str(rec.get("chunk_id") or "") in skipped_extraction_chunk_ids:
+                continue
             extraction_failed.add(idx)
         elif stage == "embedding":
             embedding_failed.add(idx)
@@ -1558,7 +2177,13 @@ async def start_ingestion(
     is_reembed_all = operation_norm == "reembed_all"
     meta.pop("ingestion_abort_requested_at", None)
 
+    if is_full_rebuild or is_reembed_all:
+        review_guard = get_safety_review_rebuild_guard(world_id)
+        if not review_guard.get("can_rebuild"):
+            raise RuntimeError(str(review_guard.get("message") or "Safety review work is still pending for this world."))
+
     if is_full_rebuild:
+        _clear_manual_rescue_reviews(world_id)
         world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
         _clear_checkpoint(world_id)
         log_path = world_log_path(world_id)
@@ -1692,13 +2317,18 @@ async def start_ingestion(
                     _ensure_not_aborted(world_id, my_event)
 
                     if mode == "full_cleanup":
-                        async with graph_lock:
-                            cleanup = graph_store.remove_chunk_artifacts(
-                                chunk_id=chunk,
-                                source_book=book_number,
-                                source_chunk=chunk_idx,
-                            )
-                        if any(cleanup.values()):
+                        cleanup = await _cleanup_chunk_retry_artifacts(
+                            graph_store=graph_store,
+                            vector_store=vector_store,
+                            unique_node_vector_store=unique_node_vector_store,
+                            chunk_id=chunk,
+                            source_book=book_number,
+                            source_chunk=chunk_idx,
+                            graph_lock=graph_lock,
+                            vector_lock=vector_lock,
+                        )
+                        cleanup_log = {key: value for key, value in cleanup.items() if key != "removed_node_ids"}
+                        if any(value for value in cleanup_log.values()):
                             _append_log(
                                 world_id,
                                 {
@@ -1706,7 +2336,7 @@ async def start_ingestion(
                                     "source_id": source_id,
                                     "book_number": book_number,
                                     "chunk_index": chunk_idx,
-                                    **cleanup,
+                                    **cleanup_log,
                                 },
                             )
 
@@ -1784,6 +2414,19 @@ async def start_ingestion(
                         )
                     _ensure_not_aborted(world_id, my_event)
 
+                    if not _chunk_has_graph_coverage(graph_store, chunk):
+                        await _cleanup_chunk_retry_artifacts(
+                            graph_store=graph_store,
+                            vector_store=vector_store,
+                            unique_node_vector_store=unique_node_vector_store,
+                            chunk_id=chunk,
+                            source_book=book_number,
+                            source_chunk=chunk_idx,
+                            graph_lock=graph_lock,
+                            vector_lock=vector_lock,
+                        )
+                        raise ExtractionCoverageError("Chunk produced no extraction coverage in graph store.")
+
                     async with meta_lock:
                         _mark_stage_success(source, stage="extraction", chunk_index=chunk_idx, chunk_id=chunk)
                         _mark_ingestion_live(meta, operation=operation_norm)
@@ -1792,7 +2435,9 @@ async def start_ingestion(
                 except asyncio.CancelledError:
                     return
                 except Exception as exc:
-                    err_text = str(exc)
+                    error_kind = _classify_exception_kind(exc)
+                    err_text = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
+                    safety_reason = exc.safety_reason if isinstance(exc, AgentCallError) else None
                     logger.error("Extraction failed for chunk %s (%s): %s", chunk_idx, source_id, err_text)
                     _append_log(
                         world_id,
@@ -1801,7 +2446,9 @@ async def start_ingestion(
                             "source_id": source_id,
                             "book_number": book_number,
                             "chunk_index": chunk_idx,
+                            "error_type": error_kind,
                             "error": err_text,
+                            "safety_reason": safety_reason,
                         },
                     )
                     async with meta_lock:
@@ -1812,9 +2459,21 @@ async def start_ingestion(
                             chunk_id=chunk,
                             source_id=source_id,
                             book_number=book_number,
-                            error_type=type(exc).__name__,
+                            error_type=error_kind,
                             error_message=err_text,
                         )
+                        review_item = None
+                        if error_kind == "safety_block":
+                            review_item = _upsert_safety_review(
+                                world_id,
+                                source_id=source_id,
+                                book_number=book_number,
+                                chunk_index=chunk_idx,
+                                chunk_id=chunk,
+                                original_raw_text=tc.raw_text,
+                                original_prefixed_text=tc.prefixed_text,
+                                safety_reason=str(safety_reason or err_text),
+                            )
                         _mark_ingestion_live(meta, operation=operation_norm)
                         _save_meta(world_id, meta)
                     push_sse_event(
@@ -1825,7 +2484,19 @@ async def start_ingestion(
                             "chunk_index": chunk_idx,
                             "book_number": book_number,
                             "source_id": source_id,
+                            "error_type": error_kind,
+                            "safety_reason": safety_reason,
+                            "chunk_text": tc.prefixed_text if error_kind == "safety_block" else None,
+                            "review_id": review_item.get("review_id") if isinstance(review_item, dict) else None,
                             "message": f"Extraction failed for chunk {chunk_idx}: {err_text}",
+                            "safety_review_summary": get_safety_review_summary(world_id),
+                            **_build_progress_event(
+                                world_id,
+                                meta,
+                                source_id=source_id,
+                                active_agent="graph_architect",
+                                total_chunks=len(temporal_chunks),
+                            ),
                         },
                     )
                     return
@@ -1966,6 +2637,7 @@ async def start_ingestion(
             except asyncio.CancelledError:
                 return
             except Exception as exc:
+                error_kind = _classify_exception_kind(exc)
                 err_text = str(exc)
                 _append_log(
                     world_id,
@@ -1974,6 +2646,7 @@ async def start_ingestion(
                         "source_id": source_id,
                         "book_number": book_number,
                         "chunk_index": chunk_idx,
+                        "error_type": error_kind,
                         "error": err_text,
                     },
                 )
@@ -1985,7 +2658,7 @@ async def start_ingestion(
                         chunk_id=chunk,
                         source_id=source_id,
                         book_number=book_number,
-                        error_type=type(exc).__name__,
+                        error_type=error_kind,
                         error_message=err_text,
                     )
                     _mark_ingestion_live(meta, operation=operation_norm)
@@ -1998,7 +2671,9 @@ async def start_ingestion(
                         "chunk_index": chunk_idx,
                         "book_number": book_number,
                         "source_id": source_id,
+                        "error_type": error_kind,
                         "message": f"Embedding failed for chunk {chunk_idx}: {err_text}",
+                        "safety_review_summary": get_safety_review_summary(world_id),
                         **_build_progress_event(
                             world_id,
                             meta,
@@ -2038,22 +2713,7 @@ async def start_ingestion(
                 _save_meta(world_id, meta)
                 continue
 
-            text = source_path.read_text(encoding="utf-8")
-            raw_chunks = chunker.chunk(text)
-            temporal_chunks = stamp_chunks(
-                chunks=[
-                    {
-                        "text": c.text,
-                        "char_start": c.char_start,
-                        "char_end": c.char_end,
-                        "index": c.index,
-                    }
-                    for c in raw_chunks
-                ],
-                book_number=book_number,
-                source_id=source_id,
-                world_id=world_id,
-            )
+            temporal_chunks = _load_source_temporal_chunks(world_id, source, chunker)
 
             chunks_total = len(temporal_chunks)
             _ensure_source_tracking(source)
@@ -2066,6 +2726,7 @@ async def start_ingestion(
 
             checkpoint = _load_checkpoint(world_id)
             chunk_plan = _build_chunk_plan(
+                world_id,
                 source,
                 chunks_total=chunks_total,
                 resume=effective_resume,
@@ -2139,6 +2800,7 @@ async def start_ingestion(
                     "world_id": world_id,
                     "status": refreshed["ingestion_status"],
                     "stage_counters": audit["world"],
+                    "safety_review_summary": get_safety_review_summary(world_id),
                     **_build_progress_event(world_id, refreshed),
                 },
             )
@@ -2151,6 +2813,7 @@ async def start_ingestion(
                 {
                     "event": "aborted",
                     "world_id": world_id,
+                    "safety_review_summary": get_safety_review_summary(world_id),
                     **_build_progress_event(world_id, refreshed),
                 },
             )
@@ -2161,7 +2824,14 @@ async def start_ingestion(
             meta = _load_meta(world_id)
             _mark_ingestion_terminal(meta, "error")
             _save_meta(world_id, meta)
-            push_sse_event(world_id, {"event": "error", "message": str(exc)})
+            push_sse_event(
+                world_id,
+                {
+                    "event": "error",
+                    "message": str(exc),
+                    "safety_review_summary": get_safety_review_summary(world_id),
+                },
+            )
     finally:
         if _abort_events.get(world_id) is my_event:
             _abort_events.pop(world_id, None)
@@ -2229,6 +2899,7 @@ def get_checkpoint_info(world_id: str) -> dict:
         total_chunks=progress_total_chunks,
         aborting=bool(meta.get("ingestion_abort_requested_at")),
     )
+    safety_review_summary = get_safety_review_summary(world_id)
 
     retryable_sources = [
         s
@@ -2246,6 +2917,7 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": None,
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "safety_review_summary": safety_review_summary,
             **progress_payload,
         }
 
@@ -2270,6 +2942,7 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": reason,
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "safety_review_summary": safety_review_summary,
             **progress_payload,
         }
         if active_run and response["total_chunks_current_phase"] > 0:
@@ -2284,5 +2957,437 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": "checkpoint_corrupted",
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "safety_review_summary": safety_review_summary,
             **progress_payload,
         }
+
+
+async def update_safety_review_draft(world_id: str, review_id: str, draft_raw_text: str) -> dict:
+    if has_active_ingestion_run(world_id):
+        raise RuntimeError("Wait for the active ingest run to finish before editing safety review items.")
+
+    meta_lock = _get_async_lock(world_id, _meta_locks)
+    async with meta_lock:
+        cache = _load_safety_review_cache(world_id)
+        review = _find_safety_review(cache, review_id)
+        if review is None:
+            raise FileNotFoundError("Safety review item not found.")
+
+        normalized_draft = _normalize_review_text(draft_raw_text)
+        review["draft_raw_text"] = normalized_draft
+        _set_review_pending_status(review)
+        review["updated_at"] = _now_iso()
+        _save_safety_review_cache(world_id, cache)
+
+    item = _get_safety_review_item(world_id, review_id)
+    if item is None:
+        raise FileNotFoundError("Safety review item not found.")
+    return item
+
+
+async def discard_safety_review(world_id: str, review_id: str) -> dict:
+    if has_active_ingestion_run(world_id):
+        raise RuntimeError("Wait for the active ingest run to finish before discarding safety review items.")
+
+    meta_lock = _get_async_lock(world_id, _meta_locks)
+    async with meta_lock:
+        deleted = _delete_safety_review(world_id, review_id)
+    if not deleted:
+        raise FileNotFoundError("Safety review item not found.")
+    return {
+        "ok": True,
+        "review_id": review_id,
+        "safety_review_summary": get_safety_review_summary(world_id),
+    }
+
+
+async def manual_rescue_safety_reviews(
+    world_id: str,
+    *,
+    source_id: str,
+    chunk_indices: list[int],
+) -> dict:
+    if has_active_ingestion_run(world_id):
+        raise RuntimeError("Wait for the active ingest run to finish before rescuing safety review items.")
+
+    normalized_source_id = str(source_id or "").strip()
+    normalized_indices = _normalize_index_list(chunk_indices or [])
+    if not normalized_source_id:
+        raise RuntimeError("Choose a source before rescuing failed chunks for editing.")
+    if not normalized_indices:
+        raise RuntimeError("Choose at least one failed chunk to recover for editing.")
+
+    meta_lock = _get_async_lock(world_id, _meta_locks)
+    async with meta_lock:
+        audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+        meta = _load_meta(world_id)
+        _prune_stale_manual_rescue_reviews(world_id, meta=meta)
+        meta = _load_meta(world_id)
+
+        source = next(
+            (row for row in meta.get("sources", []) if str(row.get("source_id") or "") == normalized_source_id),
+            None,
+        )
+        if source is None:
+            raise FileNotFoundError("The selected source no longer exists in this world.")
+
+        world_ingest_settings = get_world_ingest_settings(meta=meta)
+        chunker = RecursiveChunker(
+            chunk_size=int(world_ingest_settings.get("chunk_size_chars", load_settings().get("chunk_size_chars", 4000))),
+            overlap=int(world_ingest_settings.get("chunk_overlap_chars", load_settings().get("chunk_overlap_chars", 150))),
+        )
+        try:
+            temporal_chunks = _load_source_temporal_chunks(
+                world_id,
+                source,
+                chunker,
+                apply_active_overrides=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Could not load the saved source for rescue: {exc}") from exc
+
+        rescue_fingerprint = _manual_rescue_fingerprint(world_id, source, world_ingest_settings)
+        if rescue_fingerprint is None:
+            raise RuntimeError("This world no longer has a saved source snapshot that can be used for manual rescue.")
+
+        extraction_failures = {
+            int(failure.get("chunk_index", -1)): failure
+            for failure in _stage_failures_for(source, "extraction")
+            if isinstance(failure, dict)
+        }
+
+        missing_indices: list[int] = []
+        invalid_indices: list[int] = []
+        rescue_candidates: list[tuple[int, str, TemporalChunk, dict]] = []
+        for chunk_index in normalized_indices:
+            if chunk_index < 0 or chunk_index >= len(temporal_chunks):
+                invalid_indices.append(chunk_index)
+                continue
+
+            failure = extraction_failures.get(chunk_index)
+            chunk_id = _chunk_id(world_id, normalized_source_id, chunk_index)
+            if failure is None or str(failure.get("chunk_id") or "") != chunk_id:
+                missing_indices.append(chunk_index)
+                continue
+
+            rescue_candidates.append((chunk_index, chunk_id, temporal_chunks[chunk_index], failure))
+
+        if invalid_indices:
+            joined = ", ".join(f"C{idx}" for idx in invalid_indices)
+            raise RuntimeError(f"These chunks no longer exist in the current locked chunk map: {joined}.")
+        if missing_indices:
+            joined = ", ".join(f"C{idx}" for idx in missing_indices)
+            raise RuntimeError(
+                f"These chunks no longer have current extraction failures and cannot be recovered for editing: {joined}."
+            )
+
+        rescued_review_ids: list[str] = []
+        for chunk_index, chunk_id, temporal_chunk, failure in rescue_candidates:
+            rescued = _upsert_safety_review(
+                world_id,
+                source_id=normalized_source_id,
+                book_number=int(source.get("book_number") or 0),
+                chunk_index=chunk_index,
+                chunk_id=chunk_id,
+                original_raw_text=temporal_chunk.raw_text,
+                original_prefixed_text=temporal_chunk.prefixed_text,
+                safety_reason=(
+                    "Manual rescue for the current extraction failure: "
+                    f"{failure.get('error_type', 'unknown')} - {failure.get('error_message', 'Unknown error.')}"
+                ),
+                original_error_kind="manual_rescue",
+                review_origin="manual_rescue",
+                manual_rescue_fingerprint={
+                    **rescue_fingerprint,
+                    "chunk_id": chunk_id,
+                    "chunk_index": int(chunk_index),
+                },
+            )
+            rescued_review_ids.append(str(rescued.get("review_id") or ""))
+
+    rescued_reviews = [
+        item
+        for review_id in rescued_review_ids
+        if review_id
+        for item in [ _get_safety_review_item(world_id, review_id) ]
+        if item is not None
+    ]
+    return {
+        "reviews": rescued_reviews,
+        "safety_review_summary": get_safety_review_summary(world_id),
+        "checkpoint": get_checkpoint_info(world_id),
+    }
+
+
+async def test_safety_review(world_id: str, review_id: str) -> dict:
+    if has_active_ingestion_run(world_id):
+        raise RuntimeError("Wait for the active ingest run to finish before testing safety review items.")
+
+    settings = load_settings()
+    await _extraction_scheduler.configure(
+        concurrency=int(settings.get("graph_extraction_concurrency", settings.get("ingestion_concurrency", 4))),
+        cooldown_seconds=float(settings.get("graph_extraction_cooldown_seconds", 0)),
+    )
+    await _embedding_scheduler.configure(
+        concurrency=int(settings.get("embedding_concurrency", 8)),
+        cooldown_seconds=float(settings.get("embedding_cooldown_seconds", 0)),
+    )
+
+    meta_lock = _get_async_lock(world_id, _meta_locks)
+    graph_lock = _get_async_lock(world_id, _graph_locks)
+    vector_lock = _get_async_lock(world_id, _vector_locks)
+
+    async def mark_review_failure(error_kind: str, error_message: str) -> dict:
+        async with meta_lock:
+            cache = _load_safety_review_cache(world_id)
+            review = _find_safety_review(cache, review_id)
+            if review is None:
+                raise FileNotFoundError("Safety review item not found.")
+            review["test_in_progress"] = False
+            review["last_test_outcome"] = _review_outcome_for_error_kind(error_kind)
+            review["last_test_error_kind"] = error_kind
+            review["last_test_error_message"] = error_message
+            review["last_tested_at"] = _now_iso()
+            _set_review_pending_status(review)
+            review["updated_at"] = _now_iso()
+            _save_safety_review_cache(world_id, cache)
+
+        item = _get_safety_review_item(world_id, review_id)
+        if item is None:
+            raise FileNotFoundError("Safety review item not found.")
+        return {
+            "review": item,
+            "safety_review_summary": get_safety_review_summary(world_id),
+            "checkpoint": get_checkpoint_info(world_id),
+        }
+
+    async with meta_lock:
+        meta = _load_meta(world_id)
+        cache = _load_safety_review_cache(world_id)
+        review = _find_safety_review(cache, review_id)
+        if review is None:
+            raise FileNotFoundError("Safety review item not found.")
+
+        source_id = str(review.get("source_id") or "")
+        source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
+        if source is None:
+            raise RuntimeError("The source for this safety review item no longer exists.")
+
+        world_ingest_settings = get_world_ingest_settings(meta=meta)
+        review["test_in_progress"] = True
+        review["status"] = "testing"
+        review["test_attempt_count"] = int(review.get("test_attempt_count", 0) or 0) + 1
+        review["updated_at"] = _now_iso()
+        _save_safety_review_cache(world_id, cache)
+
+    candidate_raw_text = _review_editor_raw_text(review)
+
+    chunker = RecursiveChunker(
+        chunk_size=int(world_ingest_settings.get("chunk_size_chars", settings.get("chunk_size_chars", 4000))),
+        overlap=int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150))),
+    )
+
+    try:
+        temporal_chunks = _load_source_temporal_chunks(world_id, source, chunker)
+    except Exception as exc:
+        return await mark_review_failure("provider_error", f"Could not load the saved source for this review item: {exc}")
+
+    chunk_index = int(review.get("chunk_index", -1) or -1)
+    book_number = int(review.get("book_number", 0) or 0)
+    chunk_id = str(review.get("chunk_id") or "")
+    if chunk_index < 0 or chunk_index >= len(temporal_chunks):
+        return await mark_review_failure(
+            "provider_error",
+            "This review item no longer matches the current locked chunk map for the saved source. Run a full re-ingest if the source changed.",
+        )
+
+    base_chunk = temporal_chunks[chunk_index]
+    test_chunk = base_chunk.model_copy(
+        update={
+            "raw_text": candidate_raw_text,
+            "prefixed_text": _build_prefixed_chunk_text(book_number, chunk_index, candidate_raw_text),
+        }
+    )
+
+    graph_store = GraphStore(world_id)
+    vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
+    unique_node_vector_store = VectorStore(
+        world_id,
+        embedding_model=world_ingest_settings["embedding_model"],
+        collection_suffix="unique_nodes",
+    )
+    ga = GraphArchitectAgent()
+
+    cleanup_before_test = await _cleanup_chunk_retry_artifacts(
+        graph_store=graph_store,
+        vector_store=vector_store,
+        unique_node_vector_store=unique_node_vector_store,
+        chunk_id=chunk_id,
+        source_book=book_number,
+        source_chunk=chunk_index,
+        graph_lock=graph_lock,
+        vector_lock=vector_lock,
+    )
+    cleanup_log = {key: value for key, value in cleanup_before_test.items() if key != "removed_node_ids"}
+    if any(value for value in cleanup_log.values()):
+        _append_log(
+            world_id,
+            {
+                "event": "safety_review_cleanup",
+                "review_id": review_id,
+                "source_id": source_id,
+                "book_number": book_number,
+                "chunk_index": chunk_index,
+                **cleanup_log,
+            },
+        )
+
+    extraction_slot: int | None = None
+    final_nodes: list[Any] = []
+    final_edges: list[Any] = []
+    node_records_for_embedding: list[dict] = []
+    dummy_abort_event = threading.Event()
+    try:
+        extraction_slot = await _extraction_scheduler.acquire(dummy_abort_event)
+        ga_output, _ = await ga.run(test_chunk.prefixed_text)
+        final_nodes = list(ga_output.nodes)
+        final_edges = list(ga_output.edges)
+
+        glean_amount = int(settings.get("glean_amount", 1))
+        for _ in range(max(0, glean_amount)):
+            glean_out, _ = await ga.run_glean(test_chunk.prefixed_text, final_nodes, final_edges)
+            final_nodes.extend(glean_out.nodes)
+            final_edges.extend(glean_out.edges)
+    except Exception as exc:
+        error_kind = _classify_exception_kind(exc)
+        error_message = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
+        return await mark_review_failure(error_kind, error_message)
+    finally:
+        if extraction_slot is not None:
+            await _extraction_scheduler.release(extraction_slot, aborted=False)
+
+    async with graph_lock:
+        node_records_for_embedding = _persist_chunk_graph_artifacts(
+            graph_store,
+            nodes=final_nodes,
+            edges=final_edges,
+            chunk_id=chunk_id,
+            book_number=book_number,
+            chunk_index=chunk_index,
+        )
+
+    if not _chunk_has_graph_coverage(graph_store, chunk_id):
+        await _cleanup_chunk_retry_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            chunk_id=chunk_id,
+            source_book=book_number,
+            source_chunk=chunk_index,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+        return await mark_review_failure(
+            "no_extraction_coverage",
+            "Chunk produced no extraction coverage in graph store.",
+        )
+
+    embedding_slot: int | None = None
+    try:
+        embedding_slot = await _embedding_scheduler.acquire(dummy_abort_event)
+        km = get_key_manager()
+        api_key, _ = km.get_active_key()
+        chunk_embeddings = await asyncio.to_thread(
+            vector_store.embed_texts,
+            [test_chunk.prefixed_text],
+            api_key=api_key,
+        )
+        chunk_embedding = chunk_embeddings[0]
+
+        async with vector_lock:
+            await asyncio.to_thread(
+                vector_store.upsert_document_embedding,
+                document_id=chunk_id,
+                text=test_chunk.prefixed_text,
+                metadata={
+                    "world_id": world_id,
+                    "source_id": source_id,
+                    "book_number": book_number,
+                    "chunk_index": chunk_index,
+                    "char_start": test_chunk.char_start,
+                    "char_end": test_chunk.char_end,
+                    "display_label": test_chunk.display_label,
+                },
+                embedding=chunk_embedding,
+            )
+        await _upsert_unique_node_vectors(
+            unique_node_vector_store=unique_node_vector_store,
+            node_records=node_records_for_embedding,
+            api_key=api_key,
+            vector_lock=vector_lock,
+        )
+    except Exception as exc:
+        await _cleanup_chunk_retry_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            chunk_id=chunk_id,
+            source_book=book_number,
+            source_chunk=chunk_index,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+        error_kind = _classify_exception_kind(exc)
+        return await mark_review_failure(error_kind, str(exc))
+    finally:
+        if embedding_slot is not None:
+            await _embedding_scheduler.release(embedding_slot, aborted=False)
+
+    async with meta_lock:
+        meta = _load_meta(world_id)
+        source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
+        if source is None:
+            raise RuntimeError("The source for this safety review item no longer exists.")
+        _mark_stage_success(source, stage="extraction", chunk_index=chunk_index, chunk_id=chunk_id)
+        _mark_stage_success(source, stage="embedding", chunk_index=chunk_index, chunk_id=chunk_id)
+        _update_source_status_from_coverage(source)
+        if source.get("status") == "complete":
+            snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
+            if snapshot:
+                source["ingest_snapshot"] = snapshot
+        _save_meta(world_id, meta)
+
+        cache = _load_safety_review_cache(world_id)
+        review = _find_safety_review(cache, review_id)
+        if review is None:
+            raise FileNotFoundError("Safety review item not found.")
+        review["test_in_progress"] = False
+        review["draft_raw_text"] = candidate_raw_text
+        review["last_test_outcome"] = "passed"
+        review["last_test_error_kind"] = None
+        review["last_test_error_message"] = None
+        review["last_tested_at"] = _now_iso()
+        review["active_override_raw_text"] = candidate_raw_text
+        _set_review_pending_status(review)
+        review["updated_at"] = _now_iso()
+        _save_safety_review_cache(world_id, cache)
+
+    _append_log(
+        world_id,
+        {
+            "event": "safety_review_passed",
+            "review_id": review_id,
+            "source_id": source_id,
+            "book_number": book_number,
+            "chunk_index": chunk_index,
+        },
+    )
+
+    item = _get_safety_review_item(world_id, review_id)
+    if item is None:
+        raise FileNotFoundError("Safety review item not found.")
+    return {
+        "review": item,
+        "safety_review_summary": get_safety_review_summary(world_id),
+        "checkpoint": get_checkpoint_info(world_id),
+    }

@@ -172,6 +172,15 @@ After ingestion finishes:
 2. Pick a run mode: `Exact only` for a fast normalized-name cleanup pass, or `Exact + chooser/combiner` for the full duplicate-resolution workflow.
 3. Let entity resolution run.
 
+If extraction hits a safety block:
+
+- The ingest log warns you as soon as the block is detected
+- A `Safety Review Queue` appears for blocked chunks
+- Each review item keeps a read-only `[B#:C#]` prefix plus one editable `Raw Chunk` field
+- `Test` retries that exact chunk with your edited raw text while keeping the original source chunk untouched
+- `Reset` always restores the true original source chunk, even after multiple edits or a prior successful repair
+- `Discard` removes that repair item and its override state
+
 Entity-resolution controls:
 
 - `Resolution mode` chooses whether the run stops after exact normalized matching or continues into chooser/combiner review
@@ -186,6 +195,7 @@ Use the rebuild and retry actions based on what went wrong:
 - Clears and rebuilds chunk vectors from the previously fully ingested source set and unique-node vectors from the current saved graph state
 - Ignores brand-new pending sources you added after the last clean ingest
 - Is blocked if an older ingested source is missing, changed, partial, failed, or comes from an older world that never recorded source snapshots
+- Is also blocked while this world still has unresolved safety-review work or active repaired-chunk overrides, because a rebuild would otherwise lose or desynchronize repaired chunk text
 - Use this when you change only the world embedding model or need to rebuild vectors without re-extracting the graph
 
 `Re-ingest With Previous Settings`
@@ -205,16 +215,19 @@ Use the rebuild and retry actions based on what went wrong:
 `Retry Extraction Failures`
 
 - Retries only failed extraction work
+- Skips chunks that are still in the unresolved Safety Review Queue and points you back to that queue instead of retrying them from source text
 
 `Retry All Failures`
 
 - Retries both failed extraction and failed embedding work
+- Also skips unresolved Safety Review Queue chunks and leaves those to the review flow
 
 Important behavior:
 
 - `Resume` is the normal path when you simply add another new source after a previous ingest
 - `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
+- The one-shot collapsed-chunk recovery action is only for the current world and current failed chunks; it does not teach future ingests to always treat those chunks as safety-blocked
 
 ## Chat
 

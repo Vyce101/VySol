@@ -22,7 +22,7 @@ from core.config import (
     world_sources_dir,
 )
 from core.ingestion_engine import audit_ingestion_integrity
-from core.ingestion_engine import get_reembed_eligibility, has_active_ingestion_run, recover_stale_ingestion
+from core.ingestion_engine import get_reembed_eligibility, get_safety_review_summary, has_active_ingestion_run, recover_stale_ingestion
 
 router = APIRouter()
 
@@ -144,6 +144,7 @@ async def get_world(world_id: str):
             "eligible_source_ids": [],
             "eligible_sources_count": 0,
         }
+    meta["safety_review_summary"] = get_safety_review_summary(world_id)
     meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
     return _with_effective_ingest_settings(meta)
 

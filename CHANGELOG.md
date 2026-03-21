@@ -14,6 +14,7 @@ All notable user-visible changes to this project will be documented in this file
 - Added per-key Gemini API key toggles and a dedicated repo-local pytest temp folder.
 - Added the VySol browser/header branding icon using the square logo asset.
 - Added a per-message `Context Graph` view in Context X-Ray for newer chat messages.
+- Added a Safety Review Queue for extraction safety blocks, including one-shot recovery for already-collapsed blocked chunks and in-app chunk editing/testing.
 
 ### Changed
 
@@ -27,6 +28,7 @@ All notable user-visible changes to this project will be documented in this file
 - Changed `# RAG Chunks` context assembly to keep full chunk text and `[B#:C#]` provenance tags while ordering included chunks by temporal provenance.
 - Changed graph node sizing and force spacing so high-connection nodes scale larger and crowded hubs spread farther apart in the graph viewers.
 - Changed ingestion rebuild controls so `Re-embed All` now verifies the original ingested source set, ignores brand-new pending sources, and blocks when older ingested files changed or need a clean rebuild.
+- Changed safety-review editing to use one editable `Raw Chunk` field with immutable original text, repeatable test/reset flows, and clearer rebuild guards around repaired chunk overrides.
 
 ### Fixed
 
@@ -38,6 +40,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed graph node hitboxes, shared graph-viewer modal sizing, context-graph interaction regressions, and uniform edge hover behavior across the graph tab and Context Graph.
 - Fixed Context Graph role visibility by explicitly labeling entry nodes versus expanded nodes in the graph legend, tooltips, and inspector.
 - Fixed chunk extraction edge binding so newly extracted edges attach to the exact node UUIDs created for that chunk instead of an older same-name node elsewhere in the graph.
+- Fixed safety-block retry handling so blocked chunks stay in the safety-review flow, retries do not collapse them into fake extraction success, and stale review popups/testing states recover cleanly.
 
 ### Removed
 

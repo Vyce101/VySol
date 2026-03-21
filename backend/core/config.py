@@ -370,6 +370,10 @@ def world_log_path(world_id: str) -> Path:
     return world_dir(world_id) / "ingestion_log.json"
 
 
+def world_safety_reviews_path(world_id: str) -> Path:
+    return world_dir(world_id) / "ingestion_safety_reviews.json"
+
+
 def world_sources_dir(world_id: str) -> Path:
     d = world_dir(world_id) / "sources"
     d.mkdir(parents=True, exist_ok=True)
