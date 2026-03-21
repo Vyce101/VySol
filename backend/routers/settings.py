@@ -35,9 +35,11 @@ async def get_settings():
     settings = load_settings()
     for key in REMOVED_SETTINGS_KEYS:
         settings.pop(key, None)
+    api_keys = settings.get("api_keys", [])
     return {
         **settings,
-        "api_key_count": len(settings.get("api_keys", [])),
+        "api_key_count": len(api_keys),
+        "api_key_active_count": sum(1 for entry in api_keys if bool(entry.get("enabled", True))),
     }
 
 
@@ -60,6 +62,7 @@ async def update_settings(body: dict):
     return {
         **{k: v for k, v in current.items() if k != "api_keys"},
         "api_key_count": len(current.get("api_keys", [])),
+        "api_key_active_count": sum(1 for entry in current.get("api_keys", []) if bool(entry.get("enabled", True))),
     }
 
 

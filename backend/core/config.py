@@ -83,6 +83,7 @@ def _coerce_float(value: object, default: float, *, minimum: float | None = None
 def sanitize_settings(settings: dict) -> dict:
     """Normalize runtime/persisted settings so invalid stage limits cannot leak into execution."""
     data = dict(settings)
+    data["api_keys"] = normalize_api_key_entries(data.get("api_keys"))
     data["ui_theme"] = "light" if str(data.get("ui_theme", _DEFAULT_SETTINGS["ui_theme"])).lower() == "light" else "dark"
     graph_default = data.get("ingestion_concurrency", _DEFAULT_SETTINGS["graph_extraction_concurrency"])
     data["graph_extraction_concurrency"] = _coerce_int(
@@ -106,6 +107,49 @@ def sanitize_settings(settings: dict) -> dict:
         minimum=0.0,
     )
     return data
+
+
+def normalize_api_key_entries(value: object) -> list[dict[str, object]]:
+    """Normalize saved API keys into `{value, enabled}` entries."""
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, str):
+            key_value = item.strip()
+            if key_value:
+                normalized.append({"value": key_value, "enabled": True})
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        raw_value = item.get("value")
+        if not isinstance(raw_value, str):
+            continue
+        key_value = raw_value.strip()
+        if not key_value:
+            continue
+
+        normalized.append(
+            {
+                "value": key_value,
+                "enabled": bool(item.get("enabled", True)),
+            }
+        )
+
+    return normalized
+
+
+def get_enabled_api_keys(settings: dict | None = None) -> list[str]:
+    """Return enabled saved API keys in persisted order."""
+    settings_data = settings or load_settings()
+    return [
+        str(entry["value"])
+        for entry in normalize_api_key_entries(settings_data.get("api_keys"))
+        if bool(entry.get("enabled", True))
+    ]
 
 
 def load_settings() -> dict:

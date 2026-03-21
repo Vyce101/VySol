@@ -1,13 +1,19 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { X, Plus, Trash2, KeyRound } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { applyTheme, normalizeTheme, type UITheme } from "@/lib/theme";
 
+interface KeyEntry {
+    value: string;
+    enabled: boolean;
+}
+
 interface SettingsData {
-    api_keys: string[];
+    api_keys: KeyEntry[];
     api_key_count: number;
+    api_key_active_count: number;
     key_rotation_mode: string;
     default_model_flash: string;
     default_model_chat: string;
@@ -32,7 +38,7 @@ interface SettingsData {
 
 export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const [settings, setSettings] = useState<SettingsData | null>(null);
-    const [keys, setKeys] = useState<string[]>([]);
+    const [keys, setKeys] = useState<KeyEntry[]>([]);
     const [newKey, setNewKey] = useState("");
     const [rotationMode, setRotationMode] = useState("FAIL_OVER");
     const [flashModel, setFlashModel] = useState("");
@@ -73,7 +79,9 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
             setChatProvider(data.chat_provider || "gemini");
             setIntenserpUrl(data.intenserp_base_url || "http://127.0.0.1:7777/v1");
             setIntenserpModelId(data.intenserp_model_id || "glm-chat");
-        } catch { /* ignore */ }
+        } catch {
+            // ignore
+        }
     }
 
     /* eslint-disable react-hooks/set-state-in-effect */
@@ -82,19 +90,34 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     }, []);
     /* eslint-enable react-hooks/set-state-in-effect */
 
+    const showToast = (msg: string) => {
+        setToast(msg);
+        setTimeout(() => setToast(""), 2000);
+    };
+
     const saveField = async (updates: Record<string, unknown>) => {
         try {
             await apiFetch("/settings", {
                 method: "POST",
                 body: JSON.stringify(updates),
             });
-            showToast("Saved ✓");
-        } catch { showToast("Save failed"); }
+            showToast("Saved");
+            if ("api_keys" in updates && Array.isArray(updates.api_keys)) {
+                const nextKeys = updates.api_keys as KeyEntry[];
+                setSettings((current) => current ? {
+                    ...current,
+                    api_key_count: nextKeys.length,
+                    api_key_active_count: nextKeys.filter((entry) => entry.enabled).length,
+                } : current);
+            }
+        } catch {
+            showToast("Save failed");
+        }
     };
 
     const addKey = async () => {
         if (!newKey.trim()) return;
-        const updated = [...keys, newKey.trim()];
+        const updated = [...keys, { value: newKey.trim(), enabled: true }];
         setKeys(updated);
         setNewKey("");
         await saveField({ api_keys: updated });
@@ -106,9 +129,12 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
         await saveField({ api_keys: updated });
     };
 
-    const showToast = (msg: string) => {
-        setToast(msg);
-        setTimeout(() => setToast(""), 2000);
+    const toggleKey = async (idx: number) => {
+        const updated = keys.map((key, i) => (
+            i === idx ? { ...key, enabled: !key.enabled } : key
+        ));
+        setKeys(updated);
+        await saveField({ api_keys: updated });
     };
 
     return (
@@ -125,7 +151,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     borderLeft: "1px solid var(--border)", overflowY: "auto", padding: 24,
                 }}
             >
-                {/* Header */}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
                     <h2 style={{ fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
                         <KeyRound size={20} style={{ color: "var(--primary)" }} /> Settings
@@ -135,19 +160,49 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     </button>
                 </div>
 
-                {/* API Keys */}
                 <Section title="API Keys">
                     <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
-                        Add Gemini API keys. Keys are stored in settings.json on disk. {settings && `(${settings.api_key_count} key${settings.api_key_count !== 1 ? "s" : ""} configured)`}
+                        Add Gemini API keys. Keys are stored in settings.json on disk. {settings && `(${settings.api_key_active_count} active / ${settings.api_key_count} stored)`}
                     </p>
 
-                    {keys.map((k, i) => (
-                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    {keys.map((key, i) => (
+                        <div
+                            key={i}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                marginBottom: 8,
+                                opacity: key.enabled ? 1 : 0.6,
+                            }}
+                        >
                             <input
-                                value={`••••••••${k.slice(-4)}`}
+                                value={`********${key.value.slice(-4)}`}
                                 readOnly
-                                style={{ flex: 1, fontFamily: "monospace", fontSize: 13 }}
+                                style={{
+                                    flex: 1,
+                                    fontFamily: "monospace",
+                                    fontSize: 13,
+                                    background: key.enabled ? "var(--background-secondary)" : "var(--overlay)",
+                                }}
                             />
+                            <button
+                                onClick={() => toggleKey(i)}
+                                style={{
+                                    minWidth: 58,
+                                    padding: "6px 10px",
+                                    borderRadius: "var(--radius)",
+                                    border: `1px solid ${key.enabled ? "var(--primary)" : "var(--border)"}`,
+                                    background: key.enabled ? "var(--primary-soft-strong)" : "transparent",
+                                    color: key.enabled ? "var(--primary-light)" : "var(--text-subtle)",
+                                    cursor: "pointer",
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    letterSpacing: "0.04em",
+                                }}
+                            >
+                                {key.enabled ? "ON" : "OFF"}
+                            </button>
                             <button
                                 onClick={() => removeKey(i)}
                                 style={{ background: "none", border: "none", color: "var(--error)", cursor: "pointer", padding: 4 }}
@@ -177,7 +232,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                         </button>
                     </div>
 
-                    {/* Rotation Mode */}
                     <div style={{ marginTop: 16 }}>
                         <label style={{ fontSize: 13, color: "var(--text-subtle)", marginBottom: 8, display: "block" }}>Key Rotation Mode</label>
                         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
@@ -280,7 +334,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     />
                 </Section>
 
-                {/* Model Selection */}
                 <Section title="AI Models">
                     <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
                         Type the exact model name. Changes auto-save. Embedding model here is only the default for new worlds.
@@ -288,7 +341,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     <ModelInput label="Graph Architect Model" value={flashModel} onChange={setFlashModel}
                         onBlur={() => saveField({ default_model_flash: flashModel })} />
 
-                    {/* Chat Provider Selector */}
                     <div style={{ marginBottom: 12 }}>
                         <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
                             Chat Provider
@@ -312,7 +364,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                         </select>
                     </div>
 
-                    {/* Conditional: Gemini model name OR IntenseRP URL + model ID */}
                     {chatProvider === "gemini" ? (
                         <ModelInput label="Chat Model" value={chatModel} onChange={setChatModel}
                             onBlur={() => saveField({ default_model_chat: chatModel })} />
@@ -334,15 +385,15 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                         onBlur={() => saveField({ default_model_entity_combiner: combinerModel })} />
                     <ModelInput label="Default Embedding Model" value={embedModel} onChange={setEmbedModel}
                         onBlur={() => saveField({ embedding_model: embedModel })} />
-                    
+
                     <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                         <div>
                             <label style={{ fontSize: 13, fontWeight: 500, color: "var(--text-subtle)", display: "block" }}>Disable Safety Filters</label>
                             <p style={{ fontSize: 11, color: "var(--text-muted)" }}>Relax Gemini content moderation for creative writing.</p>
                         </div>
-                        <input 
-                            type="checkbox" 
-                            checked={disableSafety} 
+                        <input
+                            type="checkbox"
+                            checked={disableSafety}
                             onChange={(e) => {
                                 const val = e.target.checked;
                                 setDisableSafety(val);
@@ -353,7 +404,6 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     </div>
                 </Section>
 
-                {/* Toast */}
                 {toast && (
                     <div className="toast toast-success">{toast}</div>
                 )}

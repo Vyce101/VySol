@@ -11,11 +11,11 @@ class KeyManager:
     """Manages multiple API keys with rotation and cooldown."""
 
     def __init__(self, api_keys: list[str] | None = None, mode: str = "FAIL_OVER"):
-        from .config import load_settings
+        from .config import get_enabled_api_keys, load_settings
 
         if api_keys is None:
             settings = load_settings()
-            api_keys = settings.get("api_keys", [])
+            api_keys = get_enabled_api_keys(settings)
             mode = settings.get("key_rotation_mode", "FAIL_OVER")
 
         # Fallback to env var

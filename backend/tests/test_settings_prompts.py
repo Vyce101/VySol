@@ -1,4 +1,5 @@
 import json
+import asyncio
 
 from core import config
 from routers import settings as settings_router
@@ -106,3 +107,69 @@ def test_save_settings_persists_stage_specific_controls_with_validation(tmp_path
     assert saved["graph_extraction_cooldown_seconds"] == 2.5
     assert saved["embedding_concurrency"] == 12
     assert saved["embedding_cooldown_seconds"] == 0.0
+
+
+def test_load_settings_migrates_legacy_api_key_strings_to_enabled_entries(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "api_keys": ["k1", "k2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+
+    assert loaded["api_keys"] == [
+        {"value": "k1", "enabled": True},
+        {"value": "k2", "enabled": True},
+    ]
+
+
+def test_save_settings_persists_api_key_enabled_state(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    config.save_settings(
+        {
+            "api_keys": [
+                {"value": "k1", "enabled": True},
+                {"value": "k2", "enabled": False},
+            ],
+        }
+    )
+
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert saved["api_keys"] == [
+        {"value": "k1", "enabled": True},
+        {"value": "k2", "enabled": False},
+    ]
+
+
+def test_get_settings_reports_active_and_total_api_key_counts(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "api_keys": [
+                    {"value": "k1", "enabled": True},
+                    {"value": "k2", "enabled": False},
+                    {"value": "k3", "enabled": True},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+    monkeypatch.setattr(settings_router, "load_settings", config.load_settings)
+
+    payload = asyncio.run(settings_router.get_settings())
+
+    assert payload["api_key_count"] == 3
+    assert payload["api_key_active_count"] == 2
