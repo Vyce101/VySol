@@ -89,3 +89,25 @@ Important behavior:
 - `Re-embed All` rebuilds chunk vectors from the saved chunks and rebuilds unique node vectors from the current saved graph state
 - In `Exact + chooser/combiner`, the unique-node index is rebuilt immediately after the exact pass and then incrementally refreshed after later AI merges
 - Existing worlds can migrate to this retrieval model by running `Re-embed All` once; world recreation is not required
+
+## Ingest Rebuild Safety
+
+VySol now treats `Re-embed All` as a narrow vector-maintenance operation, not a catch-all rebuild button.
+
+Important behavior:
+
+- `Re-embed All` only runs against sources that were already fully ingested in the current world
+- Newly added pending sources are ignored by `Re-embed All`; use `Resume` to ingest those
+- `Re-embed All` is blocked if a previously ingested source is missing, changed, partially ingested, failed, or comes from an older world that predates stored source snapshots
+- When that happens, the UI points you to either `Retry`, `Resume`, `Re-ingest With Previous Settings`, or `Rechunk And Re-ingest` depending on what changed
+- `Re-ingest With Previous Settings` gives you a clean full rebuild path that reuses the world's locked prior chunk settings instead of the current draft values shown in the form
+
+## Chunk-Local Graph Binding
+
+During extraction, a chunk's nodes and edges are now bound together using the exact node UUIDs created for that chunk write.
+
+This means:
+
+- Newly extracted edges attach to the specific nodes created from that same chunk
+- They no longer accidentally bind to an older same-name node elsewhere in the graph
+- Cross-chunk duplicate cleanup is still handled later by entity resolution, where it belongs

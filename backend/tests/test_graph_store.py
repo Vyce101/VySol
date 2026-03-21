@@ -93,6 +93,25 @@ def test_get_node_neighbors_are_bidirectional_and_deduplicated(monkeypatch):
     assert {neighbor["description"] for neighbor in node["neighbors"]} == {"first link", "incoming link"}
 
 
+def test_upsert_edge_prefers_direct_node_ids_over_normalized_lookup(monkeypatch):
+    store = _make_store(monkeypatch)
+    old_2b = store.upsert_node("2B", "2B", "Old 2B")
+    new_2b = store.upsert_node("2B", "2B", "New 2B")
+    scanner = store.upsert_node("9S", "9S", "Scanner")
+
+    edge_id = store.upsert_edge(new_2b, scanner, "Partners with", 7, 1, 0)
+
+    assert edge_id is not None
+    matching_edges = [
+        attrs
+        for source, target, attrs in store._iter_edge_rows()
+        if source == new_2b and target == scanner
+    ]
+    assert len(matching_edges) == 1
+    assert matching_edges[0]["source_node_id"] == new_2b
+    assert all(source != old_2b for source, _, _ in store._iter_edge_rows())
+
+
 def teardown_module(module):
     scratch_root = Path(__file__).resolve().parent / "_graph_store_tmp"
     if scratch_root.exists():

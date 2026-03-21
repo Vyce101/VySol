@@ -183,13 +183,20 @@ Use the rebuild and retry actions based on what went wrong:
 
 `Re-embed All`
 
-- Clears and rebuilds chunk vectors from the saved chunks and unique-node vectors from the current saved graph state
-- Use this when you change the world embedding model or need to rebuild vectors without re-extracting the graph
+- Clears and rebuilds chunk vectors from the previously fully ingested source set and unique-node vectors from the current saved graph state
+- Ignores brand-new pending sources you added after the last clean ingest
+- Is blocked if an older ingested source is missing, changed, partial, failed, or comes from an older world that never recorded source snapshots
+- Use this when you change only the world embedding model or need to rebuild vectors without re-extracting the graph
+
+`Re-ingest With Previous Settings`
+
+- Fully rebuilds chunks, extraction, graph data, and vectors using the world's locked previous ingest settings
+- Use this when `Re-embed All` says the prior ingested source set changed and you want a clean rebuild without adopting whatever draft chunk settings are currently in the form
 
 `Rechunk And Re-ingest`
 
-- Fully rebuilds chunks, extraction, graph data, and vectors
-- Use this when chunk settings changed or when you want a full clean rebuild
+- Fully rebuilds chunks, extraction, graph data, and vectors using the settings currently shown in the form
+- Use this when chunk settings changed on purpose or when you want a full clean rebuild with new settings
 
 `Retry Embedding Failures`
 
@@ -202,6 +209,12 @@ Use the rebuild and retry actions based on what went wrong:
 `Retry All Failures`
 
 - Retries both failed extraction and failed embedding work
+
+Important behavior:
+
+- `Resume` is the normal path when you simply add another new source after a previous ingest
+- `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
+- `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
 
 ## Chat
 

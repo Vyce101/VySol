@@ -26,6 +26,7 @@ All notable user-visible changes to this project will be documented in this file
 - Changed model-context assembly and Context X-Ray to preserve real graph nodes even when different nodes share the same display name, instead of fake-merging them by label.
 - Changed `# RAG Chunks` context assembly to keep full chunk text and `[B#:C#]` provenance tags while ordering included chunks by temporal provenance.
 - Changed graph node sizing and force spacing so high-connection nodes scale larger and crowded hubs spread farther apart in the graph viewers.
+- Changed ingestion rebuild controls so `Re-embed All` now verifies the original ingested source set, ignores brand-new pending sources, and blocks when older ingested files changed or need a clean rebuild.
 
 ### Fixed
 
@@ -36,6 +37,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed graph viewer startup layout so first-open graphs spread correctly and auto-fit no longer hijacks manual navigation.
 - Fixed graph node hitboxes, shared graph-viewer modal sizing, context-graph interaction regressions, and uniform edge hover behavior across the graph tab and Context Graph.
 - Fixed Context Graph role visibility by explicitly labeling entry nodes versus expanded nodes in the graph legend, tooltips, and inspector.
+- Fixed chunk extraction edge binding so newly extracted edges attach to the exact node UUIDs created for that chunk instead of an older same-name node elsewhere in the graph.
 
 ### Removed
 

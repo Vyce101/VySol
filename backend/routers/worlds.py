@@ -22,7 +22,7 @@ from core.config import (
     world_sources_dir,
 )
 from core.ingestion_engine import audit_ingestion_integrity
-from core.ingestion_engine import has_active_ingestion_run, recover_stale_ingestion
+from core.ingestion_engine import get_reembed_eligibility, has_active_ingestion_run, recover_stale_ingestion
 
 router = APIRouter()
 
@@ -123,6 +123,7 @@ async def create_world(req: CreateWorldRequest):
 @router.get("/{world_id}")
 async def get_world(world_id: str):
     meta = recover_stale_ingestion(world_id)
+    audit = None
     try:
         allow_synthesis = meta.get("ingestion_status") != "in_progress"
         audit = audit_ingestion_integrity(world_id, synthesize_failures=allow_synthesis, persist=True)
@@ -131,6 +132,18 @@ async def get_world(world_id: str):
     except Exception:
         # Never block world retrieval on audit issues.
         pass
+    try:
+        meta["reembed_eligibility"] = get_reembed_eligibility(world_id, meta=meta, audit_summary=audit)
+    except Exception:
+        meta["reembed_eligibility"] = {
+            "can_reembed_all": False,
+            "reason_code": "eligibility_unavailable",
+            "message": "Could not verify whether Re-embed All is safe for this world.",
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
     meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
     return _with_effective_ingest_settings(meta)
 

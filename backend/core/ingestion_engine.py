@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -455,6 +456,82 @@ def _chunk_node_records(graph_store: GraphStore, chunk_id: str) -> list[dict]:
     return output
 
 
+def _normalize_chunk_local_ref(value: str | None) -> str:
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _persist_chunk_graph_artifacts(
+    graph_store: GraphStore,
+    *,
+    nodes: list[Any],
+    edges: list[Any],
+    chunk_id: str,
+    book_number: int,
+    chunk_index: int,
+) -> list[dict]:
+    node_uuid_by_ref: dict[str, str] = {}
+    node_uuid_by_display_ref: dict[str, str | None] = {}
+    touched_node_ids: set[str] = set()
+
+    for node in nodes:
+        node_ref = _normalize_chunk_local_ref(getattr(node, "node_id", ""))
+        display_ref = _normalize_chunk_local_ref(getattr(node, "display_name", ""))
+
+        existing_uuid = node_uuid_by_ref.get(node_ref) if node_ref else None
+        if existing_uuid is None:
+            existing_uuid = graph_store.upsert_node(
+                node_id=getattr(node, "node_id", ""),
+                display_name=getattr(node, "display_name", ""),
+                description=getattr(node, "description", ""),
+                source_chunk_id=chunk_id,
+            )
+            if node_ref:
+                node_uuid_by_ref[node_ref] = existing_uuid
+
+        touched_node_ids.add(existing_uuid)
+
+        if display_ref:
+            if display_ref not in node_uuid_by_display_ref:
+                node_uuid_by_display_ref[display_ref] = existing_uuid
+            elif node_uuid_by_display_ref[display_ref] != existing_uuid:
+                node_uuid_by_display_ref[display_ref] = None
+
+    def resolve_uuid(raw_ref: str) -> str | None:
+        normalized_ref = _normalize_chunk_local_ref(raw_ref)
+        if not normalized_ref:
+            return None
+        return node_uuid_by_ref.get(normalized_ref) or node_uuid_by_display_ref.get(normalized_ref)
+
+    for edge in edges:
+        source_uuid = resolve_uuid(getattr(edge, "source_node_id", ""))
+        target_uuid = resolve_uuid(getattr(edge, "target_node_id", ""))
+        if not source_uuid or not target_uuid:
+            logger.warning(
+                "Edge skipped for chunk %s because one or both endpoints were not created in this chunk: %s -> %s",
+                chunk_id,
+                getattr(edge, "source_node_id", ""),
+                getattr(edge, "target_node_id", ""),
+            )
+            continue
+        graph_store.upsert_edge(
+            source_node_id=source_uuid,
+            target_node_id=target_uuid,
+            description=getattr(edge, "description", ""),
+            strength=getattr(edge, "strength", 5),
+            source_book=book_number,
+            source_chunk=chunk_index,
+        )
+
+    graph_store.save()
+
+    node_records: list[dict] = []
+    for node_id in sorted(touched_node_ids):
+        node = graph_store.get_node(node_id)
+        if node:
+            node_records.append(node)
+    return node_records
+
+
 async def _upsert_unique_node_vectors(
     unique_node_vector_store: VectorStore,
     node_records: list[dict],
@@ -756,6 +833,204 @@ def _resolve_world_ingest_settings(meta: dict, override: dict | None = None) -> 
     return resolved
 
 
+def _source_has_ingest_history(source: dict) -> bool:
+    if max(0, int(source.get("chunk_count") or 0)) > 0:
+        return True
+    if source.get("ingested_at"):
+        return True
+    if source.get("failed_chunks") or source.get("stage_failures"):
+        return True
+    if source.get("extracted_chunks") or source.get("embedded_chunks"):
+        return True
+    return str(source.get("status") or "pending").lower() not in {"", "pending"}
+
+
+def _compute_file_sha256(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_source_ingest_snapshot(
+    world_id: str,
+    source: dict,
+    ingest_settings: dict,
+) -> dict | None:
+    vault_filename = str(source.get("vault_filename") or "").strip()
+    if not vault_filename:
+        return None
+
+    source_path = world_sources_dir(world_id) / vault_filename
+    if not source_path.exists():
+        return None
+
+    try:
+        file_size = int(source_path.stat().st_size)
+    except OSError:
+        return None
+
+    return {
+        "vault_filename": vault_filename,
+        "file_size": file_size,
+        "file_sha256": _compute_file_sha256(source_path),
+        "chunk_size_chars": int(ingest_settings.get("chunk_size_chars", 0) or 0),
+        "chunk_overlap_chars": int(ingest_settings.get("chunk_overlap_chars", 0) or 0),
+        "embedding_model": str(ingest_settings.get("embedding_model", "") or ""),
+        "captured_at": _now_iso(),
+    }
+
+
+def _source_snapshot_chunk_settings_match(snapshot: dict, ingest_settings: dict) -> bool:
+    try:
+        return (
+            int(snapshot.get("chunk_size_chars", -1)) == int(ingest_settings.get("chunk_size_chars", -2))
+            and int(snapshot.get("chunk_overlap_chars", -1)) == int(ingest_settings.get("chunk_overlap_chars", -2))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def get_reembed_eligibility(
+    world_id: str,
+    *,
+    meta: dict | None = None,
+    audit_summary: dict | None = None,
+) -> dict:
+    if meta is None:
+        audit_summary = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+        meta = _load_meta(world_id)
+    elif audit_summary is None:
+        audit_summary = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=False)
+
+    sources = list(meta.get("sources", []))
+    if not sources:
+        return {
+            "can_reembed_all": False,
+            "reason_code": "no_sources",
+            "message": "No sources are available to re-embed.",
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
+    source_summaries = {
+        str(row.get("source_id")): row
+        for row in (audit_summary.get("sources", []) if isinstance(audit_summary, dict) else [])
+        if isinstance(row, dict) and row.get("source_id")
+    }
+    locked_settings = get_world_ingest_settings(meta=meta)
+    eligible_source_ids: list[str] = []
+    ignored_pending_sources_count = 0
+
+    def _blocked(
+        reason_code: str,
+        message: str,
+        *,
+        requires_full_rebuild: bool,
+    ) -> dict:
+        return {
+            "can_reembed_all": False,
+            "reason_code": reason_code,
+            "message": message,
+            "ignored_pending_sources_count": ignored_pending_sources_count,
+            "requires_full_rebuild": requires_full_rebuild,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
+    for source in sources:
+        if not _source_has_ingest_history(source):
+            ignored_pending_sources_count += 1
+            continue
+
+        source_id = str(source.get("source_id") or "")
+        display_name = str(source.get("display_name") or source_id or "This source")
+        source_status = str(source.get("status") or "").lower()
+        summary = source_summaries.get(source_id, {})
+
+        if source_status != "complete" or int(summary.get("failed_records", 0) or 0) > 0:
+            return _blocked(
+                "source_not_complete",
+                f"{display_name} is not fully ingested yet. Use Resume or Retry before running Re-embed All.",
+                requires_full_rebuild=False,
+            )
+
+        snapshot = source.get("ingest_snapshot")
+        if not isinstance(snapshot, dict):
+            return _blocked(
+                "legacy_snapshot_missing",
+                f"{display_name} was ingested before source snapshots were recorded. Run Re-ingest With Previous Settings or Rechunk And Re-ingest once before using Re-embed All.",
+                requires_full_rebuild=True,
+            )
+
+        if not _source_snapshot_chunk_settings_match(snapshot, locked_settings):
+            return _blocked(
+                "chunk_settings_mismatch",
+                f"{display_name} was ingested with different chunk settings than this world's locked ingest settings. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                requires_full_rebuild=True,
+            )
+
+        current_snapshot = _build_source_ingest_snapshot(world_id, source, locked_settings)
+        if current_snapshot is None:
+            return _blocked(
+                "source_missing",
+                f"{display_name}'s ingested source file is missing from the world vault. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                requires_full_rebuild=True,
+            )
+
+        if (
+            str(current_snapshot.get("vault_filename") or "") != str(snapshot.get("vault_filename") or "")
+            or int(current_snapshot.get("file_size", -1) or -1) != int(snapshot.get("file_size", -2) or -2)
+            or str(current_snapshot.get("file_sha256") or "") != str(snapshot.get("file_sha256") or "")
+        ):
+            return _blocked(
+                "source_changed",
+                f"{display_name}'s ingested source file changed since the last clean ingest. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                requires_full_rebuild=True,
+            )
+
+        eligible_source_ids.append(source_id)
+
+    if not eligible_source_ids:
+        message = (
+            "No previously fully ingested sources are available for Re-embed All. "
+            "Use Resume to ingest new pending sources first."
+            if ignored_pending_sources_count > 0
+            else "No previously fully ingested sources are available for Re-embed All."
+        )
+        return {
+            "can_reembed_all": False,
+            "reason_code": "no_completed_sources",
+            "message": message,
+            "ignored_pending_sources_count": ignored_pending_sources_count,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
+    message = (
+        f"Ready to re-embed {len(eligible_source_ids)} fully ingested source(s). "
+        f"{ignored_pending_sources_count} pending new source(s) will be ignored."
+        if ignored_pending_sources_count > 0
+        else f"Ready to re-embed {len(eligible_source_ids)} fully ingested source(s)."
+    )
+    return {
+        "can_reembed_all": True,
+        "reason_code": "ready",
+        "message": message,
+        "ignored_pending_sources_count": ignored_pending_sources_count,
+        "requires_full_rebuild": False,
+        "eligible_source_ids": eligible_source_ids,
+        "eligible_sources_count": len(eligible_source_ids),
+    }
+
+
 def _apply_world_ingest_settings(meta: dict, ingest_settings: dict, *, lock: bool = False) -> dict:
     """Persist effective ingest settings on the in-memory world metadata payload."""
     current = get_world_ingest_settings(meta=meta)
@@ -784,6 +1059,7 @@ def _reset_source_tracking_for_full_rebuild(source: dict) -> None:
     source["status"] = "pending"
     source["chunk_count"] = 0
     source["ingested_at"] = None
+    source.pop("ingest_snapshot", None)
     source["failed_chunks"] = []
     source["stage_failures"] = []
     source["extracted_chunks"] = []
@@ -1310,6 +1586,9 @@ async def start_ingestion(
     elif is_reembed_all:
         audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
         meta = _load_meta(world_id)
+        reembed_eligibility = get_reembed_eligibility(world_id, meta=meta)
+        if not reembed_eligibility.get("can_reembed_all"):
+            raise RuntimeError(str(reembed_eligibility.get("message") or "Re-embed All is not currently safe for this world."))
         world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
 
         _clear_checkpoint(world_id)
@@ -1326,8 +1605,10 @@ async def start_ingestion(
         vector_store.drop_collection()
         unique_node_vector_store.drop_collection()
 
+        eligible_source_ids = set(reembed_eligibility.get("eligible_source_ids", []))
         for source in meta.get("sources", []):
-            _prepare_source_for_reembed(source)
+            if str(source.get("source_id") or "") in eligible_source_ids:
+                _prepare_source_for_reembed(source)
         _mark_ingestion_live(meta, operation=operation_norm, started=True)
         _save_meta(world_id, meta)
     else:
@@ -1341,7 +1622,11 @@ async def start_ingestion(
         _save_meta(world_id, meta)
 
     sources = (
-        list(meta.get("sources", []))
+        [
+            source
+            for source in meta.get("sources", [])
+            if not is_reembed_all or str(source.get("source_id") or "") in eligible_source_ids
+        ]
         if is_reembed_all
         else _select_sources_for_run(
             meta,
@@ -1489,25 +1774,14 @@ async def start_ingestion(
 
                     _ensure_not_aborted(world_id, my_event)
                     async with graph_lock:
-                        for node in final_nodes:
-                            graph_store.upsert_node(
-                                node_id=node.node_id,
-                                display_name=node.display_name,
-                                description=node.description,
-                                source_chunk_id=chunk,
-                                )
-
-                        for edge in final_edges:
-                            graph_store.upsert_edge(
-                                source_node_id=edge.source_node_id,
-                                target_node_id=edge.target_node_id,
-                                description=edge.description,
-                                strength=edge.strength,
-                                source_book=book_number,
-                                source_chunk=chunk_idx,
-                            )
-                        graph_store.save()
-                        node_records_for_embedding = _chunk_node_records(graph_store, chunk)
+                        node_records_for_embedding = _persist_chunk_graph_artifacts(
+                            graph_store,
+                            nodes=final_nodes,
+                            edges=final_edges,
+                            chunk_id=chunk,
+                            book_number=book_number,
+                            chunk_index=chunk_idx,
+                        )
                     _ensure_not_aborted(world_id, my_event)
 
                     async with meta_lock:
@@ -1823,6 +2097,10 @@ async def start_ingestion(
 
             if not my_event.is_set() and _is_current_run(world_id, my_event):
                 _update_source_status_from_coverage(source)
+                if source.get("status") == "complete":
+                    snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
+                    if snapshot:
+                        source["ingest_snapshot"] = snapshot
                 _mark_ingestion_live(meta, operation=operation_norm)
                 _save_meta(world_id, meta)
 

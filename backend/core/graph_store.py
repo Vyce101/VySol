@@ -150,9 +150,10 @@ class GraphStore:
         source_chunk: int,
     ) -> str | None:
         """Upsert an edge. Returns edge_id or None if nodes missing."""
-        # Resolve normalized IDs to permanent UUIDs
-        source_uuid = self._resolve_normalized(source_node_id)
-        target_uuid = self._resolve_normalized(target_node_id)
+        # Prefer direct graph UUIDs when provided, otherwise fall back to
+        # normalized-name lookup for legacy callers.
+        source_uuid = source_node_id if source_node_id in self.graph.nodes else self._resolve_normalized(source_node_id)
+        target_uuid = target_node_id if target_node_id in self.graph.nodes else self._resolve_normalized(target_node_id)
 
         if not source_uuid:
             logger.warning(f"Edge skipped: source node '{source_node_id}' not found")

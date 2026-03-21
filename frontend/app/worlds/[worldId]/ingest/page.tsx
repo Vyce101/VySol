@@ -67,10 +67,21 @@ interface IngestSettings {
     last_ingest_settings_at?: string | null;
 }
 
+interface ReembedEligibility {
+    can_reembed_all: boolean;
+    reason_code: string;
+    message: string;
+    ignored_pending_sources_count: number;
+    requires_full_rebuild: boolean;
+    eligible_source_ids: string[];
+    eligible_sources_count: number;
+}
+
 interface WorldResponse {
     ingestion_status?: string;
     ingest_settings?: IngestSettings;
     active_ingestion_run?: boolean;
+    reembed_eligibility?: ReembedEligibility;
 }
 
 interface SettingsResponse {
@@ -149,6 +160,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [chunkOverlap, setChunkOverlap] = useState(150);
     const [embeddingModel, setEmbeddingModel] = useState("gemini-embedding-2-preview");
     const [savedIngestSettings, setSavedIngestSettings] = useState<IngestSettings | null>(null);
+    const [reembedEligibility, setReembedEligibility] = useState<ReembedEligibility | null>(null);
     const [gleanAmount, setGleanAmount] = useState(1);
     const [gleanAmountDraft, setGleanAmountDraft] = useState("1");
     const [prompts, setPrompts] = useState<Record<string, { value: string; source: string }>>({});
@@ -192,6 +204,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     async function loadWorld() {
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
+            setReembedEligibility(data.reembed_eligibility ?? null);
             if (data.ingest_settings) {
                 setSavedIngestSettings(data.ingest_settings);
                 setChunkSize(data.ingest_settings.chunk_size_chars);
@@ -321,15 +334,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     /* eslint-enable react-hooks/exhaustive-deps */
     useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logEntries]);
 
-    const buildIngestSettingsPayload = () => ({
-        chunk_size_chars: chunkSize,
-        chunk_overlap_chars: chunkOverlap,
-        embedding_model: embeddingModel.trim(),
+    const buildIngestSettingsPayload = (override?: Partial<IngestSettings>) => ({
+        chunk_size_chars: override?.chunk_size_chars ?? chunkSize,
+        chunk_overlap_chars: override?.chunk_overlap_chars ?? chunkOverlap,
+        embedding_model: override?.embedding_model ?? embeddingModel.trim(),
     });
 
     const startIngestion = async (
         resume: boolean,
         operation: "default" | "rechunk_reingest" | "reembed_all" = "default",
+        overrideSettings?: Partial<IngestSettings>,
     ) => {
         resetProgress();
         setIngesting(true);
@@ -340,7 +354,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 body: JSON.stringify({
                     resume,
                     operation,
-                    ingest_settings: buildIngestSettingsPayload(),
+                    ingest_settings: buildIngestSettingsPayload(overrideSettings),
                 }),
             });
             connectToSSE();
@@ -430,6 +444,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     );
     const hasAnyIngested = sources.some((s) => s.chunk_count > 0 || s.ingested_at !== null || s.status === "partial_failure" || s.status === "complete");
     const allComplete = sources.length > 0 && sources.every((s) => s.status === "complete");
+    const hasLockedPreviousSettings = Boolean(
+        savedIngestSettings?.locked_at
+        && Number.isFinite(savedIngestSettings?.chunk_size_chars)
+        && Number.isFinite(savedIngestSettings?.chunk_overlap_chars)
+        && savedIngestSettings?.embedding_model
+    );
     const chunkSettingsChanged = Boolean(savedIngestSettings) && (
         chunkSize !== savedIngestSettings.chunk_size_chars
         || chunkOverlap !== savedIngestSettings.chunk_overlap_chars
@@ -437,6 +457,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const embeddingModelChanged = Boolean(savedIngestSettings) && embeddingModel.trim() !== savedIngestSettings.embedding_model;
     const showRechunkAction = !ingesting && hasAnyIngested;
     const showReembedAction = !ingesting && hasAnyIngested;
+    const canReembedAll = Boolean(
+        showReembedAction
+        && reembedEligibility?.can_reembed_all
+        && !chunkSettingsChanged
+    );
+    const reembedReadyExplanation = reembedEligibility?.message
+        || "This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph.";
+    const reembedDisabledReason = chunkSettingsChanged
+        ? "Re-embed All always uses this world's locked chunk settings. Use Re-ingest With Previous Settings or Rechunk And Re-ingest to change chunk size or overlap."
+        : reembedEligibility?.message
+            || "Re-embed All is not currently safe for this world.";
+    const previousSettingsSummary = savedIngestSettings
+        ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | ${savedIngestSettings.embedding_model}`
+        : null;
     const hasPendingWorldSettingChange = chunkSettingsChanged || embeddingModelChanged;
     const canResolveEntities = !ingesting && !hasPending && hasAnyIngested;
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
@@ -595,6 +629,17 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 ? "Chunk size or overlap changed. This full rebuild will re-chunk, re-extract, rebuild the graph, and re-embed everything for this world."
                                 : "This full rebuild re-chunks, re-extracts, rebuilds the graph, and re-embeds everything for this world using the current ingest settings."}
                         </div>
+                        {hasLockedPreviousSettings && savedIngestSettings && (
+                            <button
+                                onClick={() => {
+                                    if (!confirm("This will clear this world's graph and vectors, then fully rebuild it using the previously locked ingest settings from the last clean ingest. Chats and other non-ingest data stay intact. Continue?")) return;
+                                    startIngestion(false, "rechunk_reingest", savedIngestSettings);
+                                }}
+                                style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}
+                            >
+                                Re-ingest With Previous Settings
+                            </button>
+                        )}
                         <button
                             onClick={() => {
                                 if (!confirm("This will clear this world's graph and vectors, then re-chunk, re-extract, rebuild the graph, and re-embed everything for this world. Chats and other non-ingest data stay intact. Continue?")) return;
@@ -602,7 +647,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             }}
                             style={{ ...btnStyle, background: "var(--status-progress-bg)", color: "var(--primary-contrast)", width: "100%" }}
                         >
-                            Rechunk And Re-ingest
+                            Rechunk And Re-ingest (Current Settings)
                         </button>
                     </div>
                 )}
@@ -614,12 +659,31 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 ? "Embedding model changed. This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph."
                                 : "This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph."}
                         </div>
+                        <div style={{
+                            fontSize: 12,
+                            color: canReembedAll ? "var(--text-subtle)" : "#fca5a5",
+                            lineHeight: 1.5,
+                            padding: "10px 12px",
+                            borderRadius: 8,
+                            border: canReembedAll ? "1px solid var(--border)" : "1px solid rgba(248,113,113,0.28)",
+                            background: canReembedAll ? "var(--background)" : "rgba(127,29,29,0.16)",
+                        }}>
+                            {canReembedAll ? reembedReadyExplanation : reembedDisabledReason}
+                        </div>
                         <button
                             onClick={() => {
                                 if (!confirm("This will clear this world's chunk and node vectors and re-embed all stored world content without re-extracting or rebuilding the graph. Chats and other non-ingest data stay intact. Continue?")) return;
                                 startIngestion(false, "reembed_all");
                             }}
-                            style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}
+                            disabled={!canReembedAll}
+                            style={{
+                                ...btnStyle,
+                                background: "var(--primary)",
+                                color: "var(--primary-contrast)",
+                                width: "100%",
+                                opacity: canReembedAll ? 1 : 0.45,
+                                cursor: canReembedAll ? "pointer" : "not-allowed",
+                            }}
                         >
                             Re-embed All
                         </button>
@@ -735,6 +799,29 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Changing chunk settings requires a full Rechunk And Re-ingest. Changing only the embedding model uses Re-embed All to rebuild chunk and node vectors without re-extracting.`
                             : "This world has not locked ingest settings yet. The values below will be locked on the first full ingest."}
                     </div>
+                    {savedIngestSettings?.locked_at && previousSettingsSummary && (
+                        <div style={{
+                            marginBottom: 12,
+                            padding: "10px 12px",
+                            borderRadius: 8,
+                            background: "var(--background)",
+                            border: "1px solid var(--border)",
+                            display: "grid",
+                            gap: 4,
+                        }}>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+                                Locked Previous Settings
+                            </div>
+                            <div style={{ fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
+                                {previousSettingsSummary}
+                            </div>
+                            {savedIngestSettings.locked_at && (
+                                <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                                    Locked on {new Date(savedIngestSettings.locked_at).toLocaleString()}
+                                </div>
+                            )}
+                        </div>
+                    )}
                     <div style={{ marginBottom: 12 }}>
                         <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>Chunk Size (chars)</label>
                         <input type="number" value={chunkSize} onChange={(e) => setChunkSize(Number(e.target.value))} style={{ width: "100%" }} />
@@ -797,7 +884,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         </p>
                         {(hasAnyIngested || hasRetryableFailures) && (
                             <p style={{ fontSize: 13, marginTop: 6 }}>
-                                Retry failures or use Re-embed All / Rechunk And Re-ingest from the left panel.
+                                Retry failures or use Re-embed All / Re-ingest With Previous Settings / Rechunk And Re-ingest from the left panel.
                             </p>
                         )}
                     </div>

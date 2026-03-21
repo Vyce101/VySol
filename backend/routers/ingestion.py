@@ -11,11 +11,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal
 
+from core.config import get_world_ingest_settings
 from core.config import world_meta_path
 from core.ingestion_engine import (
     audit_ingestion_integrity,
     abort_ingestion,
     drain_sse_events,
+    get_reembed_eligibility,
     get_checkpoint_info,
     has_active_ingestion_run,
     recover_stale_ingestion,
@@ -57,14 +59,30 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
         meta = _load_meta(world_id)
         if not meta.get("sources"):
             raise HTTPException(status_code=400, detail="No sources available to re-embed.")
-        incomplete_extraction = any(
-            source_summary.get("missing_extraction_chunks")
-            for source_summary in audit.get("sources", [])
-        )
-        if incomplete_extraction:
+
+        locked_settings = get_world_ingest_settings(meta=meta)
+        if req.ingest_settings:
+            for key in ("chunk_size_chars", "chunk_overlap_chars"):
+                value = req.ingest_settings.get(key)
+                if value in (None, ""):
+                    continue
+                try:
+                    if int(value) != int(locked_settings.get(key)):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Re-embed All uses this world's locked chunk settings. Use Re-ingest With Previous Settings or Rechunk And Re-ingest to change chunk settings.",
+                        )
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Re-embed All received invalid chunk settings. Use the locked world settings or run a full re-ingest.",
+                    )
+
+        eligibility = get_reembed_eligibility(world_id, meta=meta, audit_summary=audit)
+        if not eligibility.get("can_reembed_all"):
             raise HTTPException(
                 status_code=400,
-                detail="Cannot re-embed while extraction coverage is incomplete. Retry extraction failures or rechunk and re-ingest.",
+                detail=str(eligibility.get("message") or "Re-embed All is not currently safe for this world."),
             )
         bg.add_task(start_ingestion, world_id, False, "all", None, False, operation, req.ingest_settings)
         return {"status": "accepted", "world_id": world_id, "operation": operation}
