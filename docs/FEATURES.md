@@ -66,7 +66,9 @@ Newer messages also include a `Context Graph` view.
 
 - It shows the exact node-and-edge graph that was sent in that message's context
 - It uses the same core graph interactions as the main graph view, including pan, zoom, node click, and hover details
-- It is built from the rendered context the model actually saw, including merged display names and deduplicated graph edges
+- It is built from the same real context records the model actually saw, without fake-merging different nodes just because they share a display name
+- It preserves duplicate display names when those names belong to different real graph nodes
+- It marks entry nodes separately from graph-expanded nodes so you can see which nodes seeded graph expansion
 - Older messages that predate graph capture continue to show the text/X-Ray views without attempting a live reconstruction
 
 X-Ray records are saved per message so you can go back and inspect any point

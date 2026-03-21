@@ -183,7 +183,7 @@ Use the rebuild and retry actions based on what went wrong:
 
 `Re-embed All`
 
-- Clears and rebuilds chunk and node vectors only
+- Clears and rebuilds chunk vectors from the saved chunks and unique-node vectors from the current saved graph state
 - Use this when you change the world embedding model or need to rebuild vectors without re-extracting the graph
 
 `Rechunk And Re-ingest`
