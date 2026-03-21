@@ -21,20 +21,28 @@ What this gives you:
 
 ## How Entity Resolution Works
 
-Entity resolution happens in two stages.
+Entity resolution now has two run modes.
 
-First:
+`Exact only`
 
-- The app does an exact normalized-name pass
-- This can auto-resolve obvious duplicates without spending chooser model calls
+- Runs the normalized-name pass only
+- Auto-resolves obvious duplicates without spending chooser or combiner model calls
+- Stops after the exact pass finishes
 
-Then:
+`Exact + chooser/combiner`
 
-- The app has a master list of all entities and chooses Top K most similiar entities via vector search
+- Starts with the same normalized exact pass
+- Then builds a Top K candidate list for each remaining anchor entity with vector search
 - The chooser model decides which candidates are actually the same entity as the anchor
 - The combiner model merges the chosen group into one canonical result
-- All entities that were merged are removed from the master list
-- Repeat
+- All entities that were merged are removed from the remaining list
+- Repeat until the unresolved list is exhausted
+
+Important behavior:
+
+- Exact-only runs never enter candidate search, chooser, or combiner phases
+- Exact + chooser/combiner runs still preserve temporal graph edges while merging entities
+- Older data that predates the new run-mode field still maps safely to the previous behavior
 
 ## Context X-Ray
 

@@ -143,6 +143,11 @@ Entity Resolution Combiner Prompt:
 
 - Controls how chosen duplicate entities are merged into one final name and description
 
+Important:
+
+- The chooser and combiner prompts matter only when you run `Exact + chooser/combiner`
+- `Exact only` does not call either model stage
+
 ## Ingestion Flow
 
 Basic flow:
@@ -156,7 +161,13 @@ Basic flow:
 After ingestion finishes:
 
 1. Click `Resolve Entities`.
-2. Let entity resolution run.
+2. Pick a run mode: `Exact only` for a fast normalized-name cleanup pass, or `Exact + chooser/combiner` for the full duplicate-resolution workflow.
+3. Let entity resolution run.
+
+Entity-resolution controls:
+
+- `Resolution mode` chooses whether the run stops after exact normalized matching or continues into chooser/combiner review
+- `Top K candidates` is used only for `Exact + chooser/combiner`
 
 ## Rebuild And Retry Actions
 

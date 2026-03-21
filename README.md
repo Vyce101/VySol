@@ -13,6 +13,8 @@ VySol is an accessible local-first graph RAG app built to make ingestion, graph 
 
 You can ingest plain-text source material, control how the graph is built, resolve duplicate entities after ingestion, and chat with both chunk retrieval and graph context without leaving the app.
 
+Entity resolution supports a fast `Exact only` cleanup pass or a fuller `Exact + chooser/combiner` workflow after ingestion.
+
 This project is licensed under the GNU AGPLv3. Companies requiring a commercial license should see [COMMERCIAL.md](COMMERCIAL.md).
 
 ## Supported OS
