@@ -7,8 +7,13 @@ import { ThemeController } from "@/components/ThemeController";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-    title: "Vysol",
+    title: "VySol",
     description: "Accessible graph RAG for building worlds, graphs, and chat workflows in one place.",
+    icons: {
+        icon: "/vysol-square.png",
+        shortcut: "/vysol-square.png",
+        apple: "/vysol-square.png",
+    },
 };
 
 export default function RootLayout({

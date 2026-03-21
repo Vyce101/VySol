@@ -264,7 +264,7 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
 
                 <Section title="Theme">
                     <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
-                        Choose the global app theme. Dark keeps the current look. Light uses the Vysol blue, white, and navy brand palette.
+                        Choose the global app theme. Dark keeps the current look. Light uses the VySol blue, white, and navy brand palette.
                     </p>
                     <div style={{ display: "flex", gap: 8 }}>
                         {(["dark", "light"] as UITheme[]).map((mode) => (

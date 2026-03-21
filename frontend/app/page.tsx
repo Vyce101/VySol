@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useState, useEffect } from "react";
 import { Settings, Plus, MoreVertical, Trash2, Pencil, Loader2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -177,19 +178,21 @@ export default function HomePage() {
         <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 24px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 32 }}>
                 <h1 style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 28, fontWeight: 700, color: "var(--text-primary)" }}>
-                    <span
+                    <Image
+                        src="/vysol-square.png"
+                        alt=""
                         aria-hidden="true"
+                        width={30}
+                        height={30}
+                        priority
                         style={{
-                            display: "inline-block",
-                            width: 14,
-                            height: 14,
-                            borderRadius: 3,
-                            background: "linear-gradient(135deg, var(--primary-light), var(--primary))",
-                            transform: "translateY(-1px) rotate(45deg)",
-                            boxShadow: "0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent)",
+                            width: 30,
+                            height: 30,
+                            objectFit: "contain",
+                            transform: "translateY(-1px)",
                         }}
                     />
-                    <span>Vysol</span>
+                    <span>VySol</span>
                 </h1>
                 <button
                     onClick={() => setShowSettings(true)}
