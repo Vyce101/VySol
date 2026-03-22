@@ -446,6 +446,65 @@ def _progress_source(meta: dict, source_id: str | None = None) -> dict | None:
     return sources[0]
 
 
+def _coerce_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _live_stage_counters(meta: dict) -> dict[str, int]:
+    sources = list(meta.get("sources", []))
+    expected_chunks = 0
+    extracted_chunks = 0
+    embedded_chunks = 0
+    sources_complete = 0
+    sources_partial_failure = 0
+
+    for source in sources:
+        chunk_count = max(0, int(source.get("chunk_count") or 0))
+        expected_chunks += chunk_count
+        extracted_chunks += len(_normalize_index_list(source.get("extracted_chunks", [])))
+        embedded_chunks += len(_normalize_index_list(source.get("embedded_chunks", [])))
+
+        status = str(source.get("status") or "")
+        if status == "complete":
+            sources_complete += 1
+        elif status == "partial_failure":
+            sources_partial_failure += 1
+
+    failed_records = sum(len(list(source.get("stage_failures", []))) for source in sources)
+    current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
+    embedded_unique_nodes = _coerce_non_negative_int(meta.get("embedded_unique_nodes"))
+    if current_unique_nodes > 0:
+        embedded_unique_nodes = min(embedded_unique_nodes, current_unique_nodes)
+    return {
+        "expected_chunks": expected_chunks,
+        "extracted_chunks": extracted_chunks,
+        "embedded_chunks": embedded_chunks,
+        "current_unique_nodes": current_unique_nodes,
+        "embedded_unique_nodes": embedded_unique_nodes,
+        "failed_records": failed_records,
+        "sources_total": len(sources),
+        "sources_complete": sources_complete,
+        "sources_partial_failure": sources_partial_failure,
+    }
+
+
+def _progress_source_summary(source: dict | None) -> dict[str, Any]:
+    if not source:
+        return {
+            "progress_source_id": None,
+            "progress_source_display_name": None,
+            "progress_source_book_number": None,
+        }
+    return {
+        "progress_source_id": source.get("source_id"),
+        "progress_source_display_name": source.get("display_name"),
+        "progress_source_book_number": source.get("book_number"),
+    }
+
+
 def _progress_phase_from_agent(active_agent: str | None) -> str | None:
     agent = str(active_agent or "").strip().lower()
     if not agent:
@@ -521,6 +580,8 @@ def _build_progress_event(
     )
     payload["ingestion_status"] = meta.get("ingestion_status")
     payload["active_ingestion_run"] = has_active_ingestion_run(world_id)
+    payload["stage_counters"] = _live_stage_counters(meta)
+    payload.update(_progress_source_summary(_progress_source(meta, source_id=source_id)))
     return payload
 
 
@@ -2352,12 +2413,15 @@ def audit_ingestion_integrity(
     meta["total_chunks"] = sum(int(s.get("chunk_count") or 0) for s in meta.get("sources", []))
     meta["total_nodes"] = graph_store.get_node_count()
     meta["total_edges"] = graph_store.get_edge_count()
+    meta["embedded_unique_nodes"] = embedded_node_total
 
     summary = {
         "world": {
             "expected_chunks": expected_total,
             "extracted_chunks": extracted_total,
             "embedded_chunks": embedded_total,
+            "current_unique_nodes": meta["total_nodes"],
+            "embedded_unique_nodes": embedded_node_total,
             "expected_node_vectors": expected_node_total,
             "embedded_node_vectors": embedded_node_total,
             "failed_records": failed_total,
@@ -2528,6 +2592,7 @@ async def start_ingestion(
         _mark_ingestion_live(meta, operation=operation_norm, started=True)
         meta["total_chunks"] = 0
         meta["total_nodes"] = 0
+        meta["embedded_unique_nodes"] = 0
         meta["total_edges"] = 0
         _save_meta(world_id, meta)
     elif is_reembed_all:
@@ -2557,6 +2622,7 @@ async def start_ingestion(
             if str(source.get("source_id") or "") in eligible_source_ids:
                 _prepare_source_for_reembed(source)
         _mark_ingestion_live(meta, operation=operation_norm, started=True)
+        meta["embedded_unique_nodes"] = 0
         _save_meta(world_id, meta)
     else:
         # Resume/retry flow includes an audit pass that can synthesize
@@ -2833,6 +2899,8 @@ async def start_ingestion(
                     )
 
                     _ensure_not_aborted(world_id, my_event)
+                    live_total_nodes = 0
+                    live_total_edges = 0
                     async with graph_lock:
                         node_records_for_embedding = _persist_chunk_graph_artifacts(
                             graph_store,
@@ -2842,6 +2910,8 @@ async def start_ingestion(
                             book_number=book_number,
                             chunk_index=chunk_idx,
                         )
+                        live_total_nodes = graph_store.get_node_count()
+                        live_total_edges = graph_store.get_edge_count()
                     _ensure_not_aborted(world_id, my_event)
 
                     if not _chunk_has_graph_coverage(graph_store, chunk):
@@ -2859,6 +2929,8 @@ async def start_ingestion(
 
                     async with meta_lock:
                         _mark_stage_success(source, stage="extraction", chunk_index=chunk_idx, chunk_id=chunk)
+                        meta["total_nodes"] = max(_coerce_non_negative_int(meta.get("total_nodes")), live_total_nodes)
+                        meta["total_edges"] = max(_coerce_non_negative_int(meta.get("total_edges")), live_total_edges)
                         _mark_ingestion_live(meta, operation=operation_norm)
                         _save_meta(world_id, meta)
 
@@ -2990,6 +3062,7 @@ async def start_ingestion(
                 _ensure_not_aborted(world_id, my_event)
                 chunk_embedding = chunk_embeddings[0]
                 unique_node_embedding_count = 0
+                embedded_unique_node_total = 0
 
                 _ensure_not_aborted(world_id, my_event)
                 async with vector_lock:
@@ -3036,10 +3109,19 @@ async def start_ingestion(
                     vector_lock=vector_lock,
                     abort_check=lambda: _ensure_not_aborted(world_id, my_event),
                 )
+                async with vector_lock:
+                    embedded_unique_node_total = await asyncio.to_thread(unique_node_vector_store.count)
                 _ensure_not_aborted(world_id, my_event)
 
                 async with meta_lock:
                     _mark_stage_success(source, stage="embedding", chunk_index=chunk_idx, chunk_id=chunk)
+                    current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
+                    if current_unique_nodes > 0:
+                        embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
+                    meta["embedded_unique_nodes"] = max(
+                        _coerce_non_negative_int(meta.get("embedded_unique_nodes")),
+                        embedded_unique_node_total,
+                    )
                     checkpoint = _load_checkpoint(world_id) or {}
                     last_completed = int(checkpoint.get("last_completed_chunk_index", -1))
                     _save_checkpoint(

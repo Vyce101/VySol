@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, use } from "react";
 import { Upload, FileText, Trash2, Play, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import EntityResolutionPanel from "@/components/EntityResolutionPanel";
 import { apiFetch, apiUpload, apiStreamGet } from "@/lib/api";
+import { buildIngestActivityLabel, resolveStableIngestProgress } from "@/lib/ingest-progress";
 
 interface Source {
     source_id: string;
@@ -37,6 +38,8 @@ interface StageCounters {
     expected_chunks: number;
     extracted_chunks: number;
     embedded_chunks: number;
+    current_unique_nodes: number;
+    embedded_unique_nodes: number;
     failed_records: number;
     sources_total: number;
     sources_complete: number;
@@ -62,6 +65,9 @@ interface Checkpoint {
     wait_stage?: "extracting" | "embedding" | null;
     wait_label?: string | null;
     wait_retry_after_seconds?: number | null;
+    progress_source_id?: string | null;
+    progress_source_display_name?: string | null;
+    progress_source_book_number?: number | null;
 }
 
 interface IngestSettings {
@@ -121,24 +127,28 @@ interface LogEntry {
     total_chunks_current_phase?: number;
     progress_percent?: number;
     active_operation?: string;
+    stage_counters?: StageCounters;
     wait_state?: "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key" | null;
     wait_stage?: "extracting" | "embedding" | null;
     wait_label?: string | null;
     wait_retry_after_seconds?: number | null;
     wait_duration_seconds?: number;
+    progress_source_id?: string | null;
+    progress_source_display_name?: string | null;
+    progress_source_book_number?: number | null;
 }
 
 interface ProgressState {
-    completed: number;
-    total: number;
-    percent: number;
     phase: "extracting" | "embedding" | "aborting" | "idle";
-    agent: string;
     operation: string;
+    activeAgent: string | null;
+    stageCounters: StageCounters;
     waitState: "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key" | null;
-    waitStage: "extracting" | "embedding" | null;
     waitLabel: string | null;
     waitRetryAfterSeconds: number | null;
+    progressSourceId: string | null;
+    progressSourceDisplayName: string | null;
+    progressSourceBookNumber: number | null;
 }
 
 interface SafetyReviewSummary {
@@ -227,16 +237,27 @@ function formatWaitReason(waitLabel?: string | null): string {
 export default function IngestPage({ params }: { params: Promise<{ worldId: string }> }) {
     const { worldId } = use(params);
     const initialProgress: ProgressState = {
-        completed: 0,
-        total: 0,
-        percent: 0,
         phase: "idle",
-        agent: "",
         operation: "default",
+        activeAgent: null,
+        stageCounters: {
+            expected_chunks: 0,
+            extracted_chunks: 0,
+            embedded_chunks: 0,
+            current_unique_nodes: 0,
+            embedded_unique_nodes: 0,
+            failed_records: 0,
+            sources_total: 0,
+            sources_complete: 0,
+            sources_partial_failure: 0,
+            synthesized_failures: 0,
+        },
         waitState: null,
-        waitStage: null,
         waitLabel: null,
         waitRetryAfterSeconds: null,
+        progressSourceId: null,
+        progressSourceDisplayName: null,
+        progressSourceBookNumber: null,
     };
     const [sources, setSources] = useState<Source[]>([]);
     const [checkpoint, setCheckpoint] = useState<Checkpoint | null>(null);
@@ -258,7 +279,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [embeddingModel, setEmbeddingModel] = useState("gemini-embedding-2-preview");
     const [savedIngestSettings, setSavedIngestSettings] = useState<IngestSettings | null>(null);
     const [reembedEligibility, setReembedEligibility] = useState<ReembedEligibility | null>(null);
-    const [gleanAmount, setGleanAmount] = useState(1);
     const [gleanAmountDraft, setGleanAmountDraft] = useState("1");
     const [prompts, setPrompts] = useState<Record<string, { value: string; source: string }>>({});
     const [blockedChunkData, setBlockedChunkData] = useState<{ text: string; reason: string } | null>(null);
@@ -274,6 +294,22 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const resetProgress = () => setProgress(initialProgress);
     const isTerminalIngestionStatus = (status?: string | null) => Boolean(status && status !== "in_progress");
+    const mergeStageCounters = (previous: StageCounters, incoming?: StageCounters): StageCounters => {
+        if (!incoming) return previous;
+        return {
+            expected_chunks: Math.max(Number(previous.expected_chunks ?? 0), Number(incoming.expected_chunks ?? 0)),
+            extracted_chunks: Math.max(Number(previous.extracted_chunks ?? 0), Number(incoming.extracted_chunks ?? 0)),
+            embedded_chunks: Math.max(Number(previous.embedded_chunks ?? 0), Number(incoming.embedded_chunks ?? 0)),
+            current_unique_nodes: Math.max(Number(previous.current_unique_nodes ?? 0), Number(incoming.current_unique_nodes ?? 0)),
+            embedded_unique_nodes: Math.max(Number(previous.embedded_unique_nodes ?? 0), Number(incoming.embedded_unique_nodes ?? 0)),
+            failed_records: Math.max(Number(previous.failed_records ?? 0), Number(incoming.failed_records ?? 0)),
+            sources_total: Math.max(Number(previous.sources_total ?? 0), Number(incoming.sources_total ?? 0)),
+            sources_complete: Math.max(Number(previous.sources_complete ?? 0), Number(incoming.sources_complete ?? 0)),
+            sources_partial_failure: Math.max(Number(previous.sources_partial_failure ?? 0), Number(incoming.sources_partial_failure ?? 0)),
+            synthesized_failures: Math.max(Number(previous.synthesized_failures ?? 0), Number(incoming.synthesized_failures ?? 0)),
+        };
+    };
+
     const syncSafetyReviewState = (reviews: SafetyReviewItem[], summary?: SafetyReviewSummary | null) => {
         setSafetyReviews(reviews);
         setSafetyReviewSummary(summary ?? null);
@@ -304,36 +340,30 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const syncProgressFromPayload = (payload?: Partial<Checkpoint & LogEntry>) => {
         if (!payload) return;
-        const explicitTotal = Number(payload.total_chunks_current_phase ?? 0);
-        const explicitCompleted = Number(payload.completed_chunks_current_phase ?? 0);
-        const fallbackTotal = Number(payload.chunks_total ?? 0);
-        const fallbackCompleted = Number(payload.chunk_index ?? 0);
-        const total = explicitTotal > 0 ? explicitTotal : Math.max(0, fallbackTotal);
-        const completed = total > 0
-            ? Math.max(0, Math.min(total, explicitTotal > 0 ? explicitCompleted : fallbackCompleted))
-            : 0;
-        const percent = total > 0
-            ? Math.max(0, Math.min(100, Number(payload.progress_percent ?? ((completed / total) * 100))))
-            : 0;
-        setProgress((prev) => ({
-            completed,
-            total,
-            percent,
-            phase: payload.progress_phase || prev.phase,
-            agent: payload.active_agent || payload.agent || prev.agent,
-            operation: payload.active_operation || prev.operation,
-            waitState: payload.wait_state ?? null,
-            waitStage: payload.wait_stage ?? null,
-            waitLabel: payload.wait_label ?? null,
-            waitRetryAfterSeconds: payload.wait_retry_after_seconds ?? null,
-        }));
+        setProgress((prev) => {
+            const liveRun = payload.active_ingestion_run === true || payload.ingestion_status === "in_progress";
+            const nextStageCounters = payload.stage_counters
+                ? (liveRun ? mergeStageCounters(prev.stageCounters, payload.stage_counters) : payload.stage_counters)
+                : prev.stageCounters;
+            return {
+                phase: payload.progress_phase || prev.phase,
+                operation: payload.active_operation || prev.operation,
+                activeAgent: payload.active_agent || payload.agent || prev.activeAgent,
+                stageCounters: nextStageCounters,
+                waitState: payload.wait_state ?? null,
+                waitLabel: payload.wait_label ?? null,
+                waitRetryAfterSeconds: payload.wait_retry_after_seconds ?? null,
+                progressSourceId: payload.progress_source_id ?? payload.source_id ?? prev.progressSourceId,
+                progressSourceDisplayName: payload.progress_source_display_name ?? prev.progressSourceDisplayName,
+                progressSourceBookNumber: payload.progress_source_book_number ?? payload.book_number ?? prev.progressSourceBookNumber,
+            };
+        });
     };
 
     async function loadSettings() {
         try {
             const data = await apiFetch<SettingsResponse>(`/settings`);
             const normalized = normalizeGleanAmount(data.glean_amount);
-            setGleanAmount(normalized);
             setGleanAmountDraft(String(normalized));
         } catch { /* ignore */ }
     }
@@ -675,7 +705,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const saveAgentSettings = async () => {
         try {
             const normalized = normalizeGleanAmount(gleanAmountDraft);
-            setGleanAmount(normalized);
             setGleanAmountDraft(String(normalized));
             await apiFetch("/settings", {
                 method: "POST",
@@ -688,7 +717,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const commitGleanDraft = () => {
         const normalized = normalizeGleanAmount(gleanAmountDraft);
-        setGleanAmount(normalized);
         setGleanAmountDraft(String(normalized));
     };
 
@@ -869,48 +897,41 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const hasPendingWorldSettingChange = chunkSettingsChanged || embeddingModelChanged;
     const canResolveEntities = !ingesting && !hasPending && hasAnyIngested;
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
-    const stageCounters = checkpoint?.stage_counters;
+    const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
+        lookup[source.source_id] = source.display_name;
+        return lookup;
+    }, {});
+    const progressSummary = resolveStableIngestProgress({
+        active_operation: progress.operation,
+        progress_phase: progress.phase,
+        stage_counters: progress.stageCounters,
+        wait_state: progress.waitState,
+        wait_label: progress.waitLabel,
+        wait_retry_after_seconds: progress.waitRetryAfterSeconds,
+        active_agent: progress.activeAgent,
+        progress_source_id: progress.progressSourceId,
+        progress_source_display_name: progress.progressSourceDisplayName,
+        progress_source_book_number: progress.progressSourceBookNumber,
+    });
+    const progressSecondaryLabel = buildIngestActivityLabel(progressSummary, {
+        fallbackSourceDisplayName: progress.progressSourceId ? sourceNameById[progress.progressSourceId] : null,
+    });
+    const stageCounters = ingesting
+        ? progress.stageCounters
+        : (checkpoint?.stage_counters ?? progress.stageCounters);
     const reviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
     const blocksRebuild = Boolean(safetyReviewSummary?.blocks_rebuild);
     const rebuildBlockedReason = safetyReviewSummary?.blocking_message
         || "Safety review work is still pending for this world.";
-    const hasProgress = progress.total > 0;
+    const hasProgress = progressSummary.totalWorkUnits > 0;
+    const showProgressSummary = ingesting || hasProgress;
     const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !showResume;
     const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && safetyReviews.length === 0 && !hasProgress;
-    const progressLabel = progress.phase === "aborting"
-        ? "Aborting"
-        : progress.phase === "embedding"
-            ? "Embedding"
-            : progress.phase === "extracting"
-                ? "Extraction"
-                : "Progress";
-    const progressStatusLabel = progress.waitLabel || progressLabel;
-
-    const agentPipeline = [
-        {
-            key: "graph_architect",
-            label: "Graph Architect",
-            matches: [
-                "graph_architect",
-                ...Array.from({ length: Math.max(0, gleanAmount) }, (_, index) => `graph_architect_glean_${index + 1}`),
-            ],
-        },
-    ];
-    const isVectorMaintenanceProgress = ["embedding_rebuild", "embedding_retry", "node_embedding_rebuild", "node_embedding"].includes(progress.agent);
-    const progressStages = isVectorMaintenanceProgress
-        ? [
-            {
-                key: "chunk_vectors",
-                label: progress.agent === "embedding_retry" ? "Chunk Embedding" : "Chunk Re-embed",
-                matches: ["embedding_rebuild", "embedding_retry"],
-            },
-            {
-                key: "node_vectors",
-                label: progress.agent === "node_embedding" ? "Node Embedding" : "Node Re-embed",
-                matches: ["node_embedding_rebuild", "node_embedding"],
-            },
-        ]
-        : agentPipeline;
+    const progressHeaderLabel = progressSummary.isAborting
+        ? "Stopping ingest..."
+        : progressSummary.isReembedAll
+            ? "Re-embedding world content"
+            : "Ingest progress";
     const groupedSafetyReviews = safetyReviews.reduce<Record<string, SafetyReviewItem[]>>((groups, review) => {
         const key = `${review.display_name}::${review.source_id}`;
         groups[key] = groups[key] || [];
@@ -1400,59 +1421,112 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     </div>
                 ) : (
                     <>
-                        {hasProgress && (
-                            <>
-                                {/* Progress bar */}
-                                <div style={{ marginBottom: 24 }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                                        <span style={{ fontSize: 14, fontWeight: 600 }}>
-                                            {progressStatusLabel} {progress.completed} of {progress.total}
-                                        </span>
-                                        <span style={{ fontSize: 13, color: "var(--text-subtle)" }}>
-                                            {Math.round(progress.percent)}%
-                                        </span>
-                                    </div>
-                                    {progress.waitRetryAfterSeconds && progress.waitState === "waiting_for_api_key" && (
-                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 8 }}>
-                                            Cooldown window is currently about {Math.max(1, Math.ceil(progress.waitRetryAfterSeconds))}s.
+                        {showProgressSummary && (
+                            <div
+                                style={{
+                                    marginBottom: 24,
+                                    padding: "16px 18px",
+                                    borderRadius: 14,
+                                    border: "1px solid var(--border)",
+                                    background: "var(--background)",
+                                    display: "grid",
+                                    gap: 14,
+                                }}
+                            >
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start" }}>
+                                    <div style={{ minWidth: 0 }}>
+                                        <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>
+                                            {progressHeaderLabel}
                                         </div>
-                                    )}
-                                    <div style={{ height: 6, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
-                                        <div style={{
-                                            height: "100%",
-                                            width: `${progress.percent}%`,
-                                            background: "linear-gradient(90deg, var(--primary), var(--primary-light))",
-                                            borderRadius: 3,
-                                            transition: "width 0.3s ease",
-                                        }} />
+                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
+                                            {progressSecondaryLabel
+                                                || (ingesting && !hasProgress
+                                                    ? "Preparing stable progress summary for this run."
+                                                    : (progressSummary.isReembedAll
+                                                        ? "Rebuilding stored vectors without re-extracting or rebuilding the graph."
+                                                        : "Stable world-level progress across extraction and embedding."))}
+                                        </div>
+                                    </div>
+                                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                                        <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-primary)" }}>
+                                            {Math.round(progressSummary.overallPercent)}%
+                                        </div>
+                                        <div style={{ fontSize: 11, color: "var(--text-subtle)", marginTop: 2 }}>
+                                            {progressSummary.expectedChunks || "?"} total chunks
+                                        </div>
                                     </div>
                                 </div>
 
-                                {/* Agent Pipeline */}
-                                <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-                                    {progressStages.map((stage) => {
-                                        const currentStageIndex = progressStages.findIndex((entry) => entry.matches.includes(progress.agent));
-                                        const stageIndex = progressStages.findIndex((entry) => entry.key === stage.key);
-                                        const isActive = stage.matches.includes(progress.agent);
-                                        const isDone = currentStageIndex > stageIndex;
-                                        return (
-                                            <div key={stage.key} style={{
-                                                flex: 1, padding: "12px 16px", borderRadius: "var(--radius)",
-                                                border: `2px solid ${isActive ? "var(--primary)" : isDone ? "var(--success)" : "var(--border)"}`,
-                                                background: isActive ? "var(--primary-soft)" : "transparent",
-                                                textAlign: "center",
-                                                animation: isActive ? "pulse-glow 2s infinite" : "none",
-                                            }}>
-                                                <div style={{ fontSize: 12, fontWeight: 600, color: isActive ? "var(--primary-light)" : isDone ? "var(--success)" : "var(--text-subtle)" }}>
-                                                    {isDone && <CheckCircle size={14} style={{ marginRight: 4, verticalAlign: "middle" }} />}
-                                                    {isActive && <Loader2 size={14} style={{ marginRight: 4, verticalAlign: "middle", animation: "spin 1s linear infinite" }} />}
-                                                    {stage.label}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
+                                <div>
+                                    <div style={{ height: 8, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
+                                        <div
+                                            style={{
+                                                height: "100%",
+                                                width: `${progressSummary.overallPercent}%`,
+                                                background: "linear-gradient(90deg, var(--primary), var(--primary-light))",
+                                                borderRadius: 999,
+                                                transition: "width 0.3s ease",
+                                            }}
+                                        />
+                                    </div>
+                                    {progressSummary.waitRetryAfterSeconds && progressSummary.waitState === "waiting_for_api_key" && (
+                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 8 }}>
+                                            Cooldown window is currently about {Math.max(1, Math.ceil(progressSummary.waitRetryAfterSeconds))}s.
+                                        </div>
+                                    )}
                                 </div>
-                            </>
+
+                                <div style={{ display: "grid", gap: 10 }}>
+                                    {progressSummary.rows.map((row) => (
+                                        <div key={row.key} style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                                    <span>{row.label}</span>
+                                                    {row.infoTitle && (
+                                                        <span
+                                                            title={row.infoTitle}
+                                                            aria-label={`${row.label} info`}
+                                                            style={{
+                                                                display: "inline-flex",
+                                                                alignItems: "center",
+                                                                justifyContent: "center",
+                                                                minWidth: 18,
+                                                                height: 18,
+                                                                padding: "0 5px",
+                                                                borderRadius: 999,
+                                                                border: "1px solid var(--border)",
+                                                                color: "var(--text-subtle)",
+                                                                fontSize: 11,
+                                                                fontWeight: 700,
+                                                                cursor: "help",
+                                                                lineHeight: 1,
+                                                            }}
+                                                        >
+                                                            (i)
+                                                        </span>
+                                                    )}
+                                                </span>
+                                                <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                                                    {row.completed}/{row.total}
+                                                </span>
+                                            </div>
+                                            <div style={{ height: 6, background: "var(--overlay-heavy)", borderRadius: 999, overflow: "hidden" }}>
+                                                <div
+                                                    style={{
+                                                        height: "100%",
+                                                        width: `${row.percent}%`,
+                                                        borderRadius: 999,
+                                                        background: row.key === "embedded" || row.key === "reembed"
+                                                            ? "linear-gradient(90deg, var(--primary), var(--primary-light))"
+                                                            : "linear-gradient(90deg, rgba(8,146,208,0.45), rgba(8,146,208,0.82))",
+                                                        transition: "width 0.3s ease",
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
                         )}
 
                         {ingesting && reviewCount > 0 && (

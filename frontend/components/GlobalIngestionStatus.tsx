@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Loader2, Upload } from "lucide-react";
 import { apiFetch } from "@/lib/api";
+import { buildIngestActivityLabel, clampPercent, resolveStableIngestProgress } from "@/lib/ingest-progress";
 
 interface WorldSummary {
     world_id: string;
@@ -26,68 +27,32 @@ interface CheckpointInfo {
     total_chunks_current_phase?: number;
     progress_percent?: number;
     active_operation?: string;
+    active_agent?: string | null;
     wait_state?: "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key" | null;
     wait_stage?: "extracting" | "embedding" | null;
     wait_label?: string | null;
     wait_retry_after_seconds?: number | null;
+    progress_source_id?: string | null;
+    progress_source_display_name?: string | null;
+    progress_source_book_number?: number | null;
 }
 
 interface ActiveWorldProgress {
     world_id: string;
     world_name: string;
     ingestion_status: string;
-    completed_chunks: number;
-    total_chunks: number;
-    percent: number;
+    expected_chunks: number;
+    extracted_chunks: number;
+    embedded_chunks: number;
+    completed_work_units: number;
+    total_work_units: number;
+    overall_percent: number;
     phase: "extracting" | "embedding" | "aborting" | "idle";
     operation: string;
-    wait_label: string | null;
-    wait_retry_after_seconds: number | null;
+    activity_label: string | null;
 }
 
 const STORAGE_KEY = "global-ingestion-status-expanded";
-
-function clampPercent(value: number): number {
-    if (!Number.isFinite(value)) return 0;
-    return Math.max(0, Math.min(100, value));
-}
-
-function resolveProgress(checkpoint: CheckpointInfo | null): {
-    completed_chunks: number;
-    total_chunks: number;
-    percent: number;
-} {
-    const explicitTotal = Math.max(0, Number(checkpoint?.total_chunks_current_phase ?? 0));
-    const explicitCompleted = Math.max(0, Number(checkpoint?.completed_chunks_current_phase ?? 0));
-    const explicitPercent = Number(checkpoint?.progress_percent ?? 0);
-    const checkpointTotal = Math.max(0, Number(checkpoint?.chunks_total ?? 0));
-    const checkpointCompleted = Math.max(0, Number(checkpoint?.chunk_index ?? 0));
-
-    const stageCounters = checkpoint?.stage_counters ?? {};
-    const stageTotal = Math.max(0, Number(stageCounters.expected_chunks ?? 0));
-    const stageCompleted = Math.max(
-        0,
-        Number(
-            stageCounters.embedded_chunks
-            ?? stageCounters.extracted_chunks
-            ?? 0
-        ),
-    );
-
-    const total_chunks = explicitTotal || checkpointTotal || stageTotal;
-    const completed_chunks = total_chunks
-        ? Math.min(total_chunks, Math.max(explicitCompleted || checkpointCompleted, stageCompleted))
-        : 0;
-    const percent = total_chunks > 0
-        ? clampPercent(explicitTotal > 0 ? explicitPercent : (completed_chunks / total_chunks) * 100)
-        : 0;
-
-    return {
-        completed_chunks,
-        total_chunks,
-        percent,
-    };
-}
 
 export function GlobalIngestionStatus() {
     const [activeWorlds, setActiveWorlds] = useState<ActiveWorldProgress[]>([]);
@@ -129,16 +94,35 @@ export function GlobalIngestionStatus() {
                             const checkpoint = await apiFetch<CheckpointInfo>(
                                 `/worlds/${world.world_id}/ingest/checkpoint`,
                             ).catch(() => null);
-                            const progress = resolveProgress(checkpoint);
+                            const progress = resolveStableIngestProgress({
+                                active_operation: checkpoint?.active_operation,
+                                progress_phase: checkpoint?.progress_phase,
+                                completed_chunks_current_phase: checkpoint?.completed_chunks_current_phase,
+                                total_chunks_current_phase: checkpoint?.total_chunks_current_phase,
+                                chunks_total: checkpoint?.chunks_total,
+                                chunk_index: checkpoint?.chunk_index,
+                                stage_counters: checkpoint?.stage_counters,
+                                wait_state: checkpoint?.wait_state,
+                                wait_label: checkpoint?.wait_label,
+                                wait_retry_after_seconds: checkpoint?.wait_retry_after_seconds,
+                                active_agent: checkpoint?.active_agent,
+                                progress_source_id: checkpoint?.progress_source_id,
+                                progress_source_display_name: checkpoint?.progress_source_display_name,
+                                progress_source_book_number: checkpoint?.progress_source_book_number,
+                            });
                             return {
                                 world_id: world.world_id,
                                 world_name: world.world_name,
                                 ingestion_status: world.ingestion_status,
-                                phase: checkpoint?.progress_phase || "idle",
-                                operation: checkpoint?.active_operation || "default",
-                                wait_label: checkpoint?.wait_label || null,
-                                wait_retry_after_seconds: checkpoint?.wait_retry_after_seconds ?? null,
-                                ...progress,
+                                expected_chunks: progress.expectedChunks,
+                                extracted_chunks: progress.extractedChunks,
+                                embedded_chunks: progress.embeddedChunks,
+                                completed_work_units: progress.completedWorkUnits,
+                                total_work_units: progress.totalWorkUnits,
+                                overall_percent: progress.overallPercent,
+                                phase: progress.phase,
+                                operation: progress.operation,
+                                activity_label: buildIngestActivityLabel(progress),
                             };
                         }),
                     );
@@ -179,12 +163,12 @@ export function GlobalIngestionStatus() {
     }, [expanded, hydrated]);
 
     const aggregate = useMemo(() => {
-        const totalChunks = activeWorlds.reduce((sum, world) => sum + world.total_chunks, 0);
-        const completedChunks = activeWorlds.reduce((sum, world) => sum + world.completed_chunks, 0);
-        const percent = totalChunks > 0 ? clampPercent((completedChunks / totalChunks) * 100) : 0;
+        const totalWorkUnits = activeWorlds.reduce((sum, world) => sum + world.total_work_units, 0);
+        const completedWorkUnits = activeWorlds.reduce((sum, world) => sum + world.completed_work_units, 0);
+        const percent = totalWorkUnits > 0 ? clampPercent((completedWorkUnits / totalWorkUnits) * 100) : 0;
         return {
-            totalChunks,
-            completedChunks,
+            totalWorkUnits,
+            completedWorkUnits,
             percent,
         };
     }, [activeWorlds]);
@@ -252,7 +236,9 @@ export function GlobalIngestionStatus() {
                                 <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
                                     {activeWorlds.every((world) => world.phase === "aborting")
                                         ? "Stopping in-flight work..."
-                                        : `${aggregate.completedChunks}/${aggregate.totalChunks || "?"} chunks processed`}
+                                        : activeWorlds.length === 1
+                                            ? `${activeWorlds[0].expected_chunks || "?"} total chunks in this run`
+                                            : "Stable progress across active worlds"}
                                 </div>
                             </div>
                         </div>
@@ -294,15 +280,12 @@ export function GlobalIngestionStatus() {
                                         </div>
                                         <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
                                             {world.phase === "aborting"
-                                                ? "Aborting..."
-                                                : world.wait_label
-                                                    ? world.wait_label
-                                                    : `${world.completed_chunks}/${world.total_chunks || "?"} chunks`}
-                                            {world.wait_label && world.wait_retry_after_seconds && (
-                                                <span style={{ display: "block", marginTop: 2 }}>
-                                                    About {Math.max(1, Math.ceil(world.wait_retry_after_seconds))}s remaining.
-                                                </span>
-                                            )}
+                                                ? "Stopping after current in-flight work finishes"
+                                                : world.activity_label
+                                                    ? world.activity_label
+                                                    : world.operation === "reembed_all"
+                                                        ? `Re-embedded ${world.embedded_chunks}/${world.expected_chunks || "?"} chunks`
+                                                        : `Extracted ${world.extracted_chunks}/${world.expected_chunks || "?"} • Embedded ${world.embedded_chunks}/${world.expected_chunks || "?"}`}
                                         </div>
                                     </div>
                                     <div style={{
@@ -313,7 +296,7 @@ export function GlobalIngestionStatus() {
                                         fontSize: 12,
                                     }}>
                                         <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
-                                        {world.phase === "aborting" ? "Stopping" : `${Math.round(world.percent)}%`}
+                                        {world.phase === "aborting" ? "Stopping" : `${Math.round(world.overall_percent)}%`}
                                     </div>
                                 </div>
                                 <div
@@ -326,7 +309,7 @@ export function GlobalIngestionStatus() {
                                 >
                                     <div
                                         style={{
-                                            width: `${world.percent}%`,
+                                            width: `${world.overall_percent}%`,
                                             height: "100%",
                                             borderRadius: 999,
                                             background: "linear-gradient(90deg, var(--primary), var(--primary-hover))",
@@ -373,9 +356,9 @@ export function GlobalIngestionStatus() {
                         <span style={{ fontSize: 11, color: "var(--text-subtle)", lineHeight: 1.1 }}>
                             {activeWorlds.every((world) => world.phase === "aborting")
                                 ? "Aborting..."
-                                : aggregate.totalChunks > 0
-                                ? `${aggregate.completedChunks}/${aggregate.totalChunks} chunks`
-                                : "In progress"}
+                                : activeWorlds.length === 1
+                                    ? (activeWorlds[0].activity_label || "In progress")
+                                    : "Ingest in progress"}
                         </span>
                     </div>
                     <span style={{ fontSize: 12, color: "var(--primary-light)", fontWeight: 600 }}>

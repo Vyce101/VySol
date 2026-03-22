@@ -51,6 +51,9 @@ class DummyVectorStore:
     def get_all_chunk_records(self):
         return list(self._records)
 
+    def count(self) -> int:
+        return len(self._records)
+
 
 class RecordingNodeVectorStore:
     def __init__(self):
@@ -156,6 +159,8 @@ def test_audit_synthesizes_stage_failures_from_coverage_gaps(monkeypatch):
     assert summary["world"]["expected_chunks"] == 3
     assert summary["world"]["extracted_chunks"] == 2
     assert summary["world"]["embedded_chunks"] == 1
+    assert summary["world"]["current_unique_nodes"] == 2
+    assert summary["world"]["embedded_unique_nodes"] == 1
     assert summary["world"]["failed_records"] == 4
     assert summary["world"]["synthesized_failures"] == 4
 
@@ -739,11 +744,70 @@ def test_active_checkpoint_reports_embedding_phase_progress_for_reembed_all(monk
     assert checkpoint["chunks_total"] == 3
 
 
+def test_build_progress_event_includes_live_stage_counters_and_progress_source(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "in_progress",
+        "ingestion_operation": "default",
+        "total_nodes": 8,
+        "embedded_unique_nodes": 5,
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 3,
+                "status": "complete",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0, 1, 2],
+                "embedded_chunks": [0, 1, 2],
+            },
+            {
+                "source_id": "source-b",
+                "book_number": 2,
+                "display_name": "Book 2",
+                "chunk_count": 4,
+                "status": "ingesting",
+                "failed_chunks": [2],
+                "stage_failures": [
+                    {
+                        "stage": "embedding",
+                        "chunk_index": 2,
+                        "chunk_id": "chunk_world-1_source-b_2",
+                        "error_type": "provider_error",
+                    }
+                ],
+                "extracted_chunks": [0, 1, 3],
+                "embedded_chunks": [0, 1],
+            },
+        ],
+    }
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": object()})
+
+    event = ingestion_engine._build_progress_event("world-1", meta)
+
+    assert event["stage_counters"]["expected_chunks"] == 7
+    assert event["stage_counters"]["extracted_chunks"] == 6
+    assert event["stage_counters"]["embedded_chunks"] == 5
+    assert event["stage_counters"]["current_unique_nodes"] == 8
+    assert event["stage_counters"]["embedded_unique_nodes"] == 5
+    assert event["stage_counters"]["failed_records"] == 1
+    assert event["stage_counters"]["sources_total"] == 2
+    assert event["stage_counters"]["sources_complete"] == 1
+    assert event["stage_counters"]["sources_partial_failure"] == 0
+    assert event["progress_source_id"] == "source-b"
+    assert event["progress_source_display_name"] == "Book 2"
+    assert event["progress_source_book_number"] == 2
+
+
 def test_get_checkpoint_info_includes_live_wait_snapshot(monkeypatch):
     meta = {
         "world_id": "world-1",
         "ingestion_status": "in_progress",
         "ingestion_operation": "default",
+        "total_nodes": 6,
+        "embedded_unique_nodes": 4,
         "ingestion_wait": {
             "wait_state": "waiting_for_api_key",
             "wait_stage": "embedding",
@@ -769,16 +833,37 @@ def test_get_checkpoint_info_includes_live_wait_snapshot(monkeypatch):
     monkeypatch.setattr(
         ingestion_engine,
         "audit_ingestion_integrity",
-        lambda world_id, synthesize_failures=False, persist=True: {"world": {"embedded_chunks": 1}, "failures": []},
+        lambda world_id, synthesize_failures=False, persist=True: {
+            "world": {
+                "expected_chunks": 4,
+                "extracted_chunks": 2,
+                "embedded_chunks": 1,
+                "current_unique_nodes": 6,
+                "embedded_unique_nodes": 4,
+                "failed_records": 0,
+                "sources_total": 1,
+                "sources_complete": 0,
+                "sources_partial_failure": 0,
+            },
+            "failures": [],
+        },
     )
     monkeypatch.setattr(ingestion_engine, "_load_checkpoint", lambda world_id: None)
 
     checkpoint = ingestion_engine.get_checkpoint_info("world-1")
 
+    assert checkpoint["stage_counters"]["expected_chunks"] == 4
+    assert checkpoint["stage_counters"]["extracted_chunks"] == 2
+    assert checkpoint["stage_counters"]["embedded_chunks"] == 1
+    assert checkpoint["stage_counters"]["current_unique_nodes"] == 6
+    assert checkpoint["stage_counters"]["embedded_unique_nodes"] == 4
     assert checkpoint["wait_state"] == "waiting_for_api_key"
     assert checkpoint["wait_stage"] == "embedding"
     assert checkpoint["wait_label"] == "Waiting for API key cooldown"
     assert checkpoint["wait_retry_after_seconds"] == 12.5
+    assert checkpoint["progress_source_id"] == "source-a"
+    assert checkpoint["progress_source_display_name"] == "Book 1"
+    assert checkpoint["progress_source_book_number"] == 1
 
 
 def test_abort_ingestion_emits_aborting_for_live_run(monkeypatch):
