@@ -2,8 +2,11 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from core import entity_resolution_engine as engine
 from core import graph_store
+from routers import entity_resolution as entity_resolution_router
 
 
 def _prepare_world(tmp_path: Path, monkeypatch, world_id: str = "world-entity-resolution") -> tuple[Path, graph_store.GraphStore]:
@@ -304,6 +307,109 @@ def test_entity_resolution_start_uses_custom_embedding_controls(tmp_path, monkey
     assert rebuild_calls == [(["node-a"], 5, 1.25)]
     assert status["embedding_batch_size"] == 5
     assert status["embedding_cooldown_seconds"] == 1.25
+
+
+def test_abort_entity_resolution_preserves_non_running_state(tmp_path, monkeypatch):
+    world_id = "world-abort-preserves-status"
+    meta_path, _ = _prepare_world(tmp_path, monkeypatch, world_id)
+    meta_path.write_text(
+        json.dumps(
+            {
+                "ingestion_status": "complete",
+                "entity_resolution_status": "complete",
+                "entity_resolution_phase": "complete",
+                "entity_resolution_message": "Entity resolution complete.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    engine.abort_entity_resolution(world_id)
+
+    status = engine.get_resolution_status(world_id)
+
+    assert status["status"] == "complete"
+    assert status["phase"] == "complete"
+    assert engine.drain_sse_events(world_id) == []
+
+
+def test_abort_entity_resolution_emits_aborting_then_finishes_aborted(tmp_path, monkeypatch):
+    world_id = "world-abort-active-run"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    engine.begin_entity_resolution_run(world_id, 50, False, True, "exact_only")
+    engine.abort_entity_resolution(world_id)
+
+    aborting_status = engine.get_resolution_status(world_id)
+    aborting_events = engine.drain_sse_events(world_id)
+
+    assert aborting_status["status"] == "in_progress"
+    assert aborting_status["phase"] == "aborting"
+    assert aborting_events[-1]["event"] == "status"
+    assert aborting_events[-1]["phase"] == "aborting"
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    final_status = engine.get_resolution_status(world_id)
+    final_events = engine.drain_sse_events(world_id)
+
+    assert final_status["status"] == "aborted"
+    assert any(event.get("event") == "aborted" for event in final_events)
+
+
+def test_entity_resolution_startup_failure_clears_active_run_and_marks_error(tmp_path, monkeypatch):
+    world_id = "world-startup-failure"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    engine.begin_entity_resolution_run(world_id, 50, False, True, "exact_only")
+    monkeypatch.setattr(engine, "GraphStore", lambda _world_id: (_ for _ in ()).throw(RuntimeError("graph boom")))
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    status = engine.get_resolution_status(world_id)
+    events = engine.drain_sse_events(world_id)
+
+    assert status["status"] == "error"
+    assert status["reason"] == "graph boom"
+    assert any(event.get("event") == "error" for event in events)
+    assert world_id not in engine._active_runs
+    assert world_id not in engine._abort_events
+
+
+def test_entity_resolution_router_thread_start_failure_rolls_back_run(tmp_path, monkeypatch):
+    world_id = "world-router-thread-start-failure"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete"})
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+
+    class BrokenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(entity_resolution_router.threading, "Thread", BrokenThread)
+
+    with pytest.raises(entity_resolution_router.HTTPException) as exc:
+        asyncio.run(
+            entity_resolution_router.entity_resolution_start(
+                world_id,
+                entity_resolution_router.EntityResolutionStartRequest(),
+            )
+        )
+
+    status = engine.get_resolution_status(world_id)
+
+    assert exc.value.status_code == 500
+    assert status["status"] == "error"
+    assert status["message"] == "Entity resolution failed to start."
+    assert world_id not in engine._active_runs
+    assert world_id not in engine._abort_events
 
 
 def test_upsert_unique_node_snapshots_obeys_cooldown_and_abort(monkeypatch):

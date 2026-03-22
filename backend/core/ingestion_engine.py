@@ -2555,125 +2555,124 @@ async def start_ingestion(
     _abort_events[world_id] = my_event
     _active_runs[world_id] = my_event
     _clear_active_waits(world_id)
+    try:
+        operation_norm = _normalize_ingest_operation(operation)
+        retry_stage_norm = _normalize_retry_stage(retry_stage)
+        meta = _load_meta(world_id)
+        settings = load_settings()
+        world_ingest_settings = _resolve_world_ingest_settings(meta, ingest_settings_override)
+        effective_resume = resume and operation_norm == "default"
+        is_full_rebuild = operation_norm == "rechunk_reingest" or (not resume and operation_norm == "default")
+        is_reembed_all = operation_norm == "reembed_all"
+        allow_active_chunk_overrides = is_full_rebuild and bool(use_active_chunk_overrides)
+        meta.pop("ingestion_abort_requested_at", None)
+        meta.pop("ingestion_wait", None)
 
-    operation_norm = _normalize_ingest_operation(operation)
-    retry_stage_norm = _normalize_retry_stage(retry_stage)
-    meta = _load_meta(world_id)
-    settings = load_settings()
-    world_ingest_settings = _resolve_world_ingest_settings(meta, ingest_settings_override)
-    effective_resume = resume and operation_norm == "default"
-    is_full_rebuild = operation_norm == "rechunk_reingest" or (not resume and operation_norm == "default")
-    is_reembed_all = operation_norm == "reembed_all"
-    allow_active_chunk_overrides = is_full_rebuild and bool(use_active_chunk_overrides)
-    meta.pop("ingestion_abort_requested_at", None)
-    meta.pop("ingestion_wait", None)
+        if is_full_rebuild or is_reembed_all:
+            review_guard = get_safety_review_rebuild_guard(
+                world_id,
+                allow_active_overrides=allow_active_chunk_overrides,
+            )
+            if not review_guard.get("can_rebuild"):
+                raise RuntimeError(str(review_guard.get("message") or "Safety review work is still pending for this world."))
 
-    if is_full_rebuild or is_reembed_all:
-        review_guard = get_safety_review_rebuild_guard(
-            world_id,
-            allow_active_overrides=allow_active_chunk_overrides,
+        if is_full_rebuild:
+            _clear_manual_rescue_reviews(world_id)
+            world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
+            _clear_checkpoint(world_id)
+            log_path = world_log_path(world_id)
+            if log_path.exists():
+                os.remove(str(log_path))
+
+            graph_store = GraphStore(world_id)
+            graph_store.clear()
+            vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
+            unique_node_vector_store = VectorStore(
+                world_id,
+                embedding_model=world_ingest_settings["embedding_model"],
+                collection_suffix="unique_nodes",
+            )
+            vector_store.drop_collection()
+            unique_node_vector_store.drop_collection()
+
+            for source in meta.get("sources", []):
+                _reset_source_tracking_for_full_rebuild(source)
+            _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            meta["total_chunks"] = 0
+            meta["total_nodes"] = 0
+            meta["embedded_unique_nodes"] = 0
+            meta["total_edges"] = 0
+            _save_meta(world_id, meta)
+        elif is_reembed_all:
+            audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+            meta = _load_meta(world_id)
+            reembed_eligibility = get_reembed_eligibility(world_id, meta=meta)
+            if not reembed_eligibility.get("can_reembed_all"):
+                raise RuntimeError(str(reembed_eligibility.get("message") or "Re-embed All is not currently safe for this world."))
+            world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
+
+            _clear_checkpoint(world_id)
+            log_path = world_log_path(world_id)
+            if log_path.exists():
+                os.remove(str(log_path))
+
+            vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
+            unique_node_vector_store = VectorStore(
+                world_id,
+                embedding_model=world_ingest_settings["embedding_model"],
+                collection_suffix="unique_nodes",
+            )
+            vector_store.drop_collection()
+            unique_node_vector_store.drop_collection()
+
+            eligible_source_ids = set(reembed_eligibility.get("eligible_source_ids", []))
+            for source in meta.get("sources", []):
+                if str(source.get("source_id") or "") in eligible_source_ids:
+                    _prepare_source_for_reembed(source)
+            _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            meta["embedded_unique_nodes"] = 0
+            _save_meta(world_id, meta)
+        else:
+            # Resume/retry flow includes an audit pass that can synthesize
+            # repairable failures for legacy mismatch worlds.
+            audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+            meta = _load_meta(world_id)
+            world_ingest_settings = _resolve_world_ingest_settings(meta, None)
+            _apply_world_ingest_settings(meta, world_ingest_settings, lock=False)
+            _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            _save_meta(world_id, meta)
+
+        sources = (
+            [
+                source
+                for source in meta.get("sources", [])
+                if not is_reembed_all or str(source.get("source_id") or "") in eligible_source_ids
+            ]
+            if is_reembed_all
+            else _select_sources_for_run(
+                meta,
+                resume=effective_resume,
+                retry_only=retry_only,
+                retry_stage=retry_stage_norm,
+                retry_source_id=retry_source_id,
+            )
         )
-        if not review_guard.get("can_rebuild"):
-            raise RuntimeError(str(review_guard.get("message") or "Safety review work is still pending for this world."))
 
-    if is_full_rebuild:
-        _clear_manual_rescue_reviews(world_id)
-        world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
-        _clear_checkpoint(world_id)
-        log_path = world_log_path(world_id)
-        if log_path.exists():
-            os.remove(str(log_path))
+        chunk_size = int(world_ingest_settings.get("chunk_size_chars", settings.get("chunk_size_chars", 4000)))
+        chunk_overlap = int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150)))
+        chunker = RecursiveChunker(chunk_size=chunk_size, overlap=chunk_overlap)
 
         graph_store = GraphStore(world_id)
-        graph_store.clear()
         vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
         unique_node_vector_store = VectorStore(
             world_id,
             embedding_model=world_ingest_settings["embedding_model"],
             collection_suffix="unique_nodes",
         )
-        vector_store.drop_collection()
-        unique_node_vector_store.drop_collection()
 
-        for source in meta.get("sources", []):
-            _reset_source_tracking_for_full_rebuild(source)
-        _mark_ingestion_live(meta, operation=operation_norm, started=True)
-        meta["total_chunks"] = 0
-        meta["total_nodes"] = 0
-        meta["embedded_unique_nodes"] = 0
-        meta["total_edges"] = 0
-        _save_meta(world_id, meta)
-    elif is_reembed_all:
-        audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
-        meta = _load_meta(world_id)
-        reembed_eligibility = get_reembed_eligibility(world_id, meta=meta)
-        if not reembed_eligibility.get("can_reembed_all"):
-            raise RuntimeError(str(reembed_eligibility.get("message") or "Re-embed All is not currently safe for this world."))
-        world_ingest_settings = _apply_world_ingest_settings(meta, world_ingest_settings, lock=True)
+        ga = GraphArchitectAgent(world_id=world_id)
+        glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
 
-        _clear_checkpoint(world_id)
-        log_path = world_log_path(world_id)
-        if log_path.exists():
-            os.remove(str(log_path))
-
-        vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-        unique_node_vector_store = VectorStore(
-            world_id,
-            embedding_model=world_ingest_settings["embedding_model"],
-            collection_suffix="unique_nodes",
-        )
-        vector_store.drop_collection()
-        unique_node_vector_store.drop_collection()
-
-        eligible_source_ids = set(reembed_eligibility.get("eligible_source_ids", []))
-        for source in meta.get("sources", []):
-            if str(source.get("source_id") or "") in eligible_source_ids:
-                _prepare_source_for_reembed(source)
-        _mark_ingestion_live(meta, operation=operation_norm, started=True)
-        meta["embedded_unique_nodes"] = 0
-        _save_meta(world_id, meta)
-    else:
-        # Resume/retry flow includes an audit pass that can synthesize
-        # repairable failures for legacy mismatch worlds.
-        audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
-        meta = _load_meta(world_id)
-        world_ingest_settings = _resolve_world_ingest_settings(meta, None)
-        _apply_world_ingest_settings(meta, world_ingest_settings, lock=False)
-        _mark_ingestion_live(meta, operation=operation_norm, started=True)
-        _save_meta(world_id, meta)
-
-    sources = (
-        [
-            source
-            for source in meta.get("sources", [])
-            if not is_reembed_all or str(source.get("source_id") or "") in eligible_source_ids
-        ]
-        if is_reembed_all
-        else _select_sources_for_run(
-            meta,
-            resume=effective_resume,
-            retry_only=retry_only,
-            retry_stage=retry_stage_norm,
-            retry_source_id=retry_source_id,
-        )
-    )
-
-    chunk_size = int(world_ingest_settings.get("chunk_size_chars", settings.get("chunk_size_chars", 4000)))
-    chunk_overlap = int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150)))
-    chunker = RecursiveChunker(chunk_size=chunk_size, overlap=chunk_overlap)
-
-    graph_store = GraphStore(world_id)
-    vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-    unique_node_vector_store = VectorStore(
-        world_id,
-        embedding_model=world_ingest_settings["embedding_model"],
-        collection_suffix="unique_nodes",
-    )
-
-    ga = GraphArchitectAgent(world_id=world_id)
-    glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
-
-    try:
         await _extraction_scheduler.configure(
             concurrency=int(settings.get("graph_extraction_concurrency", settings.get("ingestion_concurrency", 4))),
             cooldown_seconds=float(settings.get("graph_extraction_cooldown_seconds", 0)),
@@ -3362,6 +3361,21 @@ async def start_ingestion(
                 },
             )
 
+    except asyncio.CancelledError:
+        if _is_current_run(world_id, my_event):
+            refreshed = _load_meta(world_id)
+            _clear_active_waits(world_id)
+            _mark_ingestion_terminal(refreshed, "aborted")
+            _save_meta(world_id, refreshed)
+            push_sse_event(
+                world_id,
+                {
+                    "event": "aborted",
+                    "world_id": world_id,
+                    "safety_review_summary": get_safety_review_summary(world_id),
+                    **_build_progress_event(world_id, refreshed),
+                },
+            )
     except Exception as exc:
         logger.exception("Ingestion failed for world %s", world_id)
         if _is_current_run(world_id, my_event):

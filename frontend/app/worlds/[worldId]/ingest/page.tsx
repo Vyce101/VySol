@@ -208,6 +208,11 @@ interface ManualRescueResponse {
 
 type RightPanelView = "progress" | "safety_queue";
 
+interface RuntimeSnapshot {
+    world: WorldResponse;
+    checkpoint: Checkpoint;
+}
+
 function formatAgentLabel(agent?: string | null): string | null {
     const normalized = String(agent ?? "").trim();
     if (!normalized) return null;
@@ -254,7 +259,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [sources, setSources] = useState<Source[]>([]);
     const [checkpoint, setCheckpoint] = useState<Checkpoint | null>(null);
     const [ingesting, setIngesting] = useState(false);
-    const [isAborting, setIsAborting] = useState(false);
+    const [abortRequestPending, setAbortRequestPending] = useState(false);
     const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
     const [progress, setProgress] = useState(initialProgress);
     const [showLog, setShowLog] = useState(true);
@@ -357,16 +362,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const applyWorldData = (data: WorldResponse) => {
         setReembedEligibility(data.reembed_eligibility ?? null);
         setSafetyReviewSummary(data.safety_review_summary ?? null);
-        const liveRun = data.ingestion_status === "in_progress" && data.active_ingestion_run === true;
-        if (liveRun) {
-            setIngesting(true);
-            setIsAborting(false);
-            connectToSSE();
-        } else {
-            esRef.current?.close();
-            setIngesting(false);
-            setIsAborting(false);
-        }
     };
 
     const applySourcesData = (data: Source[]) => {
@@ -376,11 +371,72 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const applyCheckpointData = (data: Checkpoint) => {
         setCheckpoint(data);
         syncProgressFromPayload(data);
-        setIsAborting(data.progress_phase === "aborting");
         if (data.safety_review_summary) {
             setSafetyReviewSummary(data.safety_review_summary);
         }
     };
+
+    const applyRuntimeSnapshot = (
+        snapshot: RuntimeSnapshot,
+        options?: { reconnectStream?: boolean }
+    ) => {
+        applyWorldData(snapshot.world);
+        applyCheckpointData(snapshot.checkpoint);
+
+        const liveRun = snapshot.world.ingestion_status === "in_progress" && snapshot.world.active_ingestion_run === true;
+        const aborting = snapshot.checkpoint.progress_phase === "aborting";
+        const terminal = !liveRun && isTerminalIngestionStatus(snapshot.world.ingestion_status);
+
+        if (aborting || terminal || !liveRun) {
+            setAbortRequestPending(false);
+        }
+
+        if (liveRun) {
+            setIngesting(true);
+            if (options?.reconnectStream) {
+                connectToSSE();
+            }
+            return;
+        }
+
+        esRef.current?.close();
+        setIngesting(false);
+    };
+
+    async function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+        const [world, checkpoint] = await Promise.all([
+            apiFetch<WorldResponse>(`/worlds/${worldId}`),
+            apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
+        ]);
+        return { world, checkpoint };
+    }
+
+    async function loadRuntimeSnapshot(reconnectStream = false) {
+        try {
+            const snapshot = await fetchRuntimeSnapshot();
+            applyRuntimeSnapshot(snapshot, { reconnectStream });
+            return snapshot;
+        } catch {
+            return null;
+        }
+    }
+
+    async function refreshRuntimeView(options?: {
+        reconnectStream?: boolean;
+        refreshSources?: boolean;
+        refreshSafetyReviews?: boolean;
+    }) {
+        const tasks: Array<Promise<unknown>> = [
+            loadRuntimeSnapshot(Boolean(options?.reconnectStream)),
+        ];
+        if (options?.refreshSources) {
+            tasks.push(loadSources());
+        }
+        if (options?.refreshSafetyReviews) {
+            tasks.push(loadSafetyReviews());
+        }
+        await Promise.all(tasks);
+    }
 
     const applyIngestConfigData = (data: WorldIngestConfigResponse) => {
         setSavedIngestSettings(data.ingest_settings);
@@ -394,7 +450,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
             applyWorldData(data);
+            return data;
         } catch { /* ignore */ }
+        return null;
     }
 
     async function loadSources() {
@@ -408,7 +466,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         try {
             const data = await apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`);
             applyCheckpointData(data);
+            if (data.progress_phase === "aborting" || data.active_ingestion_run === false) {
+                setAbortRequestPending(false);
+            }
+            return data;
         } catch { /* ignore */ }
+        return null;
     }
 
     async function loadIngestConfig() {
@@ -425,9 +488,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
             apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
         ]);
-        applyWorldData(worldData);
+        applyRuntimeSnapshot({ world: worldData, checkpoint: checkpointData }, {
+            reconnectStream: worldData.ingestion_status === "in_progress" && worldData.active_ingestion_run === true,
+        });
         applySourcesData(sourcesData);
-        applyCheckpointData(checkpointData);
         applyIngestConfigData(ingestConfigData);
     }
 
@@ -490,7 +554,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     setSafetyReviewSummary(entry.safety_review_summary);
                 }
                 if (entry.event === "aborting" || entry.progress_phase === "aborting") {
-                    setIsAborting(true);
+                    setAbortRequestPending(false);
                     setIngesting(true);
                 }
                 if (entry.error_type === "safety_block") {
@@ -505,31 +569,28 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 );
                 if (isTerminalEvent || (entry.active_ingestion_run === false && isTerminalIngestionStatus(terminalStatus))) {
                     esRef.current?.close();
-                    setIngesting(false);
-                    setIsAborting(false);
-                    void loadWorld();
-                    void loadSources();
-                    void loadCheckpoint();
-                    void loadSafetyReviews();
+                    void refreshRuntimeView({
+                        reconnectStream: false,
+                        refreshSources: true,
+                        refreshSafetyReviews: true,
+                    });
                 }
             },
             () => {
                 esRef.current?.close();
-                setIngesting(false);
-                setIsAborting(false);
-                void loadWorld();
-                void loadSources();
-                void loadCheckpoint();
-                void loadSafetyReviews();
+                void refreshRuntimeView({
+                    reconnectStream: true,
+                    refreshSources: true,
+                    refreshSafetyReviews: true,
+                });
             },
             (err) => {
                 esRef.current?.close();
-                setIngesting(false);
-                setIsAborting(false);
-                void loadWorld();
-                void loadSources();
-                void loadCheckpoint();
-                void loadSafetyReviews();
+                void refreshRuntimeView({
+                    reconnectStream: true,
+                    refreshSources: true,
+                    refreshSafetyReviews: true,
+                });
                 setLogEntries((prev) => [...prev, { event: "error", message: err.message }]);
             }
         );
@@ -540,9 +601,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     useEffect(() => {
         const initializePage = async () => {
             await Promise.all([
-                loadWorld(),
+                loadRuntimeSnapshot(true),
                 loadSources(),
-                loadCheckpoint(),
                 loadSafetyReviews(),
                 loadIngestConfig(),
             ]);
@@ -576,6 +636,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     ) => {
         resetProgress();
         setRetryNotice(null);
+        setAbortRequestPending(false);
         setIngesting(true);
         setLogEntries([]);
         try {
@@ -602,6 +663,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const retryFailures = async (stage: "extraction" | "embedding" | "all") => {
         resetProgress();
         setRetryNotice(null);
+        setAbortRequestPending(false);
         setIngesting(true);
         setLogEntries([]);
         setActiveRightPanel("progress");
@@ -618,6 +680,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             connectToSSE();
         } catch (err: unknown) {
             setIngesting(false);
+            setAbortRequestPending(false);
             alert((err as Error).message);
         }
     };
@@ -667,10 +730,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const abortIngestion = async () => {
         try {
-            setIsAborting(true);
+            setAbortRequestPending(true);
             await apiFetch(`/worlds/${worldId}/ingest/abort`, { method: "POST" });
-        } catch {
-            setIsAborting(false);
+            await loadRuntimeSnapshot(true);
+        } catch (err: unknown) {
+            setAbortRequestPending(false);
+            alert((err as Error).message);
         }
     };
 
@@ -845,6 +910,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 ? "Finish ingestion or retry failed chunks before resolving entities."
                 : "Entity resolution is currently unavailable for this world.";
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
+    const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
         lookup[source.source_id] = source.display_name;
         return lookup;

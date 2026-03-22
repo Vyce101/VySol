@@ -83,9 +83,13 @@ function summarizeEvent(event: EntityResolutionEvent) {
     return "Resolution update received";
 }
 
-function statusBadge(status?: string) {
+function statusBadge(status?: string, phase?: string) {
     const normalized = status?.trim().toLowerCase();
+    const normalizedPhase = phase?.trim().toLowerCase();
     if (isActiveStatus(normalized)) {
+        if (normalizedPhase === "aborting") {
+            return { bg: "var(--status-pending-bg)", fg: "var(--status-pending-fg)", label: "Aborting" };
+        }
         return { bg: "var(--status-progress-bg)", fg: "var(--status-progress-fg)", label: "Running" };
     }
     if (normalized === "complete" || normalized === "completed") {
@@ -236,7 +240,9 @@ export default function EntityResolutionPanel({
     }, [worldId]);
 
     const gateMessage = running
-        ? "Entity resolution is running and can be monitored here."
+        ? status?.phase === "aborting"
+            ? "Entity resolution is stopping after the current in-flight work finishes."
+            : "Entity resolution is running and can be monitored here."
         : disabledReason
             ? disabledReason
             : isIngesting
@@ -249,7 +255,8 @@ export default function EntityResolutionPanel({
 
     const triggerLabel = running ? "Monitor Entities" : "Resolve Entities";
     const triggerDisabled = !running && !canResolve;
-    const badge = statusBadge(status?.status || (running ? "running" : "idle"));
+    const abortRequested = running && status?.phase === "aborting";
+    const badge = statusBadge(status?.status || (running ? "running" : "idle"), status?.phase);
     const lastUsedResolutionMode = status?.resolution_mode as EntityResolutionRunMode | undefined;
     const showExactOnlyOutcomeLabels = isCompletedStatus(status?.status) && lastUsedResolutionMode === "exact_only";
     const unresolvedMetricTooltip = showExactOnlyOutcomeLabels
@@ -345,7 +352,7 @@ export default function EntityResolutionPanel({
         setError(null);
         try {
             await abortEntityResolution(worldId);
-            await loadSnapshot(false);
+            await loadSnapshot(true);
         } catch (abortError) {
             setError(abortError instanceof Error ? abortError.message : "Unable to abort entity resolution.");
         } finally {
@@ -595,16 +602,16 @@ export default function EntityResolutionPanel({
                                                 ) : (
                                                     <button
                                                         onClick={() => void handleAbort()}
-                                                        disabled={busy}
+                                                        disabled={busy || abortRequested}
                                                         style={{
                                                             ...buttonStyle,
                                                             background: "var(--status-error-bg)",
                                                             color: "var(--status-error-fg)",
-                                                            opacity: busy ? 0.45 : 1,
+                                                            opacity: busy || abortRequested ? 0.45 : 1,
                                                         }}
                                                     >
                                                         {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <AlertTriangle size={14} />}
-                                                        Abort Run
+                                                        {abortRequested ? "Aborting..." : "Abort Run"}
                                                     </button>
                                                 )}
 

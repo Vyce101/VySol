@@ -62,6 +62,8 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed ingest progress UI flicker by switching the main ingest page and floating global status panel to stable world-level extraction/embedding summaries instead of last-agent phase swapping.
 - Fixed the main ingest progress header to show stable `Unique Graph Nodes` and `Embedded Unique Nodes` counters with lightweight hover explanations tied to entity-resolution behavior.
 - Fixed the ingest action panel by removing redundant sidebar progress boxes and duplicate repaired-chunk warnings, capitalizing `Input Progress`, and moving disabled-action explanations into tooltip/info affordances.
+- Fixed ingest abort-state handling so the main progress area keeps `Aborting...` state stable across refreshes and SSE reconnects, and abort requests against missing worlds now fail correctly instead of silently succeeding.
+- Fixed entity-resolution abort/startup handling so stop requests surface an explicit `Aborting` phase, finished runs are not overwritten by late aborts, and failed startup paths no longer leave ghost active runs behind.
 
 ### Removed
 

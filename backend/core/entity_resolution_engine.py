@@ -232,11 +232,45 @@ def get_resolution_current(world_id: str) -> dict[str, Any]:
 
 
 def abort_entity_resolution(world_id: str) -> None:
-    if world_id not in _abort_events:
-        _abort_events[world_id] = threading.Event()
-    _abort_events[world_id].set()
-    if world_id not in _active_runs and world_meta_path(world_id).exists():
-        _mark_run_stale(world_id)
+    if world_id not in _active_runs:
+        return
+    abort_event = _abort_events.get(world_id)
+    if abort_event is None:
+        abort_event = threading.Event()
+        _abort_events[world_id] = abort_event
+    abort_event.set()
+    state = _set_state(
+        world_id,
+        status="in_progress",
+        phase="aborting",
+        message="Aborting entity resolution.",
+        reason=None,
+    )
+    _update_meta_from_state(world_id, state)
+    push_sse_event(world_id, {"event": "status", **state})
+
+
+def fail_entity_resolution_startup(
+    world_id: str,
+    message: str,
+    *,
+    reason: str | None = None,
+    graph_store: GraphStore | None = None,
+) -> dict[str, Any]:
+    state = _set_state(
+        world_id,
+        status="error",
+        phase="error",
+        message=message,
+        reason=reason,
+        current_anchor=None,
+        current_candidates=[],
+    )
+    _update_meta_from_state(world_id, state, graph_store)
+    push_sse_event(world_id, {"event": "error", **state})
+    _active_runs.discard(world_id)
+    _abort_events.pop(world_id, None)
+    return state
 
 
 def begin_entity_resolution_run(
@@ -701,43 +735,44 @@ async def start_entity_resolution(
         abort_event = threading.Event()
         _abort_events[world_id] = abort_event
     _active_runs.add(world_id)
-
-    graph_store = GraphStore(world_id)
-    initial_ids = list(graph_store.graph.nodes())
-    initial_total = len(initial_ids)
-    normalized_resolution_mode = resolve_entity_resolution_mode(
-        resolution_mode,
-        include_normalized_exact_pass,
-    )
-    normalized_embedding_batch_size = _normalize_embedding_batch_size(embedding_batch_size)
-    normalized_embedding_cooldown_seconds = _normalize_embedding_cooldown_seconds(embedding_cooldown_seconds)
-    include_exact_pass = _mode_uses_exact_pass(normalized_resolution_mode)
-    use_ai_pass = _mode_uses_ai_pass(normalized_resolution_mode)
-
-    state = _set_state(
-        world_id,
-        status="in_progress",
-        phase="preparing",
-        message="Preparing entity resolution.",
-        reason=None,
-        top_k=top_k,
-        embedding_batch_size=normalized_embedding_batch_size,
-        embedding_cooldown_seconds=normalized_embedding_cooldown_seconds,
-        resolution_mode=normalized_resolution_mode,
-        review_mode=review_mode,
-        include_normalized_exact_pass=include_exact_pass,
-        total_entities=initial_total,
-        resolved_entities=0,
-        unresolved_entities=initial_total,
-        auto_resolved_pairs=0,
-        current_anchor=None,
-        current_candidates=[],
-        can_resume=False,
-    )
-    _update_meta_from_state(world_id, state, graph_store)
-    push_sse_event(world_id, {"event": "status", **state})
-
+    graph_store: GraphStore | None = None
     try:
+        graph_store = GraphStore(world_id)
+        initial_ids = list(graph_store.graph.nodes())
+        initial_total = len(initial_ids)
+        normalized_resolution_mode = resolve_entity_resolution_mode(
+            resolution_mode,
+            include_normalized_exact_pass,
+        )
+        normalized_embedding_batch_size = _normalize_embedding_batch_size(embedding_batch_size)
+        normalized_embedding_cooldown_seconds = _normalize_embedding_cooldown_seconds(embedding_cooldown_seconds)
+        include_exact_pass = _mode_uses_exact_pass(normalized_resolution_mode)
+        use_ai_pass = _mode_uses_ai_pass(normalized_resolution_mode)
+
+        state = _set_state(
+            world_id,
+            status="in_progress",
+            phase="preparing",
+            message="Preparing entity resolution.",
+            reason=None,
+            top_k=top_k,
+            embedding_batch_size=normalized_embedding_batch_size,
+            embedding_cooldown_seconds=normalized_embedding_cooldown_seconds,
+            resolution_mode=normalized_resolution_mode,
+            review_mode=review_mode,
+            include_normalized_exact_pass=include_exact_pass,
+            total_entities=initial_total,
+            resolved_entities=0,
+            unresolved_entities=initial_total,
+            auto_resolved_pairs=0,
+            current_anchor=None,
+            current_candidates=[],
+            can_resume=False,
+        )
+        _update_meta_from_state(world_id, state, graph_store)
+        push_sse_event(world_id, {"event": "status", **state})
+        _ensure_not_aborted(world_id, abort_event)
+
         if initial_total == 0:
             state = _set_state(
                 world_id,
@@ -995,16 +1030,8 @@ async def start_entity_resolution(
         push_sse_event(world_id, {"event": "aborted", **state})
     except Exception as exc:
         logger.exception("Entity resolution failed for %s", world_id)
-        state = _set_state(
-            world_id,
-            status="error",
-            phase="error",
-            message="Entity resolution failed.",
-            reason=str(exc),
-            current_anchor=None,
-            current_candidates=[],
-        )
-        _update_meta_from_state(world_id, state, graph_store)
-        push_sse_event(world_id, {"event": "error", **state})
+        fail_entity_resolution_startup(world_id, "Entity resolution failed.", reason=str(exc), graph_store=graph_store)
     finally:
         _active_runs.discard(world_id)
+        if _abort_events.get(world_id) is abort_event:
+            _abort_events.pop(world_id, None)

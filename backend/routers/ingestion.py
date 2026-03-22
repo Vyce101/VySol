@@ -272,6 +272,7 @@ async def ingest_retry(world_id: str, req: IngestRetryRequest, bg: BackgroundTas
 
 @router.post("/{world_id}/ingest/abort")
 async def ingest_abort(world_id: str):
+    _load_meta(world_id)
     abort_ingestion(world_id)
     return {"ok": True}
 

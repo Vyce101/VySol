@@ -908,6 +908,44 @@ def test_abort_ingestion_emits_aborting_for_live_run(monkeypatch):
     assert events[-1]["wait_state"] is None
 
 
+def test_abort_route_rejects_missing_world(monkeypatch):
+    called = {"abort": False}
+
+    def _missing_meta(world_id: str):
+        raise HTTPException(status_code=404, detail="World not found")
+
+    def _abort(world_id: str):
+        called["abort"] = True
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", _missing_meta)
+    monkeypatch.setattr(ingestion_router, "abort_ingestion", _abort)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ingestion_router.ingest_abort("missing-world"))
+
+    assert exc.value.status_code == 404
+    assert called["abort"] is False
+
+
+def test_start_ingestion_preflight_failure_clears_claimed_run(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "pending",
+        "sources": [],
+    }
+    holder = _patch_meta_store(monkeypatch, meta)
+    monkeypatch.setattr(ingestion_engine, "load_settings", lambda: (_ for _ in ()).throw(RuntimeError("settings boom")))
+
+    asyncio.run(ingestion_engine.start_ingestion("world-1"))
+
+    assert holder["meta"]["ingestion_status"] == "error"
+    assert "world-1" not in ingestion_engine._active_runs
+    assert "world-1" not in ingestion_engine._abort_events
+    events = ingestion_engine.drain_sse_events("world-1")
+    assert events[-1]["event"] == "error"
+    assert events[-1]["message"] == "settings boom"
+
+
 def test_finish_wait_emits_waiting_event_for_long_wait(monkeypatch):
     meta = {
         "world_id": "world-1",

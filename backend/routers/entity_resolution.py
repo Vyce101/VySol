@@ -16,6 +16,7 @@ from core.entity_resolution_engine import (
     abort_entity_resolution,
     begin_entity_resolution_run,
     drain_sse_events,
+    fail_entity_resolution_startup,
     get_resolution_current,
     get_resolution_status,
     resolve_entity_resolution_mode,
@@ -100,7 +101,15 @@ async def entity_resolution_start(world_id: str, req: EntityResolutionStartReque
         daemon=True,
         name=f"entity-resolution-{world_id}",
     )
-    thread.start()
+    try:
+        thread.start()
+    except Exception as exc:
+        fail_entity_resolution_startup(
+            world_id,
+            "Entity resolution failed to start.",
+            reason=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Unable to start entity resolution.") from exc
     return {"status": "accepted", "world_id": world_id, "state": state}
 
 
