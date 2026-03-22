@@ -236,6 +236,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const isAutoScrollEnabled = useRef(true);
+    const previousScrollTopRef = useRef(0);
     const chatStatesRef = useRef<Record<string, ChatThreadState>>({});
     const loadRequestCounterRef = useRef(0);
     const streamRequestCounterRef = useRef(0);
@@ -358,6 +359,12 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     }, [messages]);
 
     useEffect(() => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        previousScrollTopRef.current = container.scrollTop;
+    }, [activeChatId]);
+
+    useEffect(() => {
         if (!contextModalData) {
             setContextMetaOpen(false);
             setContextViewMode("rendered");
@@ -372,10 +379,20 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     }, [renamingChatId]);
 
     const handleScroll = () => {
-        if (!scrollContainerRef.current) return;
-        const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-        const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
-        isAutoScrollEnabled.current = isNearBottom;
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        const { scrollTop, scrollHeight, clientHeight } = container;
+        const previousScrollTop = previousScrollTopRef.current;
+        const bottomDistance = scrollHeight - scrollTop - clientHeight;
+        const isAtBottom = bottomDistance <= 2;
+
+        if (scrollTop < previousScrollTop) {
+            isAutoScrollEnabled.current = false;
+        } else if (isAtBottom) {
+            isAutoScrollEnabled.current = true;
+        }
+
+        previousScrollTopRef.current = scrollTop;
     };
 
     async function checkIngestionStatus() {
@@ -1202,7 +1219,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                             onClick={() => handleSend()}
                             disabled={streaming || !input.trim()}
                             style={{
-                                background: "var(--primary)", color: "var(--primary-contrast)", border: "none",
+                                background: "var(--primary)",
+                                color: "var(--primary-contrast)", border: "none",
                                 borderRadius: "var(--radius)", padding: "10px 14px", cursor: "pointer",
                                 opacity: streaming || !input.trim() ? 0.5 : 1,
                                 transition: "opacity 0.2s",

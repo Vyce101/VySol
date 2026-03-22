@@ -48,6 +48,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed chunk extraction edge binding so newly extracted edges attach to the exact node UUIDs created for that chunk instead of an older same-name node elsewhere in the graph.
 - Fixed safety-block retry handling so blocked chunks stay in the safety-review flow, retries do not collapse them into fake extraction success, and stale review popups/testing states recover cleanly.
 - Fixed chat thread switching so in-flight replies and history versions stay isolated to the correct chat tab instead of leaking across chats.
+- Fixed chat auto-scroll so any upward scroll disables snapping until the user reaches the bottom again.
 
 ### Removed
 
