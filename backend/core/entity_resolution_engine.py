@@ -479,6 +479,8 @@ def _query_candidates(
 async def _choose_matches(
     anchor: dict[str, Any],
     candidates: list[dict[str, Any]],
+    *,
+    world_id: str,
 ) -> tuple[list[str], str]:
     if not candidates:
         return [], "No candidates were available."
@@ -499,6 +501,7 @@ async def _choose_matches(
             user_content=payload,
             model_name=model_name,
             temperature=0.1,
+            world_id=world_id,
         )
     except Exception as exc:
         logger.warning("Entity chooser failed, falling back to no matches: %s", exc)
@@ -514,7 +517,7 @@ async def _choose_matches(
     return chosen_ids, reasoning
 
 
-async def _combine_entities(nodes: list[dict[str, Any]]) -> tuple[str, str]:
+async def _combine_entities(nodes: list[dict[str, Any]], *, world_id: str) -> tuple[str, str]:
     settings = load_settings()
     model_name = settings.get("default_model_entity_combiner", "gemini-flash-lite-latest")
     payload = json.dumps({"entities": nodes}, ensure_ascii=False)
@@ -525,6 +528,7 @@ async def _combine_entities(nodes: list[dict[str, Any]]) -> tuple[str, str]:
             user_content=payload,
             model_name=model_name,
             temperature=0.2,
+            world_id=world_id,
         )
     except Exception as exc:
         logger.warning("Entity combiner failed, using fallback merge text: %s", exc)
@@ -865,7 +869,7 @@ async def start_entity_resolution(
                 state = _set_state(world_id, phase="chooser", message=f"Chooser evaluating {len(candidates)} candidate entities.")
                 _update_meta_from_state(world_id, state, graph_store)
                 push_sse_event(world_id, {"event": "progress", **state})
-                chosen_ids, chooser_reason = await _choose_matches(anchor, candidates)
+                chosen_ids, chooser_reason = await _choose_matches(anchor, candidates, world_id=world_id)
                 chosen_ids = [node_id for node_id in chosen_ids if node_id in remaining_ids and node_id != anchor_id]
 
             if chosen_ids:
@@ -875,7 +879,7 @@ async def start_entity_resolution(
                 _update_meta_from_state(world_id, state, graph_store)
                 push_sse_event(world_id, {"event": "progress", **state, "reason": chooser_reason})
 
-                display_name, description = await _combine_entities(nodes)
+                display_name, description = await _combine_entities(nodes, world_id=world_id)
                 _merge_group(graph_store, anchor_id, chosen_ids, display_name, description)
                 graph_store.save()
                 await _refresh_unique_node_index_after_merge(

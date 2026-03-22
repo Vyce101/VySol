@@ -88,6 +88,7 @@ async def _call_agent(
     temperature: float,
     max_retries: int = 3,
     extra_system_instruction: str | None = None,
+    world_id: str | None = None,
 ) -> tuple[dict, dict]:
     """
     Call a Gemini agent with retry logic and key rotation.
@@ -108,7 +109,7 @@ async def _call_agent(
             types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
         ]
 
-    system_prompt = load_prompt(prompt_key)
+    system_prompt = load_prompt(prompt_key, world_id=world_id)
     if extra_system_instruction:
         system_prompt = f"{system_prompt.strip()}\n\n{extra_system_instruction.strip()}"
     backoff = [2, 4, 8]
@@ -278,6 +279,9 @@ class RelationshipArchitectAgent:
 class GraphArchitectAgent:
     """Extracts both nodes and edges in a single pass."""
 
+    def __init__(self, *, world_id: str | None = None) -> None:
+        self.world_id = world_id
+
     async def run(self, extraction_chunk_text: str) -> tuple[GraphArchitectOutput, dict]:
         settings = load_settings()
         model = settings.get("default_model_flash", "gemini-flash-lite-latest")
@@ -287,6 +291,7 @@ class GraphArchitectAgent:
             user_content=extraction_chunk_text,
             model_name=model,
             temperature=0.1,
+            world_id=self.world_id,
         )
 
         if not parsed:
@@ -320,7 +325,8 @@ class GraphArchitectAgent:
             user_content=user_content,
             model_name=model,
             temperature=0.1,
-            extra_system_instruction=load_prompt("graph_architect_glean_prompt"),
+            extra_system_instruction=load_prompt("graph_architect_glean_prompt", world_id=self.world_id),
+            world_id=self.world_id,
         )
 
         if not parsed:

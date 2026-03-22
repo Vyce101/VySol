@@ -18,6 +18,7 @@ def test_unlocked_pending_world_uses_current_global_defaults(monkeypatch):
             "chunk_size_chars": 20000,
             "chunk_overlap_chars": 150,
             "embedding_model": "global-embed",
+            "glean_amount": 3,
         },
     )
 
@@ -37,6 +38,7 @@ def test_unlocked_pending_world_uses_current_global_defaults(monkeypatch):
     assert resolved["chunk_size_chars"] == 20000
     assert resolved["chunk_overlap_chars"] == 150
     assert resolved["embedding_model"] == "global-embed"
+    assert resolved["glean_amount"] == 3
     assert resolved["locked_at"] is None
 
 
@@ -48,6 +50,7 @@ def test_locked_world_prefers_saved_ingest_settings(monkeypatch):
             "chunk_size_chars": 20000,
             "chunk_overlap_chars": 150,
             "embedding_model": "global-embed",
+            "glean_amount": 1,
         },
     )
 
@@ -60,6 +63,7 @@ def test_locked_world_prefers_saved_ingest_settings(monkeypatch):
             "chunk_size_chars": 4000,
             "chunk_overlap_chars": 200,
             "embedding_model": "world-embed",
+            "glean_amount": 4,
             "locked_at": "2026-03-20T01:00:00+00:00",
             "last_ingest_settings_at": "2026-03-20T01:00:00+00:00",
         },
@@ -70,7 +74,83 @@ def test_locked_world_prefers_saved_ingest_settings(monkeypatch):
     assert resolved["chunk_size_chars"] == 4000
     assert resolved["chunk_overlap_chars"] == 200
     assert resolved["embedding_model"] == "world-embed"
+    assert resolved["glean_amount"] == 4
     assert resolved["locked_at"] == "2026-03-20T01:00:00+00:00"
+
+
+def test_ingest_config_endpoint_returns_world_prompt_states_and_override_availability(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "complete",
+        "ingest_settings": {
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 150,
+            "embedding_model": "world-embed",
+            "glean_amount": 2,
+        },
+        "ingest_prompt_overrides": {
+            "graph_architect_prompt": "world graph prompt",
+        },
+    }
+
+    monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(
+        ingestion_router,
+        "get_safety_review_summary",
+        lambda world_id: {
+            "total_reviews": 1,
+            "unresolved_reviews": 0,
+            "resolved_reviews": 1,
+            "active_override_reviews": 1,
+            "blocked_reviews": 0,
+            "draft_reviews": 0,
+            "testing_reviews": 0,
+            "blocks_rebuild": True,
+            "blocking_message": "ignored",
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "load_settings",
+        lambda: {
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 150,
+            "embedding_model": "global-embed",
+            "glean_amount": 1,
+            "graph_architect_prompt": "global graph prompt",
+            "graph_architect_glean_prompt": "global glean prompt",
+            "entity_resolution_chooser_prompt": None,
+            "entity_resolution_combiner_prompt": None,
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "load_default_prompts",
+        lambda: {
+            "graph_architect_prompt": "default graph prompt",
+            "graph_architect_glean_prompt": "default glean prompt",
+            "entity_resolution_chooser_prompt": "default chooser prompt",
+            "entity_resolution_combiner_prompt": "default combiner prompt",
+        },
+    )
+
+    payload = asyncio.run(ingestion_router.ingest_config("world-1"))
+
+    assert payload["ingest_settings"]["glean_amount"] == 2
+    assert payload["prompts"]["graph_architect_prompt"] == {
+        "value": "world graph prompt",
+        "source": "world",
+    }
+    assert payload["prompts"]["graph_architect_glean_prompt"] == {
+        "value": "global glean prompt",
+        "source": "global",
+    }
+    assert payload["prompts"]["entity_resolution_chooser_prompt"] == {
+        "value": "default chooser prompt",
+        "source": "default",
+    }
+    assert payload["has_active_chunk_overrides"] is True
+    assert payload["active_chunk_override_count"] == 1
 
 
 def test_prepare_source_for_reembed_keeps_extraction_and_clears_embedding_state():
@@ -499,6 +579,58 @@ def test_reembed_endpoint_rejects_when_chunk_settings_differ_from_locked_setting
 
     assert exc.value.status_code == 400
     assert "locked chunk settings" in exc.value.detail
+
+
+def test_reingest_endpoint_rejects_active_override_reuse_when_chunk_map_changes(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "complete",
+        "ingest_settings": {
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 150,
+            "embedding_model": "embed-model",
+            "glean_amount": 1,
+            "locked_at": "2026-03-20T00:00:00+00:00",
+            "last_ingest_settings_at": "2026-03-20T00:00:00+00:00",
+        },
+        "sources": [{"source_id": "source-a"}],
+    }
+
+    monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(ingestion_router, "get_safety_review_summary", lambda world_id: {
+        "total_reviews": 1,
+        "unresolved_reviews": 0,
+        "resolved_reviews": 1,
+        "active_override_reviews": 1,
+        "blocked_reviews": 0,
+        "draft_reviews": 0,
+        "testing_reviews": 0,
+        "blocks_rebuild": True,
+        "blocking_message": "ignored",
+    })
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ingestion_router.ingest_start(
+                "world-1",
+                ingestion_router.IngestStartRequest(
+                    resume=False,
+                    operation="rechunk_reingest",
+                    ingest_settings={
+                        "chunk_size_chars": 5000,
+                        "chunk_overlap_chars": 150,
+                        "embedding_model": "embed-model",
+                        "glean_amount": 1,
+                    },
+                    use_active_chunk_overrides=True,
+                ),
+                BackgroundTasks(),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert "chunk size and overlap stay the same" in exc.value.detail
 
 
 def test_persist_chunk_graph_artifacts_binds_edges_to_chunk_created_node_ids():

@@ -67,6 +67,79 @@ def test_load_prompt_prefers_custom_settings_and_falls_back_to_default(tmp_path,
     assert config.load_prompt("entity_resolution_combiner_prompt") == "default combiner prompt"
 
 
+def test_load_prompt_prefers_world_overrides_before_global_and_default(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "load_settings",
+        lambda: {
+            "graph_architect_prompt": "global graph prompt",
+            "graph_architect_glean_prompt": "global glean prompt",
+            "entity_resolution_chooser_prompt": None,
+            "entity_resolution_combiner_prompt": None,
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "load_default_prompts",
+        lambda: {
+            "graph_architect_prompt": "default graph prompt",
+            "graph_architect_glean_prompt": "default glean prompt",
+            "entity_resolution_chooser_prompt": "default chooser prompt",
+            "entity_resolution_combiner_prompt": "default combiner prompt",
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "load_world_meta",
+        lambda world_id: {
+            "world_id": world_id,
+            "ingest_prompt_overrides": {
+                "graph_architect_prompt": "world graph prompt",
+            },
+        },
+    )
+
+    assert config.load_prompt("graph_architect_prompt", world_id="world-1") == "world graph prompt"
+    assert config.load_prompt("graph_architect_glean_prompt", world_id="world-1") == "global glean prompt"
+    assert config.load_prompt("entity_resolution_chooser_prompt", world_id="world-1") == "default chooser prompt"
+
+
+def test_get_world_ingest_prompt_states_reports_world_global_and_default_sources(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "load_settings",
+        lambda: {
+            "graph_architect_prompt": None,
+            "graph_architect_glean_prompt": "global glean prompt",
+            "entity_resolution_chooser_prompt": None,
+            "entity_resolution_combiner_prompt": None,
+        },
+    )
+    monkeypatch.setattr(
+        config,
+        "load_default_prompts",
+        lambda: {
+            "graph_architect_prompt": "default graph prompt",
+            "graph_architect_glean_prompt": "default glean prompt",
+            "entity_resolution_chooser_prompt": "default chooser prompt",
+            "entity_resolution_combiner_prompt": "default combiner prompt",
+        },
+    )
+
+    states = config.get_world_ingest_prompt_states(
+        meta={
+            "world_id": "world-1",
+            "ingest_prompt_overrides": {
+                "graph_architect_prompt": "world graph prompt",
+            },
+        }
+    )
+
+    assert states["graph_architect_prompt"] == {"value": "world graph prompt", "source": "world"}
+    assert states["graph_architect_glean_prompt"] == {"value": "global glean prompt", "source": "global"}
+    assert states["entity_resolution_combiner_prompt"] == {"value": "default combiner prompt", "source": "default"}
+
+
 def test_load_settings_normalizes_stage_specific_concurrency_controls(tmp_path, monkeypatch):
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(

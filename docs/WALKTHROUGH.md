@@ -109,7 +109,11 @@ For most casual use cases, the defaults are already more than enough.
 
 ## Ingestion Settings
 
-On the world ingest page you can control:
+The main ingest page now shows a read-only snapshot of the current world's saved ingest settings.
+
+Editable ingest settings live on the dedicated `Re-ingest` setup page.
+
+That page lets you change:
 
 - Chunk size
 - Chunk overlap
@@ -134,15 +138,17 @@ What they mean:
 - Graph Architect Glean Amount:
   Extra extraction passes that try to catch additional graph details after the first pass
 
-Important save behavior:
+Important behavior:
 
-- If you change any settings, click `Save Graph Architect Settings` before ingestion
-- If you edit prompts, use each prompt's own `Save` button before ingestion
-- Chunk size, chunk overlap, and world embedding model are taken from the values currently shown when you start or rebuild ingestion
+- The main ingest page is now a read-only snapshot of the world's saved settings and effective prompts
+- Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup page
+- Starting `Re-ingest` from that setup page saves the edited settings as the world's new defaults before the rebuild begins
 
-## Prompt Editor
+## Prompt Snapshot
 
-The prompt editor lets you override the shipped defaults, but the defaults are enough for most users.
+The main ingest page now shows a read-only `Prompt Snapshot` for the current world.
+
+If you want to change these prompts for a rebuild, use the dedicated `Re-ingest` setup page.
 
 Graph Architect Prompt:
 
@@ -162,6 +168,12 @@ Entity Resolution Combiner Prompt:
 
 - Controls how chosen duplicate entities are merged into one final name and description
 
+Prompt precedence:
+
+- World override
+- Global custom prompt from Settings
+- Shipped default prompt
+
 Important:
 
 - The chooser and combiner prompts matter only when you run `Exact + chooser/combiner`
@@ -172,10 +184,9 @@ Important:
 Basic flow:
 
 1. Add one or more `.txt` files.
-2. Review the ingestion settings.
-3. Save Graph Architect settings if you changed any settings.
-4. Save any custom prompts if you changed them.
-5. Click `Start Ingestion`.
+2. Review the world's current ingest snapshot and prompt snapshot.
+3. Click `Start Ingestion` for a brand-new world, `Resume` for pending/resumable work, or `Re-ingest` for a full rebuild.
+4. If you want new chunk settings or world-specific prompt changes before a full rebuild, open the `Re-ingest` setup page from the settings icon next to `Re-ingest`.
 
 Reading the ingest progress header:
 
@@ -233,15 +244,13 @@ Use the rebuild and retry actions based on what went wrong:
 - Is blocked while this world still has unresolved safety-review work, because the rebuild would otherwise operate on incomplete repair state
 - Use this when you change only the world embedding model or need to rebuild vectors without re-extracting the graph
 
-`Re-ingest With Previous Settings`
+`Re-ingest`
 
-- Fully rebuilds chunks, extraction, graph data, and vectors using the world's locked previous ingest settings
-- Use this when `Re-embed All` says the prior ingested source set changed and you want a clean rebuild without adopting whatever draft chunk settings are currently in the form
-
-`Rechunk And Re-ingest`
-
-- Fully rebuilds chunks, extraction, graph data, and vectors using the settings currently shown in the form
-- Use this when chunk settings changed on purpose or when you want a full clean rebuild with new settings
+- Fully rebuilds chunks, extraction, graph data, and vectors using the world's currently saved ingest settings and world-specific prompt overrides
+- The main `Re-ingest` button uses the saved settings exactly as shown in the read-only snapshot on the ingest page
+- The small settings icon next to `Re-ingest` opens a dedicated setup page where you can edit chunk settings, glean amount, embedding model, and the world-local ingest/entity-resolution prompts before starting the rebuild
+- Starting `Re-ingest` from that setup page saves those values as the world's new saved settings and prompt overrides
+- If this world has repaired chunk overrides, `Re-ingest` can optionally reuse them when chunk size and overlap stay the same
 
 `Retry Embedding Failures`
 
@@ -260,9 +269,10 @@ Use the rebuild and retry actions based on what went wrong:
 Important behavior:
 
 - `Resume` is the normal path when you simply add another new source after a previous ingest
-- When you add or remove pending sources, the ingest action area now refreshes immediately so `Resume`, `Start Over`, and completion state stay in sync without leaving the page
+- When you add or remove pending sources, the ingest action area now refreshes immediately so `Resume`, `Re-ingest`, and completion state stay in sync without leaving the page
 - `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
-- `Re-embed All` can reuse active repaired chunk bodies, but full rebuild paths still require those overrides to be discarded first
+- `Re-embed All` can reuse active repaired chunk bodies when its locked-source checks still pass
+- `Re-ingest` can also reuse repaired chunk bodies, but only when chunk size and overlap stay the same and you leave repaired-chunk reuse enabled
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
 - The one-shot collapsed-chunk recovery action is only for the current world and current failed chunks; it does not teach future ingests to always treat those chunks as safety-blocked
 

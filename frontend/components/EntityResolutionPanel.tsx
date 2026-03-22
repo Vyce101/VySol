@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
     AlertTriangle,
     CheckCircle,
+    Info,
     Loader2,
     Play,
     RotateCcw,
@@ -26,6 +27,7 @@ interface EntityResolutionPanelProps {
     canResolve: boolean;
     allComplete: boolean;
     isIngesting: boolean;
+    disabledReason?: string | null;
 }
 
 interface ResolutionLogRow {
@@ -121,6 +123,7 @@ export default function EntityResolutionPanel({
     canResolve,
     allComplete,
     isIngesting,
+    disabledReason,
 }: EntityResolutionPanelProps) {
     const [open, setOpen] = useState(false);
     const [topK, setTopK] = useState(50);
@@ -233,13 +236,15 @@ export default function EntityResolutionPanel({
 
     const gateMessage = running
         ? "Entity resolution is running and can be monitored here."
-        : isIngesting
-            ? "Wait for ingestion to finish before starting entity resolution."
-            : canResolve
-                ? "Ready for post-ingestion entity resolution."
-                : !allComplete
-                    ? "Finish ingestion or retry failed chunks before resolving entities."
-                    : "Entity resolution is currently unavailable for this world.";
+        : disabledReason
+            ? disabledReason
+            : isIngesting
+                ? "Wait for ingestion to finish before starting entity resolution."
+                : canResolve
+                    ? "Ready for post-ingestion entity resolution."
+                    : !allComplete
+                        ? "Finish ingestion or retry failed chunks before resolving entities."
+                        : "Entity resolution is currently unavailable for this world.";
 
     const triggerLabel = running ? "Monitor Entities" : "Resolve Entities";
     const triggerDisabled = !running && !canResolve;
@@ -290,22 +295,44 @@ export default function EntityResolutionPanel({
 
     return (
         <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-            <button
-                onClick={() => setOpen(true)}
-                disabled={triggerDisabled}
-                style={{
-                    ...buttonStyle,
-                    width: "100%",
-                    background: running ? "var(--primary-soft-strong)" : "var(--primary)",
-                    color: running ? "var(--primary-light)" : "var(--primary-contrast)",
-                    opacity: triggerDisabled ? 0.45 : 1,
-                }}
-            >
-                {running ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} />}
-                {triggerLabel}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                    onClick={() => setOpen(true)}
+                    disabled={triggerDisabled}
+                    style={{
+                        ...buttonStyle,
+                        width: "100%",
+                        background: running ? "var(--primary-soft-strong)" : "var(--primary)",
+                        color: running ? "var(--primary-light)" : "var(--primary-contrast)",
+                        opacity: triggerDisabled ? 0.45 : 1,
+                    }}
+                >
+                    {running ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} />}
+                    {triggerLabel}
+                </button>
+                {triggerDisabled && (
+                    <span
+                        title={gateMessage}
+                        aria-label={gateMessage}
+                        style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            width: 28,
+                            height: 28,
+                            borderRadius: 9999,
+                            border: "1px solid var(--border)",
+                            color: "var(--text-subtle)",
+                            flexShrink: 0,
+                            cursor: "help",
+                        }}
+                    >
+                        <Info size={14} />
+                    </span>
+                )}
+            </div>
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.45 }}>
-                {gateMessage}
+                {running ? gateMessage : "Use the button above to open the entity-resolution workspace."}
             </div>
 
             {open && (

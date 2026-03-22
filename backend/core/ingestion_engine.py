@@ -763,18 +763,15 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
         if blocking_unresolved_reviews > 0 and blocking_active_override_reviews > 0:
             blocking_message = (
                 "Safety review work is still pending and this world also has active repaired-chunk overrides. "
-                "Resolve or discard the review queue before running Start Over, Re-ingest With Previous Settings, "
-                "or Rechunk And Re-ingest."
+                "Resolve or discard the review queue before running Re-ingest."
             )
         elif blocking_unresolved_reviews > 0:
             blocking_message = (
-                "This world has unresolved safety review items. Resolve or discard them before running Start Over, "
-                "Re-ingest With Previous Settings, or Rechunk And Re-ingest."
+                "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
             )
         else:
             blocking_message = (
-                "This world has active repaired-chunk overrides. Discard those overrides before running Start Over, "
-                "Re-ingest With Previous Settings, or Rechunk And Re-ingest, or the rebuild would lose the repaired chunk text."
+                "This world has active repaired-chunk overrides. Re-ingest can only reuse them when the current chunk size and overlap stay the same."
             )
 
     return {
@@ -917,11 +914,17 @@ def get_safety_review_summary(world_id: str) -> dict:
     return _safety_review_summary_from_reviews(reviews)
 
 
-def get_safety_review_rebuild_guard(world_id: str) -> dict:
+def get_safety_review_rebuild_guard(world_id: str, *, allow_active_overrides: bool = False) -> dict:
     summary = get_safety_review_summary(world_id)
+    unresolved_reviews = int(summary.get("unresolved_reviews", 0) or 0)
+    blocks_for_unresolved = unresolved_reviews > 0
+    if blocks_for_unresolved:
+        message = "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
+    else:
+        message = summary.get("blocking_message")
     return {
-        "can_rebuild": not bool(summary.get("blocks_rebuild")),
-        "message": summary.get("blocking_message"),
+        "can_rebuild": not blocks_for_unresolved,
+        "message": message,
         **summary,
     }
 
@@ -1765,13 +1768,13 @@ def _update_source_status_from_coverage(source: dict) -> None:
 def _resolve_world_ingest_settings(meta: dict, override: dict | None = None) -> dict:
     """Combine stored world settings with optional explicit overrides."""
     resolved = get_world_ingest_settings(meta=meta)
-    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model"):
+    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model", "glean_amount"):
         if not override:
             continue
         value = override.get(key)
         if value in (None, ""):
             continue
-        if key in {"chunk_size_chars", "chunk_overlap_chars"}:
+        if key in {"chunk_size_chars", "chunk_overlap_chars", "glean_amount"}:
             try:
                 resolved[key] = int(value)
             except (TypeError, ValueError):
@@ -1961,14 +1964,14 @@ def get_reembed_eligibility(
         if not isinstance(snapshot, dict):
             return _blocked(
                 "legacy_snapshot_missing",
-                f"{display_name} was ingested before source snapshots were recorded. Run Re-ingest With Previous Settings or Rechunk And Re-ingest once before using Re-embed All.",
+                f"{display_name} was ingested before source snapshots were recorded. Run Re-ingest once before using Re-embed All.",
                 requires_full_rebuild=True,
             )
 
         if not _source_snapshot_chunk_settings_match(snapshot, locked_settings):
             return _blocked(
                 "chunk_settings_mismatch",
-                f"{display_name} was ingested with different chunk settings than this world's locked ingest settings. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                f"{display_name} was ingested with different chunk settings than this world's locked ingest settings. Run Re-ingest.",
                 requires_full_rebuild=True,
             )
 
@@ -1976,7 +1979,7 @@ def get_reembed_eligibility(
         if current_snapshot is None:
             return _blocked(
                 "source_missing",
-                f"{display_name}'s ingested source file is missing from the world vault. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                f"{display_name}'s ingested source file is missing from the world vault. Run Re-ingest.",
                 requires_full_rebuild=True,
             )
 
@@ -1987,7 +1990,7 @@ def get_reembed_eligibility(
         ):
             return _blocked(
                 "source_changed",
-                f"{display_name}'s ingested source file changed since the last clean ingest. Run Re-ingest With Previous Settings or Rechunk And Re-ingest.",
+                f"{display_name}'s ingested source file changed since the last clean ingest. Run Re-ingest.",
                 requires_full_rebuild=True,
             )
 
@@ -2031,11 +2034,11 @@ def _apply_world_ingest_settings(meta: dict, ingest_settings: dict, *, lock: boo
     """Persist effective ingest settings on the in-memory world metadata payload."""
     current = get_world_ingest_settings(meta=meta)
     updated = dict(current)
-    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model"):
+    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model", "glean_amount"):
         value = ingest_settings.get(key)
         if value in (None, ""):
             continue
-        if key in {"chunk_size_chars", "chunk_overlap_chars"}:
+        if key in {"chunk_size_chars", "chunk_overlap_chars", "glean_amount"}:
             try:
                 updated[key] = int(value)
             except (TypeError, ValueError):
@@ -2543,6 +2546,7 @@ async def start_ingestion(
     retry_only: bool = False,
     operation: str = "default",
     ingest_settings_override: dict | None = None,
+    use_active_chunk_overrides: bool = False,
 ) -> None:
     """Run the ingestion pipeline. Called from a BackgroundTask."""
     clear_sse_queue(world_id)
@@ -2560,11 +2564,15 @@ async def start_ingestion(
     effective_resume = resume and operation_norm == "default"
     is_full_rebuild = operation_norm == "rechunk_reingest" or (not resume and operation_norm == "default")
     is_reembed_all = operation_norm == "reembed_all"
+    allow_active_chunk_overrides = is_full_rebuild and bool(use_active_chunk_overrides)
     meta.pop("ingestion_abort_requested_at", None)
     meta.pop("ingestion_wait", None)
 
     if is_full_rebuild or is_reembed_all:
-        review_guard = get_safety_review_rebuild_guard(world_id)
+        review_guard = get_safety_review_rebuild_guard(
+            world_id,
+            allow_active_overrides=allow_active_chunk_overrides,
+        )
         if not review_guard.get("can_rebuild"):
             raise RuntimeError(str(review_guard.get("message") or "Safety review work is still pending for this world."))
 
@@ -2662,7 +2670,8 @@ async def start_ingestion(
         collection_suffix="unique_nodes",
     )
 
-    ga = GraphArchitectAgent()
+    ga = GraphArchitectAgent(world_id=world_id)
+    glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
 
     try:
         await _extraction_scheduler.configure(
@@ -2859,7 +2868,6 @@ async def start_ingestion(
                     final_nodes = list(ga_output.nodes)
                     final_edges = list(ga_output.edges)
 
-                    glean_amount = int(settings.get("glean_amount", 1))
                     for g_idx in range(max(0, glean_amount)):
                         push_sse_event(
                             world_id,
@@ -3238,7 +3246,12 @@ async def start_ingestion(
                 _save_meta(world_id, meta)
                 continue
 
-            temporal_chunks = _load_source_temporal_chunks(world_id, source, chunker)
+            temporal_chunks = _load_source_temporal_chunks(
+                world_id,
+                source,
+                chunker,
+                apply_active_overrides=(allow_active_chunk_overrides or not is_full_rebuild),
+            )
 
             chunks_total = len(temporal_chunks)
             _ensure_source_tracking(source)
@@ -3748,7 +3761,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         embedding_model=world_ingest_settings["embedding_model"],
         collection_suffix="unique_nodes",
     )
-    ga = GraphArchitectAgent()
+    ga = GraphArchitectAgent(world_id=world_id)
 
     cleanup_before_test = await _cleanup_chunk_retry_artifacts(
         graph_store=graph_store,
@@ -3786,7 +3799,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         final_nodes = list(ga_output.nodes)
         final_edges = list(ga_output.edges)
 
-        glean_amount = int(settings.get("glean_amount", 1))
+        glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
         for _ in range(max(0, glean_amount)):
             glean_out, _ = await ga.run_glean(extraction_payload, final_nodes, final_edges)
             final_nodes.extend(glean_out.nodes)

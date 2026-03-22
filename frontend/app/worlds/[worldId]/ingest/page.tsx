@@ -1,10 +1,18 @@
 "use client";
 
 import { useState, useEffect, useRef, use } from "react";
-import { Upload, FileText, Trash2, Play, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import Link from "next/link";
+import { Upload, FileText, Trash2, Play, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2, Settings2, Info } from "lucide-react";
 import EntityResolutionPanel from "@/components/EntityResolutionPanel";
 import { apiFetch, apiUpload, apiStreamGet } from "@/lib/api";
 import { buildIngestActivityLabel, resolveStableIngestProgress } from "@/lib/ingest-progress";
+import {
+    formatPromptSourceLabel,
+    WORLD_INGEST_PROMPT_FIELDS,
+    type WorldIngestConfigResponse,
+    type WorldIngestSettings,
+    type WorldPromptState,
+} from "@/lib/world-ingest";
 
 interface Source {
     source_id: string;
@@ -70,14 +78,6 @@ interface Checkpoint {
     progress_source_book_number?: number | null;
 }
 
-interface IngestSettings {
-    chunk_size_chars: number;
-    chunk_overlap_chars: number;
-    embedding_model: string;
-    locked_at?: string | null;
-    last_ingest_settings_at?: string | null;
-}
-
 interface ReembedEligibility {
     can_reembed_all: boolean;
     reason_code: string;
@@ -90,14 +90,10 @@ interface ReembedEligibility {
 
 interface WorldResponse {
     ingestion_status?: string;
-    ingest_settings?: IngestSettings;
+    ingest_settings?: WorldIngestSettings;
     active_ingestion_run?: boolean;
     reembed_eligibility?: ReembedEligibility;
     safety_review_summary?: SafetyReviewSummary;
-}
-
-interface SettingsResponse {
-    glean_amount?: number;
 }
 
 interface LogEntry {
@@ -209,13 +205,6 @@ interface ManualRescueResponse {
     checkpoint: Checkpoint;
 }
 
-function normalizeGleanAmount(value: unknown): number {
-    const raw = typeof value === "string" ? value.trim() : String(value ?? "");
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) return 1;
-    return Math.min(5, Math.max(0, Math.trunc(parsed)));
-}
-
 function formatAgentLabel(agent?: string | null): string | null {
     const normalized = String(agent ?? "").trim();
     if (!normalized) return null;
@@ -273,14 +262,13 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const fileRef = useRef<HTMLInputElement>(null);
     const esRef = useRef<EventSource | null>(null);
 
-    // Settings state
-    const [chunkSize, setChunkSize] = useState(4000);
-    const [chunkOverlap, setChunkOverlap] = useState(150);
-    const [embeddingModel, setEmbeddingModel] = useState("gemini-embedding-2-preview");
-    const [savedIngestSettings, setSavedIngestSettings] = useState<IngestSettings | null>(null);
+    // Read-only world ingest config state
+    const [savedIngestSettings, setSavedIngestSettings] = useState<WorldIngestSettings | null>(null);
     const [reembedEligibility, setReembedEligibility] = useState<ReembedEligibility | null>(null);
-    const [gleanAmountDraft, setGleanAmountDraft] = useState("1");
-    const [prompts, setPrompts] = useState<Record<string, { value: string; source: string }>>({});
+    const [prompts, setPrompts] = useState<Record<string, WorldPromptState>>({} as Record<string, WorldPromptState>);
+    const [hasActiveChunkOverrides, setHasActiveChunkOverrides] = useState(false);
+    const [activeChunkOverrideCount, setActiveChunkOverrideCount] = useState(0);
+    const [reuseActiveChunkOverrides, setReuseActiveChunkOverrides] = useState(true);
     const [blockedChunkData, setBlockedChunkData] = useState<{ text: string; reason: string } | null>(null);
     const [safetyReviews, setSafetyReviews] = useState<SafetyReviewItem[]>([]);
     const [safetyReviewSummary, setSafetyReviewSummary] = useState<SafetyReviewSummary | null>(null);
@@ -360,26 +348,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         });
     };
 
-    async function loadSettings() {
-        try {
-            const data = await apiFetch<SettingsResponse>(`/settings`);
-            const normalized = normalizeGleanAmount(data.glean_amount);
-            setGleanAmountDraft(String(normalized));
-        } catch { /* ignore */ }
-    }
-
-    const applyWorldData = (data: WorldResponse, options?: { syncIngestInputs?: boolean }) => {
-        const syncIngestInputs = options?.syncIngestInputs ?? true;
+    const applyWorldData = (data: WorldResponse) => {
         setReembedEligibility(data.reembed_eligibility ?? null);
         setSafetyReviewSummary(data.safety_review_summary ?? null);
-        if (data.ingest_settings) {
-            setSavedIngestSettings(data.ingest_settings);
-            if (syncIngestInputs) {
-                setChunkSize(data.ingest_settings.chunk_size_chars);
-                setChunkOverlap(data.ingest_settings.chunk_overlap_chars);
-                setEmbeddingModel(data.ingest_settings.embedding_model);
-            }
-        }
         const liveRun = data.ingestion_status === "in_progress" && data.active_ingestion_run === true;
         if (liveRun) {
             setIngesting(true);
@@ -405,6 +376,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
     };
 
+    const applyIngestConfigData = (data: WorldIngestConfigResponse) => {
+        setSavedIngestSettings(data.ingest_settings);
+        setPrompts(data.prompts as Record<string, WorldPromptState>);
+        setHasActiveChunkOverrides(Boolean(data.has_active_chunk_overrides));
+        setActiveChunkOverrideCount(Number(data.active_chunk_override_count ?? 0));
+        setReuseActiveChunkOverrides((prev) => (data.has_active_chunk_overrides ? prev : true));
+    };
+
     async function loadWorld() {
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
@@ -426,28 +405,30 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         } catch { /* ignore */ }
     }
 
+    async function loadIngestConfig() {
+        try {
+            const data = await apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`);
+            applyIngestConfigData(data);
+        } catch { /* ignore */ }
+    }
+
     async function refreshIngestActionState() {
-        const [worldData, sourcesData, checkpointData] = await Promise.all([
+        const [worldData, sourcesData, checkpointData, ingestConfigData] = await Promise.all([
             apiFetch<WorldResponse>(`/worlds/${worldId}`),
             apiFetch<Source[]>(`/worlds/${worldId}/sources`),
             apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
+            apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
         ]);
-        applyWorldData(worldData, { syncIngestInputs: false });
+        applyWorldData(worldData);
         applySourcesData(sourcesData);
         applyCheckpointData(checkpointData);
+        applyIngestConfigData(ingestConfigData);
     }
 
     async function loadSafetyReviews() {
         try {
             const data = await apiFetch<SafetyReviewResponse>(`/worlds/${worldId}/ingest/safety-reviews`);
             syncSafetyReviewState(data.reviews, data.summary);
-        } catch { /* ignore */ }
-    }
-
-    async function loadPrompts() {
-        try {
-            const data = await apiFetch<Record<string, { value: string; source: string }>>(`/settings/prompts`);
-            setPrompts(data);
         } catch { /* ignore */ }
     }
 
@@ -557,8 +538,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 loadSources(),
                 loadCheckpoint(),
                 loadSafetyReviews(),
-                loadSettings(),
-                loadPrompts(),
+                loadIngestConfig(),
             ]);
         };
         void initializePage();
@@ -572,16 +552,18 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }, [pendingFocusReviewId, safetyReviews]);
     useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logEntries]);
 
-    const buildIngestSettingsPayload = (override?: Partial<IngestSettings>) => ({
-        chunk_size_chars: override?.chunk_size_chars ?? chunkSize,
-        chunk_overlap_chars: override?.chunk_overlap_chars ?? chunkOverlap,
-        embedding_model: override?.embedding_model ?? embeddingModel.trim(),
+    const buildIngestSettingsPayload = (override?: Partial<WorldIngestSettings>) => ({
+        chunk_size_chars: override?.chunk_size_chars ?? savedIngestSettings?.chunk_size_chars ?? 4000,
+        chunk_overlap_chars: override?.chunk_overlap_chars ?? savedIngestSettings?.chunk_overlap_chars ?? 150,
+        embedding_model: override?.embedding_model ?? savedIngestSettings?.embedding_model ?? "gemini-embedding-2-preview",
+        glean_amount: override?.glean_amount ?? savedIngestSettings?.glean_amount ?? 1,
     });
 
     const startIngestion = async (
         resume: boolean,
         operation: "default" | "rechunk_reingest" | "reembed_all" = "default",
-        overrideSettings?: Partial<IngestSettings>,
+        overrideSettings?: Partial<WorldIngestSettings>,
+        options?: { useActiveChunkOverrides?: boolean },
     ) => {
         resetProgress();
         setRetryNotice(null);
@@ -594,6 +576,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     resume,
                     operation,
                     ingest_settings: buildIngestSettingsPayload(overrideSettings),
+                    use_active_chunk_overrides: Boolean(options?.useActiveChunkOverrides),
                 }),
             });
             connectToSSE();
@@ -683,41 +666,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         } catch (err: unknown) {
             alert((err as Error).message);
         }
-    };
-
-    const savePrompt = async (key: string, value: string) => {
-        try {
-            await apiFetch("/settings/prompts", {
-                method: "POST",
-                body: JSON.stringify({ key, value }),
-            });
-            loadPrompts();
-        } catch { /* ignore */ }
-    };
-
-    const resetPrompt = async (key: string) => {
-        try {
-            await apiFetch(`/settings/prompts/reset/${key}`, { method: "POST" });
-            loadPrompts();
-        } catch { /* ignore */ }
-    };
-
-    const saveAgentSettings = async () => {
-        try {
-            const normalized = normalizeGleanAmount(gleanAmountDraft);
-            setGleanAmountDraft(String(normalized));
-            await apiFetch("/settings", {
-                method: "POST",
-                body: JSON.stringify({
-                    glean_amount: normalized,
-                }),
-            });
-        } catch { /* ignore */ }
-    };
-
-    const commitGleanDraft = () => {
-        const normalized = normalizeGleanAmount(gleanAmountDraft);
-        setGleanAmountDraft(String(normalized));
     };
 
     const setReviewBusy = (
@@ -866,36 +814,21 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     );
     const hasAnyIngested = sources.some((s) => s.chunk_count > 0 || s.ingested_at !== null || s.status === "partial_failure" || s.status === "complete");
     const allComplete = sources.length > 0 && sources.every((s) => s.status === "complete");
-    const hasLockedPreviousSettings = Boolean(
-        savedIngestSettings?.locked_at
-        && Number.isFinite(savedIngestSettings?.chunk_size_chars)
-        && Number.isFinite(savedIngestSettings?.chunk_overlap_chars)
-        && savedIngestSettings?.embedding_model
-    );
-    const chunkSettingsChanged = Boolean(savedIngestSettings) && (
-        chunkSize !== (savedIngestSettings?.chunk_size_chars ?? chunkSize)
-        || chunkOverlap !== (savedIngestSettings?.chunk_overlap_chars ?? chunkOverlap)
-    );
-    const embeddingModelChanged = Boolean(savedIngestSettings)
-        && embeddingModel.trim() !== (savedIngestSettings?.embedding_model ?? embeddingModel.trim());
-    const showRechunkAction = !ingesting && hasAnyIngested;
+    const showReingestAction = !ingesting && hasAnyIngested;
     const showReembedAction = !ingesting && hasAnyIngested;
-    const canReembedAll = Boolean(
-        showReembedAction
-        && reembedEligibility?.can_reembed_all
-        && !chunkSettingsChanged
-    );
-    const reembedReadyExplanation = reembedEligibility?.message
-        || "This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph.";
-    const reembedDisabledReason = chunkSettingsChanged
-        ? "Re-embed All always uses this world's locked chunk settings. Use Re-ingest With Previous Settings or Rechunk And Re-ingest to change chunk size or overlap."
-        : reembedEligibility?.message
-            || "Re-embed All is not currently safe for this world.";
+    const canReembedAll = Boolean(showReembedAction && reembedEligibility?.can_reembed_all);
+    const reembedDisabledReason = reembedEligibility?.message || "Re-embed All is not currently safe for this world.";
     const previousSettingsSummary = savedIngestSettings
-        ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | ${savedIngestSettings.embedding_model}`
+        ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedIngestSettings.embedding_model}`
         : null;
-    const hasPendingWorldSettingChange = chunkSettingsChanged || embeddingModelChanged;
-    const canResolveEntities = !ingesting && !hasPending && hasAnyIngested;
+    const canResolveEntities = !ingesting && allComplete && hasAnyIngested;
+    const resolveEntitiesDisabledReason = ingesting
+        ? "Wait for ingestion to finish before starting entity resolution."
+        : canResolveEntities
+            ? null
+            : !allComplete
+                ? "Finish ingestion or retry failed chunks before resolving entities."
+                : "Entity resolution is currently unavailable for this world.";
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
         lookup[source.source_id] = source.display_name;
@@ -919,19 +852,19 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const stageCounters = ingesting
         ? progress.stageCounters
         : (checkpoint?.stage_counters ?? progress.stageCounters);
+    const failedRecordCount = stageCounters.failed_records ?? 0;
     const reviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
-    const blocksRebuild = Boolean(safetyReviewSummary?.blocks_rebuild);
-    const rebuildBlockedReason = safetyReviewSummary?.blocking_message
-        || "Safety review work is still pending for this world.";
+    const unresolvedReviewCount = safetyReviewSummary?.unresolved_reviews ?? 0;
+    const rebuildBlockedReason = unresolvedReviewCount > 0
+        ? "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
+        : null;
     const hasProgress = progressSummary.totalWorkUnits > 0;
     const showProgressSummary = ingesting || hasProgress;
     const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !showResume;
     const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && safetyReviews.length === 0 && !hasProgress;
     const progressHeaderLabel = progressSummary.isAborting
         ? "Stopping ingest..."
-        : progressSummary.isReembedAll
-            ? "Re-embedding world content"
-            : "Ingest progress";
+        : "Input Progress";
     const groupedSafetyReviews = safetyReviews.reduce<Record<string, SafetyReviewItem[]>>((groups, review) => {
         const key = `${review.display_name}::${review.source_id}`;
         groups[key] = groups[key] || [];
@@ -1003,8 +936,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     </div>
                 ))}
 
-                {/* Start / Resume buttons */}
-                <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
+                <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
                     {ingesting ? (
                         <button
                             onClick={abortIngestion}
@@ -1013,159 +945,134 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 ...btnStyle,
                                 background: "var(--status-error-bg)",
                                 color: "var(--status-error-fg)",
-                                flex: 1,
+                                width: "100%",
                                 opacity: isAborting ? 0.7 : 1,
                                 cursor: isAborting ? "not-allowed" : "pointer",
                             }}
                         >
                             {isAborting ? "Aborting..." : "Abort"}
                         </button>
-                    ) : showResume ? (
-                        <>
-                            <button onClick={() => startIngestion(true)} style={{ ...btnStyle, background: "var(--success)", color: "var(--primary-contrast)", flex: 1 }}>
-                                Resume
-                            </button>
-                            <button
-                                onClick={() => { if (confirm("This will erase all graph and vector data for this world, then rebuild it using the currently shown world settings. Are you sure?")) startIngestion(false); }}
-                                disabled={blocksRebuild}
-                                title={blocksRebuild ? rebuildBlockedReason : undefined}
-                                style={{
-                                    ...btnStyle,
-                                    background: "var(--status-error-bg)",
-                                    color: "var(--status-error-fg)",
-                                    flex: 1,
-                                    opacity: blocksRebuild ? 0.45 : 1,
-                                    cursor: blocksRebuild ? "not-allowed" : "pointer",
-                                }}
-                            >
-                                Start Over
-                            </button>
-                        </>
-                    ) : showCompletedIdleState ? (
-                        <div style={{
-                            flex: 1,
-                            padding: "12px 14px",
-                            borderRadius: 10,
-                            border: "1px solid rgba(34,197,94,0.28)",
-                            background: "rgba(34,197,94,0.08)",
-                            color: "#86efac",
-                            fontSize: 13,
-                            fontWeight: 600,
-                            textAlign: "center",
-                        }}>
-                            Ingestion complete for this world.
-                        </div>
                     ) : (
-                        <button
-                            onClick={() => { startIngestion(false); }}
-                            disabled={!hasPending}
-                            style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", flex: 1, opacity: !hasPending ? 0.4 : 1 }}
-                        >
-                            <Play size={14} /> Start Ingestion
-                        </button>
+                        <>
+                            {showCompletedIdleState && (
+                                <div style={{
+                                    padding: "12px 14px",
+                                    borderRadius: 10,
+                                    border: "1px solid rgba(34,197,94,0.28)",
+                                    background: "rgba(34,197,94,0.08)",
+                                    color: "#86efac",
+                                    fontSize: 13,
+                                    fontWeight: 600,
+                                    textAlign: "center",
+                                }}>
+                                    Ingestion complete for this world.
+                                </div>
+                            )}
+
+                            {!hasAnyIngested && !showResume && (
+                                <button
+                                    onClick={() => { startIngestion(false); }}
+                                    disabled={!hasPending}
+                                    style={{
+                                        ...btnStyle,
+                                        background: "var(--primary)",
+                                        color: "var(--primary-contrast)",
+                                        width: "100%",
+                                        opacity: !hasPending ? 0.4 : 1,
+                                    }}
+                                >
+                                    <Play size={14} /> Start Ingestion
+                                </button>
+                            )}
+
+                            {showResume && (
+                                <button
+                                    onClick={() => startIngestion(true)}
+                                    style={{ ...btnStyle, background: "var(--success)", color: "var(--primary-contrast)", width: "100%" }}
+                                >
+                                    Resume
+                                </button>
+                            )}
+
+                            {showReingestAction && (
+                                <div style={{ display: "grid", gap: 8 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                        <button
+                                            onClick={() => {
+                                                if (!confirm("This will clear this world's graph and vectors, then fully rebuild it using this world's saved ingest settings and prompts. Chats and other non-ingest data stay intact. Continue?")) return;
+                                                startIngestion(false, "rechunk_reingest", savedIngestSettings ?? undefined, {
+                                                    useActiveChunkOverrides: hasActiveChunkOverrides && reuseActiveChunkOverrides,
+                                                });
+                                            }}
+                                            disabled={Boolean(rebuildBlockedReason)}
+                                            style={{
+                                                ...btnStyle,
+                                                background: "var(--status-progress-bg)",
+                                                color: "var(--primary-contrast)",
+                                                flex: 1,
+                                                opacity: rebuildBlockedReason ? 0.45 : 1,
+                                                cursor: rebuildBlockedReason ? "not-allowed" : "pointer",
+                                            }}
+                                        >
+                                            Re-ingest
+                                        </button>
+                                        {rebuildBlockedReason && <InlineInfo title={rebuildBlockedReason} />}
+                                        <Link
+                                            href={`/worlds/${worldId}/ingest/reingest`}
+                                            aria-label="Edit re-ingest settings"
+                                            title="Open the re-ingest setup page to change this world's settings and prompts before starting."
+                                            style={{
+                                                display: "inline-flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                width: 36,
+                                                height: 36,
+                                                borderRadius: 10,
+                                                border: "1px solid var(--border)",
+                                                background: "var(--background)",
+                                                color: "var(--text-primary)",
+                                                flexShrink: 0,
+                                            }}
+                                        >
+                                            <Settings2 size={15} />
+                                        </Link>
+                                    </div>
+                                    {hasActiveChunkOverrides && (
+                                        <LabeledToggle
+                                            checked={reuseActiveChunkOverrides}
+                                            onChange={setReuseActiveChunkOverrides}
+                                            label={`Reuse ${activeChunkOverrideCount} repaired chunk override${activeChunkOverrideCount === 1 ? "" : "s"}`}
+                                            helpText="When enabled, full Re-ingest will reuse the current repaired chunk text as long as the chunk size and overlap stay the same."
+                                        />
+                                    )}
+                                </div>
+                            )}
+
+                            {showReembedAction && (
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                    <button
+                                        onClick={() => {
+                                            if (!confirm("This will clear this world's chunk and node vectors and re-embed all stored world content without re-extracting or rebuilding the graph. Chats and other non-ingest data stay intact. Continue?")) return;
+                                            startIngestion(false, "reembed_all");
+                                        }}
+                                        disabled={!canReembedAll}
+                                        style={{
+                                            ...btnStyle,
+                                            background: "var(--primary)",
+                                            color: "var(--primary-contrast)",
+                                            flex: 1,
+                                            opacity: canReembedAll ? 1 : 0.45,
+                                            cursor: canReembedAll ? "pointer" : "not-allowed",
+                                        }}
+                                    >
+                                        Re-embed All
+                                    </button>
+                                    {!canReembedAll && <InlineInfo title={reembedDisabledReason} />}
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
-
-                {showRechunkAction && (
-                    <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                        <div style={{ fontSize: 12, color: "var(--status-progress-fg)", lineHeight: 1.5 }}>
-                            {chunkSettingsChanged
-                                ? "Chunk size or overlap changed. This full rebuild will re-chunk, re-extract, rebuild the graph, and re-embed everything for this world."
-                                : "This full rebuild re-chunks, re-extracts, rebuilds the graph, and re-embeds everything for this world using the current ingest settings."}
-                        </div>
-                        {hasLockedPreviousSettings && savedIngestSettings && (
-                            <button
-                                onClick={() => {
-                                    if (!confirm("This will clear this world's graph and vectors, then fully rebuild it using the previously locked ingest settings from the last clean ingest. Chats and other non-ingest data stay intact. Continue?")) return;
-                                    startIngestion(false, "rechunk_reingest", savedIngestSettings);
-                                }}
-                                disabled={blocksRebuild}
-                                title={blocksRebuild ? rebuildBlockedReason : undefined}
-                                style={{
-                                    ...btnStyle,
-                                    background: "var(--primary)",
-                                    color: "var(--primary-contrast)",
-                                    width: "100%",
-                                    opacity: blocksRebuild ? 0.45 : 1,
-                                    cursor: blocksRebuild ? "not-allowed" : "pointer",
-                                }}
-                            >
-                                Re-ingest With Previous Settings
-                            </button>
-                        )}
-                        <button
-                            onClick={() => {
-                                if (!confirm("This will clear this world's graph and vectors, then re-chunk, re-extract, rebuild the graph, and re-embed everything for this world. Chats and other non-ingest data stay intact. Continue?")) return;
-                                startIngestion(false, "rechunk_reingest");
-                            }}
-                            disabled={blocksRebuild}
-                            title={blocksRebuild ? rebuildBlockedReason : undefined}
-                            style={{
-                                ...btnStyle,
-                                background: "var(--status-progress-bg)",
-                                color: "var(--primary-contrast)",
-                                width: "100%",
-                                opacity: blocksRebuild ? 0.45 : 1,
-                                cursor: blocksRebuild ? "not-allowed" : "pointer",
-                            }}
-                        >
-                            Rechunk And Re-ingest (Current Settings)
-                        </button>
-                    </div>
-                )}
-
-                {showReembedAction && (
-                    <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                        <div style={{ fontSize: 12, color: "var(--status-info-pill-fg)", lineHeight: 1.5 }}>
-                            {embeddingModelChanged
-                                ? "Embedding model changed. This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph."
-                                : "This rebuild clears and re-creates all chunk and node vectors for the world without re-extracting or rebuilding the graph."}
-                        </div>
-                        <div style={{
-                            fontSize: 12,
-                            color: canReembedAll ? "var(--text-subtle)" : "#fca5a5",
-                            lineHeight: 1.5,
-                            padding: "10px 12px",
-                            borderRadius: 8,
-                            border: canReembedAll ? "1px solid var(--border)" : "1px solid rgba(248,113,113,0.28)",
-                            background: canReembedAll ? "var(--background)" : "rgba(127,29,29,0.16)",
-                        }}>
-                            {canReembedAll ? reembedReadyExplanation : reembedDisabledReason}
-                        </div>
-                        <button
-                            onClick={() => {
-                                if (!confirm("This will clear this world's chunk and node vectors and re-embed all stored world content without re-extracting or rebuilding the graph. Chats and other non-ingest data stay intact. Continue?")) return;
-                                startIngestion(false, "reembed_all");
-                            }}
-                            disabled={!canReembedAll}
-                            style={{
-                                ...btnStyle,
-                                background: "var(--primary)",
-                                color: "var(--primary-contrast)",
-                                width: "100%",
-                                opacity: canReembedAll ? 1 : 0.45,
-                                cursor: canReembedAll ? "pointer" : "not-allowed",
-                            }}
-                        >
-                            Re-embed All
-                        </button>
-                    </div>
-                )}
-
-                {blocksRebuild && (
-                    <div style={{
-                        marginTop: 10,
-                        padding: "10px 12px",
-                        borderRadius: 8,
-                        background: "rgba(248,113,113,0.08)",
-                        border: "1px solid rgba(248,113,113,0.25)",
-                        fontSize: 12,
-                        color: "#fecaca",
-                        lineHeight: 1.5,
-                    }}>
-                        {rebuildBlockedReason}
-                    </div>
-                )}
 
                 {!ingesting && failureRecords.length > 0 && (
                     <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
@@ -1199,7 +1106,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     </div>
                 )}
 
-                {(hasPendingWorldSettingChange || retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
+                {(retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
                     <div style={{
                         marginTop: 10,
                         padding: "10px 12px",
@@ -1210,11 +1117,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         color: "#fcd34d",
                         lineHeight: 1.5,
                     }}>
-                        {hasPendingWorldSettingChange && (
-                            <div>
-                                Retry buttons only fix failures in the currently locked ingest. Use the rebuild actions above to intentionally apply new chunk settings or a new embedding model.
-                            </div>
-                        )}
                         <div>
                             Retry Extraction Failures and Retry All Failures skip chunks that are already in the Safety Review queue.
                         </div>
@@ -1234,36 +1136,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     canResolve={canResolveEntities}
                     allComplete={allComplete}
                     isIngesting={ingesting}
+                    disabledReason={resolveEntitiesDisabledReason}
                 />
-
-                {/* Resumable checkpoint info */}
-                {showResume && (
-                    <div style={{
-                        marginTop: 12, padding: "10px 12px", background: "var(--status-warning-soft-bg)", border: "1px solid var(--status-warning-soft-border)",
-                        borderRadius: 8, fontSize: 13, color: "var(--status-progress-fg)",
-                    }}>
-                        Resumable: {checkpoint?.chunk_index ?? 0}/{checkpoint?.chunks_total ?? 0} chunks complete
-                    </div>
-                )}
-
-                {stageCounters && (
-                    <div style={{
-                        marginTop: 12,
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        padding: 10,
-                        background: "var(--background)",
-                        fontSize: 12,
-                        color: "var(--text-subtle)",
-                        display: "grid",
-                        gap: 4,
-                    }}>
-                        <div><strong style={{ color: "var(--text-primary)" }}>Expected:</strong> {stageCounters.expected_chunks}</div>
-                        <div><strong style={{ color: "var(--text-primary)" }}>Extracted:</strong> {stageCounters.extracted_chunks}</div>
-                        <div><strong style={{ color: "var(--text-primary)" }}>Embedded:</strong> {stageCounters.embedded_chunks}</div>
-                        <div><strong style={{ color: "var(--text-primary)" }}>Failed Records:</strong> {stageCounters.failed_records}</div>
-                    </div>
-                )}
 
                 {failureRecords.length > 0 && (
                     <div style={{
@@ -1322,76 +1196,36 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         lineHeight: 1.5,
                     }}>
                         {savedIngestSettings?.locked_at
-                            ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Changing chunk settings requires a full Rechunk And Re-ingest. Changing only the embedding model uses Re-embed All to rebuild chunk and node vectors without re-extracting.`
-                            : "This world has not locked ingest settings yet. The values below will be locked on the first full ingest."}
+                            ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest settings page if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
+                            : "This world has not locked ingest settings yet. The snapshot below shows what will be used the next time you start or re-ingest this world."}
                     </div>
-                    {savedIngestSettings?.locked_at && previousSettingsSummary && (
+                    {previousSettingsSummary && (
                         <div style={{
                             marginBottom: 12,
                             padding: "10px 12px",
                             borderRadius: 8,
                             background: "var(--background)",
                             border: "1px solid var(--border)",
-                            display: "grid",
-                            gap: 4,
+                            fontSize: 12,
+                            color: "var(--text-subtle)",
+                            lineHeight: 1.5,
                         }}>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
-                                Locked Previous Settings
-                            </div>
-                            <div style={{ fontSize: 13, color: "var(--text-primary)", lineHeight: 1.5 }}>
-                                {previousSettingsSummary}
-                            </div>
-                            {savedIngestSettings.locked_at && (
-                                <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
-                                    Locked on {new Date(savedIngestSettings.locked_at).toLocaleString()}
-                                </div>
-                            )}
+                            {previousSettingsSummary}
                         </div>
                     )}
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>Chunk Size (chars)</label>
-                        <input type="number" value={chunkSize} onChange={(e) => setChunkSize(Number(e.target.value))} style={{ width: "100%" }} />
-                    </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>Chunk Overlap (chars)</label>
-                        <input type="number" value={chunkOverlap} onChange={(e) => setChunkOverlap(Number(e.target.value))} style={{ width: "100%" }} />
-                    </div>
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>World Embedding Model</label>
-                        <input value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }} />
-                    </div>
-                    <div style={{ marginBottom: 16 }}>
-                        <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>Graph Architect Glean Amount (iterations)</label>
-                        <input
-                            type="number"
-                            min="0"
-                            max="5"
-                            value={gleanAmountDraft}
-                            onChange={(e) => setGleanAmountDraft(e.target.value)}
-                            onBlur={commitGleanDraft}
-                            style={{ width: "100%" }}
-                        />
-                    </div>
-                    <button onClick={saveAgentSettings} style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}>
-                        Save Graph Architect Settings
-                    </button>
+                    <ReadOnlySettingRow label="Chunk Size (chars)" value={savedIngestSettings?.chunk_size_chars?.toLocaleString() ?? "-"} />
+                    <ReadOnlySettingRow label="Chunk Overlap (chars)" value={savedIngestSettings?.chunk_overlap_chars?.toLocaleString() ?? "-"} />
+                    <ReadOnlySettingRow label="World Embedding Model" value={savedIngestSettings?.embedding_model ?? "-"} mono />
+                    <ReadOnlySettingRow label="Graph Architect Glean Amount" value={savedIngestSettings?.glean_amount?.toLocaleString() ?? "-"} />
                 </CollapsibleSection>
 
-                {/* Collapsible Prompt Editor */}
-                <CollapsibleSection title="Prompt Editor" open={showPrompts} onToggle={() => setShowPrompts(!showPrompts)}>
-                    {[
-                        "graph_architect_prompt",
-                        "graph_architect_glean_prompt",
-                        "entity_resolution_chooser_prompt",
-                        "entity_resolution_combiner_prompt",
-                    ].map((key) => (
-                        <PromptField
+                {/* Collapsible Prompt Snapshot */}
+                <CollapsibleSection title="Prompt Snapshot" open={showPrompts} onToggle={() => setShowPrompts(!showPrompts)}>
+                    {WORLD_INGEST_PROMPT_FIELDS.map(({ key, label }) => (
+                        <StaticPromptField
                             key={`${key}:${prompts[key]?.source || "default"}:${prompts[key]?.value || ""}`}
-                            label={key.replace(/_prompt$/, "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
-                            promptKey={key}
+                            label={label}
                             prompt={prompts[key]}
-                            onSave={savePrompt}
-                            onReset={resetPrompt}
                         />
                     ))}
                 </CollapsibleSection>
@@ -1415,7 +1249,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             <p style={{ fontSize: 13, marginTop: 6 }}>
                                 {safetyReviewSummary?.unresolved_reviews
                                     ? "Use the Safety Review Queue below or the left-panel recover/edit actions to fix blocked chunks."
-                                    : "Retry failures or use Re-embed All / Re-ingest With Previous Settings / Rechunk And Re-ingest from the left panel."}
+                                    : "Retry failures or use Re-embed All / Re-ingest from the left panel."}
                             </p>
                         )}
                     </div>
@@ -1453,6 +1287,19 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                         </div>
                                         <div style={{ fontSize: 11, color: "var(--text-subtle)", marginTop: 2 }}>
                                             {progressSummary.expectedChunks || "?"} total chunks
+                                        </div>
+                                        <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
+                                            <span style={{
+                                                padding: "4px 10px",
+                                                borderRadius: 9999,
+                                                fontSize: 11,
+                                                fontWeight: 700,
+                                                background: failedRecordCount > 0 ? "rgba(248,113,113,0.14)" : "var(--background-secondary)",
+                                                color: failedRecordCount > 0 ? "#fecaca" : "var(--text-subtle)",
+                                                border: failedRecordCount > 0 ? "1px solid rgba(248,113,113,0.22)" : "1px solid var(--border)",
+                                            }}>
+                                                Failed Records: {failedRecordCount}
+                                            </span>
                                         </div>
                                     </div>
                                 </div>
@@ -1856,20 +1703,6 @@ function SafetyReviewPanel({
                         {summary?.unresolved_reviews ?? 0} unresolved, {summary?.resolved_reviews ?? 0} resolved, {summary?.active_override_reviews ?? 0} active overrides
                     </div>
                 </div>
-                {summary?.blocks_rebuild && (
-                    <div style={{
-                        maxWidth: 360,
-                        padding: "8px 10px",
-                        borderRadius: 8,
-                        background: "rgba(248,113,113,0.08)",
-                        border: "1px solid rgba(248,113,113,0.2)",
-                        color: "#fecaca",
-                        fontSize: 12,
-                        lineHeight: 1.45,
-                    }}>
-                        {summary.blocking_message}
-                    </div>
-                )}
             </div>
 
             <div style={{ display: "grid", gap: 14 }}>
@@ -2105,40 +1938,128 @@ function CollapsibleSection({ title, open, onToggle, children }: { title: string
     );
 }
 
-function PromptField({ label, promptKey, prompt, onSave, onReset }: {
-    label: string;
-    promptKey: string;
-    prompt?: { value: string; source: string };
-    onSave: (key: string, value: string) => void;
-    onReset: (key: string) => void;
-}) {
-    const [value, setValue] = useState(prompt?.value || "");
+function InlineInfo({ title }: { title: string }) {
+    return (
+        <span
+            title={title}
+            aria-label={title}
+            style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 28,
+                height: 28,
+                borderRadius: 9999,
+                border: "1px solid var(--border)",
+                color: "var(--text-subtle)",
+                flexShrink: 0,
+                cursor: "help",
+            }}
+        >
+            <Info size={14} />
+        </span>
+    );
+}
 
+function LabeledToggle({
+    checked,
+    onChange,
+    label,
+    helpText,
+    disabled = false,
+}: {
+    checked: boolean;
+    onChange: (next: boolean) => void;
+    label: string;
+    helpText?: string;
+    disabled?: boolean;
+}) {
+    return (
+        <label style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid var(--border)",
+            background: "var(--background)",
+            opacity: disabled ? 0.55 : 1,
+            cursor: disabled ? "not-allowed" : "pointer",
+        }}>
+            <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={(e) => onChange(e.target.checked)}
+            />
+            <span style={{ flex: 1, fontSize: 12, color: "var(--text-primary)", lineHeight: 1.45 }}>
+                {label}
+            </span>
+            {helpText && <InlineInfo title={helpText} />}
+        </label>
+    );
+}
+
+function ReadOnlySettingRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+    return (
+        <div style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--background)",
+            display: "grid",
+            gap: 4,
+        }}>
+            <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>{label}</div>
+            <div style={{ fontSize: 13, color: "var(--text-primary)", fontFamily: mono ? "monospace" : undefined }}>
+                {value}
+            </div>
+        </div>
+    );
+}
+
+function StaticPromptField({ label, prompt }: { label: string; prompt?: WorldPromptState }) {
+    const sourceLabel = formatPromptSourceLabel(prompt?.source);
+    const isWorld = sourceLabel === "world";
+    const isGlobal = sourceLabel === "global";
     return (
         <div style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
                 <span style={{ fontSize: 13, fontWeight: 500 }}>{label}</span>
                 <span style={{
-                    fontSize: 11, padding: "2px 8px", borderRadius: 9999, fontWeight: 500,
-                    background: prompt?.source === "custom" ? "var(--primary-soft-strong)" : "var(--status-pending-bg)",
-                    color: prompt?.source === "custom" ? "var(--primary-light)" : "var(--status-pending-fg)",
+                    fontSize: 11,
+                    padding: "2px 8px",
+                    borderRadius: 9999,
+                    fontWeight: 600,
+                    background: isWorld
+                        ? "var(--primary-soft-strong)"
+                        : isGlobal
+                            ? "rgba(59,130,246,0.16)"
+                            : "var(--status-pending-bg)",
+                    color: isWorld
+                        ? "var(--primary-light)"
+                        : isGlobal
+                            ? "#bfdbfe"
+                            : "var(--status-pending-fg)",
+                    textTransform: "lowercase",
                 }}>
-                    {prompt?.source || "default"}
+                    {sourceLabel}
                 </span>
             </div>
-            <textarea
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                rows={4}
-                style={{ width: "100%", minHeight: 120, resize: "vertical", fontSize: 12 }}
-            />
-            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                <button onClick={() => onSave(promptKey, value)} style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", flex: 1, fontSize: 12 }}>
-                    Save
-                </button>
-                <button onClick={() => onReset(promptKey)} style={{ ...btnStyle, background: "var(--border)", color: "var(--text-subtle)", flex: 1, fontSize: 12 }}>
-                    Reset to Default
-                </button>
+            <div style={{
+                width: "100%",
+                minHeight: 120,
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--background)",
+                color: "var(--text-primary)",
+                fontSize: 12,
+                lineHeight: 1.5,
+                whiteSpace: "pre-wrap",
+            }}>
+                {prompt?.value || ""}
             </div>
         </div>
     );

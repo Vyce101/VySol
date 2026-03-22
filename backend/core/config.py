@@ -58,6 +58,14 @@ INGEST_SETTINGS_KEYS = (
     "chunk_size_chars",
     "chunk_overlap_chars",
     "embedding_model",
+    "glean_amount",
+)
+
+WORLD_INGEST_PROMPT_KEYS = (
+    "graph_architect_prompt",
+    "graph_architect_glean_prompt",
+    "entity_resolution_chooser_prompt",
+    "entity_resolution_combiner_prompt",
 )
 
 
@@ -252,6 +260,11 @@ def get_default_ingest_settings(settings: dict | None = None) -> dict:
         "chunk_size_chars": int(settings_data.get("chunk_size_chars", _DEFAULT_SETTINGS["chunk_size_chars"])),
         "chunk_overlap_chars": int(settings_data.get("chunk_overlap_chars", _DEFAULT_SETTINGS["chunk_overlap_chars"])),
         "embedding_model": str(settings_data.get("embedding_model", _DEFAULT_SETTINGS["embedding_model"])),
+        "glean_amount": _coerce_int(
+            settings_data.get("glean_amount", _DEFAULT_SETTINGS["glean_amount"]),
+            _DEFAULT_SETTINGS["glean_amount"],
+            minimum=0,
+        ),
         "locked_at": None,
         "last_ingest_settings_at": None,
     }
@@ -286,7 +299,7 @@ def get_world_ingest_settings(*, world_id: str | None = None, meta: dict | None 
         value = stored.get(key)
         if value in (None, ""):
             continue
-        if key in {"chunk_size_chars", "chunk_overlap_chars"}:
+        if key in {"chunk_size_chars", "chunk_overlap_chars", "glean_amount"}:
             try:
                 output[key] = int(value)
             except (TypeError, ValueError):
@@ -326,7 +339,7 @@ def set_world_ingest_settings(
         value = ingest_settings.get(key)
         if value in (None, ""):
             continue
-        if key in {"chunk_size_chars", "chunk_overlap_chars"}:
+        if key in {"chunk_size_chars", "chunk_overlap_chars", "glean_amount"}:
             try:
                 updated[key] = int(value)
             except (TypeError, ValueError):
@@ -347,6 +360,105 @@ def set_world_ingest_settings(
         json.dump(meta, f, indent=2)
     os.replace(str(tmp), str(path))
     return updated
+
+
+def get_world_ingest_prompt_overrides(*, world_id: str | None = None, meta: dict | None = None) -> dict[str, str]:
+    """Return persisted world-scoped prompt overrides for ingest and entity-resolution operations."""
+    meta_data = meta if meta is not None else (load_world_meta(world_id) if world_id else None)
+    if not isinstance(meta_data, dict):
+        return {}
+    raw = meta_data.get("ingest_prompt_overrides")
+    if not isinstance(raw, dict):
+        return {}
+
+    output: dict[str, str] = {}
+    for key in WORLD_INGEST_PROMPT_KEYS:
+        value = raw.get(key)
+        if not isinstance(value, str):
+            continue
+        if value.strip():
+            output[key] = value
+    return output
+
+
+def set_world_ingest_prompt_overrides(world_id: str, prompt_overrides: dict | None) -> dict[str, str] | None:
+    """Persist normalized world-scoped ingest prompt overrides onto world metadata."""
+    path = world_meta_path(world_id)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    normalized: dict[str, str] = {}
+    for key in WORLD_INGEST_PROMPT_KEYS:
+        value = prompt_overrides.get(key) if isinstance(prompt_overrides, dict) else None
+        if not isinstance(value, str):
+            continue
+        if value.strip():
+            normalized[key] = value
+
+    meta["ingest_prompt_overrides"] = normalized
+
+    tmp = path.with_suffix(".tmp.json")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    os.replace(str(tmp), str(path))
+    return normalized
+
+
+def get_prompt_value_with_source(
+    key: str,
+    *,
+    world_id: str | None = None,
+    meta: dict | None = None,
+    settings: dict | None = None,
+    defaults: dict | None = None,
+) -> tuple[str, str]:
+    """Resolve a prompt value and report whether it came from world, global, or default storage."""
+    settings_data = settings or load_settings()
+    defaults_data = defaults or load_default_prompts()
+    meta_data = meta if meta is not None else (load_world_meta(world_id) if world_id else None)
+
+    if key in WORLD_INGEST_PROMPT_KEYS:
+        world_overrides = get_world_ingest_prompt_overrides(meta=meta_data)
+        world_value = world_overrides.get(key)
+        if world_value:
+            return world_value, "world"
+
+    global_value = settings_data.get(key)
+    if global_value:
+        return str(global_value), "global"
+
+    if key not in defaults_data:
+        raise ValueError(f"Prompt key '{key}' not found in settings or default_prompts.json")
+    return str(defaults_data[key]), "default"
+
+
+def get_world_ingest_prompt_states(*, world_id: str | None = None, meta: dict | None = None) -> dict[str, dict[str, str]]:
+    """Return effective world ingest prompts with their source labels."""
+    settings_data = load_settings()
+    defaults_data = load_default_prompts()
+    meta_data = meta if meta is not None else (load_world_meta(world_id) if world_id else None)
+    result: dict[str, dict[str, str]] = {}
+    for key in WORLD_INGEST_PROMPT_KEYS:
+        value, source = get_prompt_value_with_source(
+            key,
+            world_id=world_id,
+            meta=meta_data,
+            settings=settings_data,
+            defaults=defaults_data,
+        )
+        result[key] = {"value": value, "source": source}
+    return result
+
+
+def load_prompt(key: str, *, world_id: str | None = None, meta: dict | None = None) -> str:
+    """Load a prompt using world override -> global override -> shipped default precedence."""
+    value, _ = get_prompt_value_with_source(key, world_id=world_id, meta=meta)
+    return value
 
 
 def get_world_embedding_model(world_id: str) -> str:

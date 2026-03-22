@@ -11,7 +11,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal
 
-from core.config import get_world_ingest_settings
+from core.config import (
+    get_world_ingest_prompt_states,
+    get_world_ingest_settings,
+    set_world_ingest_prompt_overrides,
+    set_world_ingest_settings,
+)
 from core.config import world_meta_path
 from core.ingestion_engine import (
     audit_ingestion_integrity,
@@ -38,6 +43,8 @@ class IngestStartRequest(BaseModel):
     resume: bool = True
     operation: Literal["default", "rechunk_reingest", "reembed_all"] = "default"
     ingest_settings: dict | None = None
+    prompt_overrides: dict | None = None
+    use_active_chunk_overrides: bool = False
 
 
 class IngestRetryRequest(BaseModel):
@@ -62,21 +69,78 @@ def _load_meta(world_id: str) -> dict:
         return json.load(f)
 
 
+def _merge_requested_ingest_settings(current: dict, override: dict | None) -> dict:
+    merged = dict(current)
+    if not isinstance(override, dict):
+        return merged
+    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model", "glean_amount"):
+        value = override.get(key)
+        if value in (None, ""):
+            continue
+        if key in {"chunk_size_chars", "chunk_overlap_chars", "glean_amount"}:
+            try:
+                merged[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            merged[key] = str(value)
+    return merged
+
+
+def _same_chunk_map(left: dict, right: dict) -> bool:
+    try:
+        return (
+            int(left.get("chunk_size_chars", -1)) == int(right.get("chunk_size_chars", -2))
+            and int(left.get("chunk_overlap_chars", -1)) == int(right.get("chunk_overlap_chars", -2))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+@router.get("/{world_id}/ingest/config")
+async def ingest_config(world_id: str):
+    meta = recover_stale_ingestion(world_id)
+    summary = get_safety_review_summary(world_id)
+    return {
+        "ingest_settings": get_world_ingest_settings(meta=meta),
+        "prompts": get_world_ingest_prompt_states(meta=meta),
+        "has_active_chunk_overrides": int(summary.get("active_override_reviews", 0) or 0) > 0,
+        "active_chunk_override_count": int(summary.get("active_override_reviews", 0) or 0),
+        "safety_review_summary": summary,
+    }
+
+
 @router.post("/{world_id}/ingest/start")
 async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTasks):
     meta = recover_stale_ingestion(world_id)
     operation = req.operation
+    current_world_settings = get_world_ingest_settings(meta=meta)
+    requested_world_settings = _merge_requested_ingest_settings(current_world_settings, req.ingest_settings)
+    has_active_chunk_overrides = int(get_safety_review_summary(world_id).get("active_override_reviews", 0) or 0) > 0
+    allow_active_chunk_overrides = bool(req.use_active_chunk_overrides) and has_active_chunk_overrides
 
     if has_active_ingestion_run(world_id) and meta.get("ingestion_status") == "in_progress":
         raise HTTPException(status_code=409, detail="Ingestion already in progress.")
 
     if operation == "rechunk_reingest" or (operation == "default" and not req.resume):
-        review_guard = get_safety_review_rebuild_guard(world_id)
+        if allow_active_chunk_overrides and not _same_chunk_map(current_world_settings, requested_world_settings):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Active repaired chunks can only be reused when chunk size and overlap stay the same. "
+                    "Turn off repaired chunk reuse or keep the current chunk settings."
+                ),
+            )
+        review_guard = get_safety_review_rebuild_guard(world_id, allow_active_overrides=allow_active_chunk_overrides)
         if not review_guard.get("can_rebuild"):
             raise HTTPException(
                 status_code=400,
                 detail=str(review_guard.get("message") or "Safety review work is still pending for this world."),
             )
+        if req.ingest_settings:
+            set_world_ingest_settings(world_id, req.ingest_settings, lock=False, touch=False)
+        if req.prompt_overrides is not None:
+            set_world_ingest_prompt_overrides(world_id, req.prompt_overrides)
 
     if operation == "reembed_all":
         audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
@@ -94,7 +158,7 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
                     if int(value) != int(locked_settings.get(key)):
                         raise HTTPException(
                             status_code=400,
-                            detail="Re-embed All uses this world's locked chunk settings. Use Re-ingest With Previous Settings or Rechunk And Re-ingest to change chunk settings.",
+                            detail="Re-embed All uses this world's locked chunk settings. Run Re-ingest to change chunk settings.",
                         )
                 except (TypeError, ValueError):
                     raise HTTPException(
@@ -108,7 +172,7 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
                 status_code=400,
                 detail=str(eligibility.get("message") or "Re-embed All is not currently safe for this world."),
             )
-        bg.add_task(start_ingestion, world_id, False, "all", None, False, operation, req.ingest_settings)
+        bg.add_task(start_ingestion, world_id, False, "all", None, False, operation, req.ingest_settings, False)
         return {"status": "accepted", "world_id": world_id, "operation": operation}
 
     # Check for pending sources (or start-over resets them)
@@ -128,7 +192,17 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
                 raise HTTPException(status_code=400, detail="No pending sources to ingest and no resumable checkpoint.")
 
     # Launch background task
-    bg.add_task(start_ingestion, world_id, req.resume, "all", None, False, operation, req.ingest_settings)
+    bg.add_task(
+        start_ingestion,
+        world_id,
+        req.resume,
+        "all",
+        None,
+        False,
+        operation,
+        req.ingest_settings,
+        allow_active_chunk_overrides,
+    )
     return {"status": "accepted", "world_id": world_id, "operation": operation}
 
 

@@ -16,6 +16,7 @@ All notable user-visible changes to this project will be documented in this file
 - Added a per-message `Context Graph` view in Context X-Ray for newer chat messages.
 - Added a Safety Review Queue for extraction safety blocks, including one-shot recovery for already-collapsed blocked chunks and in-app chunk editing/testing.
 - Added inline chat renaming in the sidebar, with conflict-safe saves that preserve Recent ordering.
+- Added a dedicated world-specific `Re-ingest` setup page for editing saved chunk settings, glean amount, world-local ingest prompts, and repaired-chunk reuse before starting a full rebuild.
 
 ### Changed
 
@@ -35,6 +36,8 @@ All notable user-visible changes to this project will be documented in this file
 - Changed safety-review editing to show overlap separately from the editable chunk body and exposed a dedicated Graph Architect glean prompt in the prompt editor.
 - Changed `Re-embed All` to reuse active repaired chunk bodies when the locked ingest snapshot still matches, while full rebuild paths remain blocked until overrides are discarded.
 - Changed entity resolution to expose per-run unique-node embedding batch and delay controls in the UI.
+- Changed the ingest page to use one `Re-ingest` rebuild action with a read-only world snapshot on the main page and world-local saved prompt precedence (`world -> global -> default`) for ingest/entity-resolution prompts.
+- Changed full `Re-ingest` to optionally reuse repaired chunk overrides when the chunk map stays the same instead of forcing users through separate rebuild buttons and warning cards.
 
 ### Fixed
 
@@ -55,6 +58,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed the ingest page so adding or deleting pending books refreshes the action controls immediately instead of showing stale `Start Ingestion` / completion state until a page reload.
 - Fixed ingest progress UI flicker by switching the main ingest page and floating global status panel to stable world-level extraction/embedding summaries instead of last-agent phase swapping.
 - Fixed the main ingest progress header to show stable `Unique Graph Nodes` and `Embedded Unique Nodes` counters with lightweight hover explanations tied to entity-resolution behavior.
+- Fixed the ingest action panel by removing redundant sidebar progress boxes and duplicate repaired-chunk warnings, capitalizing `Input Progress`, and moving disabled-action explanations into tooltip/info affordances.
 
 ### Removed
 

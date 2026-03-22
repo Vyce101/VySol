@@ -94,7 +94,7 @@ Important behavior:
 
 ## Ingest Rebuild Safety
 
-VySol now treats `Re-embed All` as a narrow vector-maintenance operation, not a catch-all rebuild button.
+VySol now treats `Re-embed All` as a narrow vector-maintenance operation and uses one clearer full rebuild action: `Re-ingest`.
 
 Important behavior:
 
@@ -102,8 +102,11 @@ Important behavior:
 - Newly added pending sources are ignored by `Re-embed All`; use `Resume` to ingest those
 - `Re-embed All` is blocked if a previously ingested source is missing, changed, partially ingested, failed, or comes from an older world that predates stored source snapshots
 - `Re-embed All` reuses active repaired chunk bodies when the locked source snapshot and chunk map still match, so repaired text stays aligned with rebuilt vectors
-- When that happens, the UI points you to either `Retry`, `Resume`, `Re-ingest With Previous Settings`, or `Rechunk And Re-ingest` depending on what changed
-- `Re-ingest With Previous Settings` gives you a clean full rebuild path that reuses the world's locked prior chunk settings instead of the current draft values shown in the form
+- `Re-ingest` is now the single full rebuild path for chunks, extraction, graph data, and vectors
+- The main ingest page keeps the current world's ingest settings and prompt values as a read-only snapshot
+- A dedicated `Re-ingest` setup page lets you edit world-local chunk settings, glean amount, embedding model, and the ingest/entity-resolution prompts before starting a rebuild
+- Starting `Re-ingest` from that setup page saves those values as the world's new saved defaults before the rebuild begins
+- If repaired chunk overrides exist, `Re-ingest` can optionally reuse them, but only when chunk size and overlap stay the same
 
 ## Stable Ingest Progress
 
@@ -134,7 +137,7 @@ Important behavior:
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
 - Retry actions skip unresolved safety-review chunks so they do not silently fall back to original source text
 - Manual one-shot recovery for already-collapsed blocked chunks is world-local and temporary; it only exists to restore those chunks to the review queue for editing
-- Full rebuild actions stay blocked while live repaired-chunk overrides still exist, because those overrides are part of the current ingest state
+- `Re-ingest` can optionally reuse repaired chunk overrides when the chunk map stays the same, and `Re-embed All` continues to respect those repaired chunk bodies when its locked-source checks still pass
 
 ## Extraction Payload Separation
 
