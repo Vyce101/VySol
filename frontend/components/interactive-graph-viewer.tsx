@@ -80,6 +80,10 @@ const BASE_NODE_RADIUS = 6;
 const NODE_RADIUS_CONNECTION_MULTIPLIER = 3.2;
 const CHARGE_RADIUS_MULTIPLIER = 26;
 const LINK_DISTANCE_RADIUS_MULTIPLIER = 1.45;
+const HOVER_GLOW_BLUR = 10;
+const HOVER_GLOW_EXPAND = 1.6;
+const SELECTED_GLOW_BLUR = 15;
+const SELECTED_GLOW_EXPAND = 2.4;
 
 const getNodeRadius = (node: Pick<GraphViewerNode, "connection_count"> | null | undefined) =>
     Math.max(BASE_NODE_RADIUS, BASE_NODE_RADIUS + Math.sqrt(node?.connection_count || 0) * NODE_RADIUS_CONNECTION_MULTIPLIER);
@@ -103,6 +107,35 @@ const paintNodeCircle = (
     ctx.fill();
 
     return { radius, x, y };
+};
+
+const paintNodeGlow = (
+    ctx: CanvasRenderingContext2D,
+    node: Pick<GraphViewerNode, "x" | "y" | "connection_count">,
+    options: {
+        opacity: number;
+        blur: number;
+        expand: number;
+        fillAlpha: number;
+        strokeAlpha: number;
+        strokeWidth: number;
+    },
+) => {
+    const radius = getNodeRadius(node);
+    const { x, y } = getNodePosition(node);
+
+    ctx.save();
+    ctx.globalAlpha = options.opacity;
+    ctx.shadowColor = `rgba(255, 255, 255, ${options.strokeAlpha})`;
+    ctx.shadowBlur = options.blur;
+    ctx.beginPath();
+    ctx.arc(x, y, radius + options.expand, 0, 2 * Math.PI, false);
+    ctx.fillStyle = `rgba(255, 255, 255, ${options.fillAlpha})`;
+    ctx.fill();
+    ctx.lineWidth = options.strokeWidth;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${options.strokeAlpha})`;
+    ctx.stroke();
+    ctx.restore();
 };
 
 const readThemeVar = (name: string, fallback: string) => {
@@ -192,6 +225,7 @@ export default function InteractiveGraphViewer(props: {
 
     const inspectorWidth = 320;
     const [selectedNode, setSelectedNode] = useState<GraphViewerNodeDetail | null>(null);
+    const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
     const [panelOpen, setPanelOpen] = useState(true);
     const [colorBySource, setColorBySource] = useState(false);
     const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -209,6 +243,7 @@ export default function InteractiveGraphViewer(props: {
     const visibleSelectedNode = selectedNode && nodes.some((node) => node.id === selectedNode.id)
         ? selectedNode
         : null;
+    const selectedNodeId = visibleSelectedNode?.id ?? null;
     const graphData = useMemo(() => ({ nodes, links: edges }), [nodes, edges]);
 
     const measureContainer = useCallback(() => {
@@ -401,7 +436,30 @@ export default function InteractiveGraphViewer(props: {
             const isSearching = searchResults.length > 0;
             const isMatch = searchResults.includes(node.id);
             const opacity = isSearching ? (isMatch ? 1 : 0.1) : 1;
+            const isSelected = selectedNodeId === node.id;
+            const isHovered = hoveredNodeId === node.id && !isSelected;
 
+            if (isSelected) {
+                paintNodeGlow(ctx, node, {
+                    opacity,
+                    blur: SELECTED_GLOW_BLUR,
+                    expand: SELECTED_GLOW_EXPAND,
+                    fillAlpha: 0.18,
+                    strokeAlpha: 0.82,
+                    strokeWidth: 1.8,
+                });
+            } else if (isHovered) {
+                paintNodeGlow(ctx, node, {
+                    opacity,
+                    blur: HOVER_GLOW_BLUR,
+                    expand: HOVER_GLOW_EXPAND,
+                    fillAlpha: 0.11,
+                    strokeAlpha: 0.58,
+                    strokeWidth: 1.2,
+                });
+            }
+
+            ctx.save();
             ctx.globalAlpha = opacity;
             const { radius, x, y } = paintNodeCircle(ctx, node, color);
 
@@ -410,9 +468,9 @@ export default function InteractiveGraphViewer(props: {
             ctx.textBaseline = "middle";
             ctx.fillStyle = labelColor;
             ctx.fillText(node.label, x, y + radius + 8);
-            ctx.globalAlpha = 1;
+            ctx.restore();
         },
-        [colorBySource, getSourceColor, searchResults, useEntryRoleColors]
+        [colorBySource, getSourceColor, hoveredNodeId, searchResults, selectedNodeId, useEntryRoleColors]
     );
 
     const getLinkStrokeStyle = useCallback((link: RenderLink) => {
@@ -446,6 +504,10 @@ export default function InteractiveGraphViewer(props: {
             setPanelOpen(true);
         }
     }, [resolveNodeDetail]);
+
+    const handleNodeHover = useCallback((node: GraphViewerNode | null) => {
+        setHoveredNodeId(node?.id ?? null);
+    }, []);
 
     if (nodes.length === 0) {
         return (
@@ -482,6 +544,7 @@ export default function InteractiveGraphViewer(props: {
                         linkHoverPrecision={LINK_HOVER_PRECISION}
                         linkColor={getLinkStrokeStyle}
                         onNodeClick={resolveNodeClick}
+                        onNodeHover={handleNodeHover}
                         nodeId="id"
                         linkSource="source"
                         linkTarget="target"

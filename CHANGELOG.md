@@ -39,6 +39,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed glean default/input behavior and clarified the currently supported OS.
 - Fixed launcher startup state detection.
 - Fixed Gemini chat payload assembly for the Gemini SDK request shape.
+- Fixed graph node focus visibility by adding a subtle white hover glow and a stronger selected-node glow in both the graph tab and Context Graph viewer.
 - Fixed graph edge hover details to show source and target names plus provenance in the graph viewer.
 - Fixed graph viewer startup layout so first-open graphs spread correctly and auto-fit no longer hijacks manual navigation.
 - Fixed graph node hitboxes, shared graph-viewer modal sizing, context-graph interaction regressions, and uniform edge hover behavior across the graph tab and Context Graph.
