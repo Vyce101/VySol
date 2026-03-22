@@ -1,15 +1,16 @@
 "use client";
 
 import { useState, useEffect, useRef, use } from "react";
-import Link from "next/link";
 import { Upload, FileText, Trash2, Play, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2, Settings2, Info } from "lucide-react";
 import EntityResolutionPanel from "@/components/EntityResolutionPanel";
+import WorldReingestSetupContent, { type ReingestSetupSubmission } from "@/components/WorldReingestSetupContent";
 import { apiFetch, apiUpload, apiStreamGet } from "@/lib/api";
 import { buildIngestActivityLabel, resolveStableIngestProgress } from "@/lib/ingest-progress";
 import {
     formatPromptSourceLabel,
     WORLD_INGEST_PROMPT_FIELDS,
     type WorldIngestConfigResponse,
+    type WorldIngestPromptKey,
     type WorldIngestSettings,
     type WorldPromptState,
 } from "@/lib/world-ingest";
@@ -205,6 +206,8 @@ interface ManualRescueResponse {
     checkpoint: Checkpoint;
 }
 
+type RightPanelView = "progress" | "safety_queue";
+
 function formatAgentLabel(agent?: string | null): string | null {
     const normalized = String(agent ?? "").trim();
     if (!normalized) return null;
@@ -257,6 +260,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [showLog, setShowLog] = useState(true);
     const [showSettings, setShowSettings] = useState(false);
     const [showPrompts, setShowPrompts] = useState(false);
+    const [isBooksExpanded, setIsBooksExpanded] = useState(false);
+    const [isReingestModalOpen, setIsReingestModalOpen] = useState(false);
+    const [activeRightPanel, setActiveRightPanel] = useState<RightPanelView>("progress");
     const [dragOver, setDragOver] = useState(false);
     const logEndRef = useRef<HTMLDivElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -563,7 +569,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         resume: boolean,
         operation: "default" | "rechunk_reingest" | "reembed_all" = "default",
         overrideSettings?: Partial<WorldIngestSettings>,
-        options?: { useActiveChunkOverrides?: boolean },
+        options?: {
+            useActiveChunkOverrides?: boolean;
+            promptOverrides?: Record<WorldIngestPromptKey, string>;
+        },
     ) => {
         resetProgress();
         setRetryNotice(null);
@@ -577,8 +586,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     operation,
                     ingest_settings: buildIngestSettingsPayload(overrideSettings),
                     use_active_chunk_overrides: Boolean(options?.useActiveChunkOverrides),
+                    prompt_overrides: options?.promptOverrides,
                 }),
             });
+            void loadIngestConfig();
+            void loadWorld();
+            setActiveRightPanel("progress");
             connectToSSE();
         } catch (err: unknown) {
             setIngesting(false);
@@ -591,6 +604,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setRetryNotice(null);
         setIngesting(true);
         setLogEntries([]);
+        setActiveRightPanel("progress");
         try {
             const data = await apiFetch<RetryResponse>(`/worlds/${worldId}/ingest/retry`, {
                 method: "POST",
@@ -641,6 +655,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 loadSafetyReviews(),
             ]);
             if (firstReviewId) {
+                setActiveRightPanel("safety_queue");
                 setPendingFocusReviewId(firstReviewId);
             }
         } catch (err: unknown) {
@@ -853,15 +868,18 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         ? progress.stageCounters
         : (checkpoint?.stage_counters ?? progress.stageCounters);
     const failedRecordCount = stageCounters.failed_records ?? 0;
-    const reviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
-    const unresolvedReviewCount = safetyReviewSummary?.unresolved_reviews ?? 0;
+    const totalReviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
+    const unresolvedReviewCount = safetyReviewSummary?.unresolved_reviews
+        ?? safetyReviews.filter((review) => review.status !== "resolved").length;
+    const hasAnySafetyQueueHistory = totalReviewCount > 0;
+    const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
     const rebuildBlockedReason = unresolvedReviewCount > 0
         ? "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
         : null;
     const hasProgress = progressSummary.totalWorkUnits > 0;
     const showProgressSummary = ingesting || hasProgress;
     const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !showResume;
-    const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && safetyReviews.length === 0 && !hasProgress;
+    const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && !hasProgress;
     const progressHeaderLabel = progressSummary.isAborting
         ? "Stopping ingest..."
         : "Input Progress";
@@ -871,19 +889,49 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         groups[key].push(review);
         return groups;
     }, {});
+    const showRetryAllButton = !ingesting && failedRecordCount > 0;
+    const bookCountLabel = `${sources.length} book${sources.length === 1 ? "" : "s"}`;
+    const booksSummaryLabel = sources.length === 0
+        ? "No books uploaded yet."
+        : `${bookCountLabel} in this world.`;
+    const safetyQueueToggleLabel = activeRightPanel === "safety_queue"
+        ? "Go to Ingest Progress"
+        : "Go to Safety Queue";
+    const safetyQueueButtonDetail = hasUnresolvedSafetyQueue
+        ? `${unresolvedReviewCount} unresolved`
+        : hasAnySafetyQueueHistory
+            ? "View resolved items"
+            : "Open panel";
+    const showProgressHeaderCard = showProgressSummary || showReembedAction || failedRecordCount > 0;
+    const handleReingestModalSubmit = async (submission: ReingestSetupSubmission) => {
+        await startIngestion(false, "rechunk_reingest", submission.ingest_settings, {
+            useActiveChunkOverrides: submission.use_active_chunk_overrides,
+            promptOverrides: submission.prompt_overrides,
+        });
+        setIsReingestModalOpen(false);
+    };
+    const toggleSafetyQueuePanel = () => {
+        setActiveRightPanel((prev) => prev === "safety_queue" ? "progress" : "safety_queue");
+    };
     const openReviewForFailure = (failure: StageFailure) => {
         const review = safetyReviewByChunkId[failure.chunk_id];
         if (!review) return;
+        setActiveRightPanel("safety_queue");
         setPendingFocusReviewId(review.review_id);
     };
 
     return (
-        <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
+        <>
+            <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
             {/* Left Panel — Source Management */}
-            <div style={{ width: 380, flexShrink: 0, borderRight: "1px solid var(--border)", overflowY: "auto", padding: 20 }}>
-                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>Sources</h2>
+                <div style={{ width: 380, flexShrink: 0, borderRight: "1px solid var(--border)", overflowY: "auto", padding: 20 }}>
+                    <div style={{ marginBottom: 16 }}>
+                        <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Ingest Controls</h2>
+                        <div style={{ fontSize: 12, color: "var(--text-subtle)", lineHeight: 1.5 }}>
+                            Upload books, manage rebuild actions, and open the safety review workspace from here.
+                        </div>
+                    </div>
 
-                {/* Drop zone */}
                 <div
                     onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                     onDragLeave={() => setDragOver(false)}
@@ -895,46 +943,115 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         padding: "24px 16px",
                         textAlign: "center",
                         cursor: "pointer",
-                        marginBottom: 16,
                         transition: "border-color 0.2s",
                         background: dragOver ? "var(--primary-soft)" : "transparent",
                     }}
                 >
                     <Upload size={24} style={{ color: "var(--text-muted)", marginBottom: 8 }} />
-                    <div style={{ fontSize: 14, color: "var(--text-subtle)" }}>Drop .txt file here or <span style={{ color: "var(--primary-light)" }}>Browse</span></div>
+                    <div style={{ fontSize: 14, color: "var(--text-subtle)" }}>
+                        Drop .txt file here or <span style={{ color: "var(--primary-light)" }}>Browse</span>
+                    </div>
                     <input ref={fileRef} type="file" accept=".txt" multiple style={{ display: "none" }} onChange={(e) => e.target.files && handleUpload(e.target.files)} />
                 </div>
 
-                {/* Source list */}
-                {sources.map((s) => (
-                    <div key={s.source_id} style={{
-                        display: "flex", alignItems: "center", justifyContent: "space-between",
-                        padding: "10px 12px", background: "var(--background)", borderRadius: 8, marginBottom: 6,
-                        border: "1px solid var(--border)",
-                    }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-                            <FileText size={16} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-                            <div style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                    {s.display_name}
-                                </div>
-                                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{s.original_filename}</div>
+                <div style={{ marginTop: 16, border: "1px solid var(--border)", borderRadius: 12, background: "var(--background)", minWidth: 0, overflow: "hidden" }}>
+                    <button
+                        onClick={() => setIsBooksExpanded((prev) => !prev)}
+                        style={{
+                            width: "100%",
+                            padding: "14px 16px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            background: "transparent",
+                            border: "none",
+                            color: "var(--text-primary)",
+                            cursor: "pointer",
+                            textAlign: "left",
+                        }}
+                    >
+                        <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 14, fontWeight: 700 }}>Books in This World</div>
+                            <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4 }}>
+                                {booksSummaryLabel}
                             </div>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                             <span style={{
-                                padding: "2px 8px", borderRadius: 9999, fontSize: 11, fontWeight: 500,
-                                background: "var(--status-info-pill-bg)", color: "var(--status-info-pill-fg)",
-                            }}>Book {s.book_number}</span>
-                            <StatusChip status={s.status} />
-                            {s.status === "pending" && (
-                                <button onClick={() => deleteSource(s.source_id)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2 }}>
-                                    <Trash2 size={13} />
-                                </button>
+                                padding: "4px 10px",
+                                borderRadius: 9999,
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: "var(--background-secondary)",
+                                color: "var(--text-subtle)",
+                                border: "1px solid var(--border)",
+                            }}>
+                                {bookCountLabel}
+                            </span>
+                            {isBooksExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                        </div>
+                    </button>
+                    {isBooksExpanded && (
+                        <div style={{ padding: "0 12px 12px", borderTop: "1px solid var(--border)", minWidth: 0, overflow: "hidden" }}>
+                            {sources.length === 0 ? (
+                                <div style={{ padding: "16px 4px 4px", fontSize: 12, color: "var(--text-subtle)" }}>
+                                    Upload a `.txt` source to add the first book to this world.
+                                </div>
+                            ) : (
+                                <div style={{ display: "grid", gap: 6, paddingTop: 12, minWidth: 0 }}>
+                                    {sources.map((s) => (
+                                        <div key={s.source_id} style={{
+                                            display: "flex",
+                                            alignItems: "flex-start",
+                                            flexWrap: "wrap",
+                                            padding: "10px 12px",
+                                            background: "var(--background)",
+                                            borderRadius: 8,
+                                            border: "1px solid var(--border)",
+                                            gap: 10,
+                                            minWidth: 0,
+                                            overflow: "hidden",
+                                        }}>
+                                            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 180px", minWidth: 0 }}>
+                                                <FileText size={16} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                                                <div style={{ minWidth: 0 }}>
+                                                    <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                        {s.display_name}
+                                                    </div>
+                                                    <div style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                        {s.original_filename}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 6,
+                                                flexShrink: 0,
+                                                flexWrap: "wrap",
+                                                justifyContent: "flex-end",
+                                                marginLeft: "auto",
+                                                maxWidth: "100%",
+                                            }}>
+                                                <span style={{
+                                                    padding: "2px 8px", borderRadius: 9999, fontSize: 11, fontWeight: 500,
+                                                    background: "var(--status-info-pill-bg)", color: "var(--status-info-pill-fg)",
+                                                }}>Book {s.book_number}</span>
+                                                <StatusChip status={s.status} />
+                                                {s.status === "pending" && (
+                                                    <button onClick={() => deleteSource(s.source_id)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2 }}>
+                                                        <Trash2 size={13} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             )}
                         </div>
-                    </div>
-                ))}
+                    )}
+                </div>
 
                 <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
                     {ingesting ? (
@@ -1017,10 +1134,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             Re-ingest
                                         </button>
                                         {rebuildBlockedReason && <InlineInfo title={rebuildBlockedReason} />}
-                                        <Link
-                                            href={`/worlds/${worldId}/ingest/reingest`}
+                                        <button
+                                            onClick={() => setIsReingestModalOpen(true)}
                                             aria-label="Edit re-ingest settings"
-                                            title="Open the re-ingest setup page to change this world's settings and prompts before starting."
+                                            title="Open the re-ingest setup popup to change this world's settings and prompts before starting."
                                             style={{
                                                 display: "inline-flex",
                                                 alignItems: "center",
@@ -1031,11 +1148,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                                 border: "1px solid var(--border)",
                                                 background: "var(--background)",
                                                 color: "var(--text-primary)",
+                                                cursor: "pointer",
                                                 flexShrink: 0,
                                             }}
                                         >
                                             <Settings2 size={15} />
-                                        </Link>
+                                        </button>
                                     </div>
                                     {hasActiveChunkOverrides && (
                                         <LabeledToggle
@@ -1048,88 +1166,27 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 </div>
                             )}
 
-                            {showReembedAction && (
-                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                    <button
-                                        onClick={() => {
-                                            if (!confirm("This will clear this world's chunk and node vectors and re-embed all stored world content without re-extracting or rebuilding the graph. Chats and other non-ingest data stay intact. Continue?")) return;
-                                            startIngestion(false, "reembed_all");
-                                        }}
-                                        disabled={!canReembedAll}
-                                        style={{
-                                            ...btnStyle,
-                                            background: "var(--primary)",
-                                            color: "var(--primary-contrast)",
-                                            flex: 1,
-                                            opacity: canReembedAll ? 1 : 0.45,
-                                            cursor: canReembedAll ? "pointer" : "not-allowed",
-                                        }}
-                                    >
-                                        Re-embed All
-                                    </button>
-                                    {!canReembedAll && <InlineInfo title={reembedDisabledReason} />}
-                                </div>
+                            {(hasAnyIngested || hasAnySafetyQueueHistory) && (
+                                <button
+                                    onClick={toggleSafetyQueuePanel}
+                                    style={{
+                                        ...btnStyle,
+                                        width: "100%",
+                                        justifyContent: "space-between",
+                                        background: hasUnresolvedSafetyQueue ? "rgba(248,113,113,0.12)" : "var(--background)",
+                                        color: hasUnresolvedSafetyQueue ? "#fecaca" : "var(--text-primary)",
+                                        border: `1px solid ${hasUnresolvedSafetyQueue ? "rgba(248,113,113,0.25)" : "var(--border)"}`,
+                                    }}
+                                >
+                                    <span>{safetyQueueToggleLabel}</span>
+                                    <span style={{ fontSize: 12, fontWeight: 500 }}>
+                                        {safetyQueueButtonDetail}
+                                    </span>
+                                </button>
                             )}
                         </>
                     )}
                 </div>
-
-                {!ingesting && failureRecords.length > 0 && (
-                    <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
-                        <button onClick={() => retryFailures("embedding")} style={{ ...btnStyle, background: "var(--primary)", color: "var(--primary-contrast)", width: "100%" }}>
-                            Retry Embedding Failures
-                        </button>
-                        <button onClick={() => retryFailures("extraction")} style={{ ...btnStyle, background: "var(--status-progress-bg)", color: "var(--primary-contrast)", width: "100%" }}>
-                            Retry Extraction Failures
-                        </button>
-                        <button onClick={() => retryFailures("all")} style={{ ...btnStyle, background: "var(--background-tertiary)", color: "var(--text-primary)", width: "100%" }}>
-                            Retry All Failures
-                        </button>
-                        {collapsedCoverageGapFailures.length > 0 && (
-                            <button
-                                onClick={() => void rescueCollapsedFailures(collapsedCoverageGapFailures)}
-                                disabled={isRescuingCollapsedFailures}
-                                style={{
-                                    ...btnStyle,
-                                    background: "var(--status-warning-soft-bg)",
-                                    color: "var(--status-progress-fg)",
-                                    width: "100%",
-                                    opacity: isRescuingCollapsedFailures ? 0.6 : 1,
-                                    cursor: isRescuingCollapsedFailures ? "not-allowed" : "pointer",
-                                }}
-                            >
-                                {isRescuingCollapsedFailures
-                                    ? "Recovering Blocked Chunks..."
-                                    : `Recover ${collapsedCoverageGapFailures.length} Collapsed Blocked Chunk(s) For Editing`}
-                            </button>
-                        )}
-                    </div>
-                )}
-
-                {(retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
-                    <div style={{
-                        marginTop: 10,
-                        padding: "10px 12px",
-                        borderRadius: 8,
-                        background: "rgba(251,191,36,0.08)",
-                        border: "1px solid rgba(251,191,36,0.25)",
-                        fontSize: 12,
-                        color: "#fcd34d",
-                        lineHeight: 1.5,
-                    }}>
-                        <div>
-                            Retry Extraction Failures and Retry All Failures skip chunks that are already in the Safety Review queue.
-                        </div>
-                        {retryNotice && (
-                            <div>{retryNotice}</div>
-                        )}
-                        {collapsedCoverageGapFailures.length > 0 && (
-                            <div>
-                                The recover button above converts the current collapsed `coverage_gap` extraction failures into editable safety-review items for this world only.
-                            </div>
-                        )}
-                    </div>
-                )}
 
                 <EntityResolutionPanel
                     worldId={worldId}
@@ -1138,50 +1195,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     isIngesting={ingesting}
                     disabledReason={resolveEntitiesDisabledReason}
                 />
-
-                {failureRecords.length > 0 && (
-                    <div style={{
-                        marginTop: 12,
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        maxHeight: 220,
-                        overflowY: "auto",
-                        background: "var(--background)",
-                    }}>
-                        {failureRecords.map((failure, idx) => (
-                            <div key={`side-${failure.chunk_id}-${failure.stage}-${idx}`} style={{
-                                padding: "8px 10px",
-                                borderBottom: idx === failureRecords.length - 1 ? "none" : "1px solid var(--border)",
-                                fontSize: 12,
-                                display: "grid",
-                                gap: 3,
-                            }}>
-                                <div style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                                    {failure.stage.toUpperCase()} • B{failure.book_number}:C{failure.chunk_index}
-                                </div>
-                                <div style={{ color: "var(--text-subtle)" }}>
-                                    {failure.error_type}: {failure.error_message}
-                                </div>
-                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                    {safetyReviewByChunkId[failure.chunk_id] && failure.stage === "extraction" && (
-                                        <button
-                                            onClick={() => openReviewForFailure(failure)}
-                                            style={{
-                                                ...btnStyle,
-                                                background: "var(--primary)",
-                                                color: "var(--primary-contrast)",
-                                                padding: "4px 10px",
-                                                fontSize: 11,
-                                            }}
-                                        >
-                                            Edit Blocked Chunk
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
 
                 {/* Collapsible Ingestion Settings */}
                 <CollapsibleSection title="Ingestion Settings" open={showSettings} onToggle={() => setShowSettings(!showSettings)}>
@@ -1196,7 +1209,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         lineHeight: 1.5,
                     }}>
                         {savedIngestSettings?.locked_at
-                            ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest settings page if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
+                            ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest popup if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
                             : "This world has not locked ingest settings yet. The snapshot below shows what will be used the next time you start or re-ingest this world."}
                     </div>
                     {previousSettingsSummary && (
@@ -1233,150 +1246,40 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
             {/* Right Panel — Progress */}
             <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-                {showIdlePlaceholder ? (
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)" }}>
-                        <Upload size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
-                        <p style={{ fontSize: 16 }}>
-                            {safetyReviewSummary?.unresolved_reviews
-                                ? "This world has safety review items waiting for edits."
-                                : hasRetryableFailures
-                                ? "This world has retryable ingest failures."
-                                : hasAnyIngested
-                                    ? "Ingestion complete for this world."
-                                    : "Start ingestion to see progress."}
-                        </p>
-                        {(hasAnyIngested || hasRetryableFailures || Boolean(safetyReviewSummary?.unresolved_reviews)) && (
-                            <p style={{ fontSize: 13, marginTop: 6 }}>
-                                {safetyReviewSummary?.unresolved_reviews
-                                    ? "Use the Safety Review Queue below or the left-panel recover/edit actions to fix blocked chunks."
-                                    : "Retry failures or use Re-embed All / Re-ingest from the left panel."}
-                            </p>
-                        )}
-                    </div>
-                ) : (
+                {activeRightPanel === "safety_queue" ? (
                     <>
-                        {showProgressSummary && (
-                            <div
-                                style={{
-                                    marginBottom: 24,
-                                    padding: "16px 18px",
-                                    borderRadius: 14,
-                                    border: "1px solid var(--border)",
-                                    background: "var(--background)",
-                                    display: "grid",
-                                    gap: 14,
-                                }}
-                            >
-                                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start" }}>
-                                    <div style={{ minWidth: 0 }}>
-                                        <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>
-                                            {progressHeaderLabel}
-                                        </div>
-                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
-                                            {progressSecondaryLabel
-                                                || (ingesting && !hasProgress
-                                                    ? "Preparing stable progress summary for this run."
-                                                    : (progressSummary.isReembedAll
-                                                        ? "Rebuilding stored vectors without re-extracting or rebuilding the graph."
-                                                        : "Stable world-level progress across extraction and embedding."))}
-                                        </div>
-                                    </div>
-                                    <div style={{ textAlign: "right", flexShrink: 0 }}>
-                                        <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-primary)" }}>
-                                            {Math.round(progressSummary.overallPercent)}%
-                                        </div>
-                                        <div style={{ fontSize: 11, color: "var(--text-subtle)", marginTop: 2 }}>
-                                            {progressSummary.expectedChunks || "?"} total chunks
-                                        </div>
-                                        <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
-                                            <span style={{
-                                                padding: "4px 10px",
-                                                borderRadius: 9999,
-                                                fontSize: 11,
-                                                fontWeight: 700,
-                                                background: failedRecordCount > 0 ? "rgba(248,113,113,0.14)" : "var(--background-secondary)",
-                                                color: failedRecordCount > 0 ? "#fecaca" : "var(--text-subtle)",
-                                                border: failedRecordCount > 0 ? "1px solid rgba(248,113,113,0.22)" : "1px solid var(--border)",
-                                            }}>
-                                                Failed Records: {failedRecordCount}
-                                            </span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div>
-                                    <div style={{ height: 8, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
-                                        <div
-                                            style={{
-                                                height: "100%",
-                                                width: `${progressSummary.overallPercent}%`,
-                                                background: "linear-gradient(90deg, var(--primary), var(--primary-light))",
-                                                borderRadius: 999,
-                                                transition: "width 0.3s ease",
-                                            }}
-                                        />
-                                    </div>
-                                    {progressSummary.waitRetryAfterSeconds && progressSummary.waitState === "waiting_for_api_key" && (
-                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 8 }}>
-                                            Cooldown window is currently about {Math.max(1, Math.ceil(progressSummary.waitRetryAfterSeconds))}s.
-                                        </div>
-                                    )}
-                                </div>
-
-                                <div style={{ display: "grid", gap: 10 }}>
-                                    {progressSummary.rows.map((row) => (
-                                        <div key={row.key} style={{ display: "grid", gap: 6 }}>
-                                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                                                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
-                                                    <span>{row.label}</span>
-                                                    {row.infoTitle && (
-                                                        <span
-                                                            title={row.infoTitle}
-                                                            aria-label={`${row.label} info`}
-                                                            style={{
-                                                                display: "inline-flex",
-                                                                alignItems: "center",
-                                                                justifyContent: "center",
-                                                                minWidth: 18,
-                                                                height: 18,
-                                                                padding: "0 5px",
-                                                                borderRadius: 999,
-                                                                border: "1px solid var(--border)",
-                                                                color: "var(--text-subtle)",
-                                                                fontSize: 11,
-                                                                fontWeight: 700,
-                                                                cursor: "help",
-                                                                lineHeight: 1,
-                                                            }}
-                                                        >
-                                                            (i)
-                                                        </span>
-                                                    )}
-                                                </span>
-                                                <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
-                                                    {row.completed}/{row.total}
-                                                </span>
-                                            </div>
-                                            <div style={{ height: 6, background: "var(--overlay-heavy)", borderRadius: 999, overflow: "hidden" }}>
-                                                <div
-                                                    style={{
-                                                        height: "100%",
-                                                        width: `${row.percent}%`,
-                                                        borderRadius: 999,
-                                                        background: row.key === "embedded" || row.key === "reembed"
-                                                            ? "linear-gradient(90deg, var(--primary), var(--primary-light))"
-                                                            : "linear-gradient(90deg, rgba(8,146,208,0.45), rgba(8,146,208,0.82))",
-                                                        transition: "width 0.3s ease",
-                                                    }}
-                                                />
-                                            </div>
-                                        </div>
-                                    ))}
+                        <div style={{
+                            marginBottom: 24,
+                            padding: "16px 18px",
+                            borderRadius: 14,
+                            border: "1px solid var(--border)",
+                            background: "var(--background)",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "flex-start",
+                            gap: 16,
+                            flexWrap: "wrap",
+                        }}>
+                            <div>
+                                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>Safety Review Queue</div>
+                                <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
+                                    {unresolvedReviewCount} unresolved, {safetyReviewSummary?.resolved_reviews ?? 0} resolved, {safetyReviewSummary?.active_override_reviews ?? 0} active overrides
                                 </div>
                             </div>
-                        )}
+                            <button
+                                onClick={toggleSafetyQueuePanel}
+                                style={{
+                                    ...btnStyle,
+                                    background: "var(--background)",
+                                    color: "var(--text-primary)",
+                                    border: "1px solid var(--border)",
+                                }}
+                            >
+                                Go to Ingest Progress
+                            </button>
+                        </div>
 
-                        {ingesting && reviewCount > 0 && (
+                        {ingesting && hasUnresolvedSafetyQueue && (
                             <div style={{
                                 marginBottom: 24,
                                 padding: "12px 14px",
@@ -1386,12 +1289,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 color: "#fecaca",
                                 lineHeight: 1.5,
                             }}>
-                                Safety review available. {safetyReviewSummary?.unresolved_reviews ?? reviewCount} blocked chunk(s) have been queued for repair.
-                                Let the current ingest run finish, then edit and test them from the review queue below.
+                                Safety review available. {unresolvedReviewCount} blocked chunk(s) have been queued for repair.
+                                Let the current ingest run finish, then continue editing them here.
                             </div>
                         )}
 
-                        {!ingesting && safetyReviews.length > 0 && (
+                        {safetyReviews.length > 0 ? (
                             <SafetyReviewPanel
                                 groupedReviews={groupedSafetyReviews}
                                 summary={safetyReviewSummary}
@@ -1405,11 +1308,290 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 onTest={testReviewDraft}
                                 onDiscard={discardReview}
                             />
+                        ) : (
+                            <div style={{
+                                border: "1px solid var(--border)",
+                                borderRadius: 14,
+                                background: "var(--background)",
+                                minHeight: 280,
+                                display: "grid",
+                                placeItems: "center",
+                                padding: 24,
+                                textAlign: "center",
+                            }}>
+                                <div style={{ maxWidth: 420 }}>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text-primary)" }}>No safety review items right now.</div>
+                                    <div style={{ fontSize: 13, color: "var(--text-subtle)", marginTop: 8, lineHeight: 1.5 }}>
+                                        Blocked chunks will appear here when extraction sends them to the repair queue.
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </>
+                ) : showIdlePlaceholder ? (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: showProgressHeaderCard ? 280 : "100%", color: "var(--text-muted)" }}>
+                        <Upload size={48} style={{ marginBottom: 16, opacity: 0.3 }} />
+                        <p style={{ fontSize: 16 }}>
+                            {hasUnresolvedSafetyQueue
+                                ? "This world has safety review items waiting in the queue."
+                                : hasRetryableFailures
+                                ? "This world has retryable ingest failures."
+                                : hasAnyIngested
+                                    ? "Ingestion complete for this world."
+                                    : "Start ingestion to see progress."}
+                        </p>
+                        {(hasAnyIngested || hasRetryableFailures || hasUnresolvedSafetyQueue) && (
+                            <p style={{ fontSize: 13, marginTop: 6, maxWidth: 520, textAlign: "center", lineHeight: 1.5 }}>
+                                {hasUnresolvedSafetyQueue
+                                    ? "Open the Safety Queue from the left column to edit blocked chunks and test repairs."
+                                    : "Use Retry All Failures here, Re-embed All above, or Re-ingest from the left column."}
+                            </p>
+                        )}
+                    </div>
+                ) : (
+                    <>
+                        {showProgressHeaderCard && (
+                            <div
+                                style={{
+                                    marginBottom: 24,
+                                    padding: "16px 18px",
+                                    borderRadius: 14,
+                                    border: "1px solid var(--border)",
+                                    background: "var(--background)",
+                                    display: "grid",
+                                    gap: 14,
+                                }}
+                            >
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start" }}>
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                        <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>
+                                            {progressHeaderLabel}
+                                        </div>
+                                        <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
+                                            {progressSecondaryLabel
+                                                || (ingesting && !hasProgress
+                                                    ? "Preparing stable progress summary for this run."
+                                                    : (progressSummary.isReembedAll
+                                                        ? "Rebuilding stored vectors without re-extracting or rebuilding the graph."
+                                                        : hasAnyIngested
+                                                            ? "Use this workspace for world progress, retries, and vector maintenance."
+                                                            : "Start ingestion to populate world progress."))}
+                                        </div>
+                                    </div>
+                                    <div style={{ display: "grid", gap: 8, justifyItems: "end", flexShrink: 0 }}>
+                                        {showReembedAction && (
+                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                <button
+                                                    onClick={() => {
+                                                        if (!confirm("This will clear this world's chunk and node vectors and re-embed all stored world content without re-extracting or rebuilding the graph. Chats and other non-ingest data stay intact. Continue?")) return;
+                                                        startIngestion(false, "reembed_all");
+                                                    }}
+                                                    disabled={!canReembedAll}
+                                                    style={{
+                                                        ...btnStyle,
+                                                        background: "var(--primary)",
+                                                        color: "var(--primary-contrast)",
+                                                        opacity: canReembedAll ? 1 : 0.45,
+                                                        cursor: canReembedAll ? "pointer" : "not-allowed",
+                                                    }}
+                                                >
+                                                    Re-embed All
+                                                </button>
+                                                {!canReembedAll && <InlineInfo title={reembedDisabledReason} />}
+                                            </div>
+                                        )}
+                                        {showProgressSummary && (
+                                            <>
+                                                <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-primary)" }}>
+                                                    {Math.round(progressSummary.overallPercent)}%
+                                                </div>
+                                                <div style={{ fontSize: 11, color: "var(--text-subtle)", marginTop: -4 }}>
+                                                    {progressSummary.expectedChunks || "?"} total chunks
+                                                </div>
+                                            </>
+                                        )}
+                                        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                            <span style={{
+                                                padding: "4px 10px",
+                                                borderRadius: 9999,
+                                                fontSize: 11,
+                                                fontWeight: 700,
+                                                background: failedRecordCount > 0 ? "rgba(248,113,113,0.14)" : "var(--background-secondary)",
+                                                color: failedRecordCount > 0 ? "#fecaca" : "var(--text-subtle)",
+                                                border: failedRecordCount > 0 ? "1px solid rgba(248,113,113,0.22)" : "1px solid var(--border)",
+                                            }}>
+                                                Failed Records: {failedRecordCount}
+                                            </span>
+                                            {showRetryAllButton && (
+                                                <button
+                                                    onClick={() => retryFailures("all")}
+                                                    style={{
+                                                        ...btnStyle,
+                                                        background: "var(--background-tertiary)",
+                                                        color: "var(--text-primary)",
+                                                        border: "1px solid var(--border)",
+                                                    }}
+                                                >
+                                                    Retry All Failures
+                                                </button>
+                                            )}
+                                        </div>
+                                        {!ingesting && failedRecordCount === 0 && hasAnyIngested && (
+                                            <div style={{ fontSize: 11, color: "var(--text-subtle)", textAlign: "right", maxWidth: 260 }}>
+                                                Retry actions appear here when this world has failed records.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {showProgressSummary && (
+                                    <>
+                                        <div>
+                                            <div style={{ height: 8, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
+                                                <div
+                                                    style={{
+                                                        height: "100%",
+                                                        width: `${progressSummary.overallPercent}%`,
+                                                        background: "linear-gradient(90deg, var(--primary), var(--primary-light))",
+                                                        borderRadius: 999,
+                                                        transition: "width 0.3s ease",
+                                                    }}
+                                                />
+                                            </div>
+                                            {progressSummary.waitRetryAfterSeconds && progressSummary.waitState === "waiting_for_api_key" && (
+                                                <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 8 }}>
+                                                    Cooldown window is currently about {Math.max(1, Math.ceil(progressSummary.waitRetryAfterSeconds))}s.
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{ display: "grid", gap: 10 }}>
+                                            {progressSummary.rows.map((row) => (
+                                                <div key={row.key} style={{ display: "grid", gap: 6 }}>
+                                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                                                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                                            <span>{row.label}</span>
+                                                            {row.infoTitle && (
+                                                                <span
+                                                                    title={row.infoTitle}
+                                                                    aria-label={`${row.label} info`}
+                                                                    style={{
+                                                                        display: "inline-flex",
+                                                                        alignItems: "center",
+                                                                        justifyContent: "center",
+                                                                        minWidth: 18,
+                                                                        height: 18,
+                                                                        padding: "0 5px",
+                                                                        borderRadius: 999,
+                                                                        border: "1px solid var(--border)",
+                                                                        color: "var(--text-subtle)",
+                                                                        fontSize: 11,
+                                                                        fontWeight: 700,
+                                                                        cursor: "help",
+                                                                        lineHeight: 1,
+                                                                    }}
+                                                                >
+                                                                    (i)
+                                                                </span>
+                                                            )}
+                                                        </span>
+                                                        <span style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                                                            {row.completed}/{row.total}
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ height: 6, background: "var(--overlay-heavy)", borderRadius: 999, overflow: "hidden" }}>
+                                                        <div
+                                                            style={{
+                                                                height: "100%",
+                                                                width: `${row.percent}%`,
+                                                                borderRadius: 999,
+                                                                background: row.key === "embedded" || row.key === "reembed"
+                                                                    ? "linear-gradient(90deg, var(--primary), var(--primary-light))"
+                                                                    : "linear-gradient(90deg, rgba(8,146,208,0.45), rgba(8,146,208,0.82))",
+                                                                transition: "width 0.3s ease",
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        {ingesting && hasUnresolvedSafetyQueue && (
+                            <div style={{
+                                marginBottom: 24,
+                                padding: "12px 14px",
+                                borderRadius: 10,
+                                border: "1px solid rgba(248,113,113,0.25)",
+                                background: "rgba(248,113,113,0.08)",
+                                color: "#fecaca",
+                                lineHeight: 1.5,
+                            }}>
+                                Safety review available. {unresolvedReviewCount} blocked chunk(s) have been queued for repair.
+                                Open the Safety Queue from the left column after the current ingest run finishes.
+                            </div>
+                        )}
+
+                        {!ingesting && hasUnresolvedSafetyQueue && (
+                            <div style={{
+                                marginBottom: 24,
+                                padding: "12px 14px",
+                                borderRadius: 10,
+                                border: "1px solid rgba(251,191,36,0.25)",
+                                background: "rgba(251,191,36,0.08)",
+                                color: "#fde68a",
+                                lineHeight: 1.5,
+                            }}>
+                                Safety Queue has {unresolvedReviewCount} review item{unresolvedReviewCount === 1 ? "" : "s"} ready.
+                                Use the left-column button to switch into the repair workspace.
+                            </div>
                         )}
 
                         {failureRecords.length > 0 && (
                             <div style={{ marginBottom: 24 }}>
-                                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Failure Details</div>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+                                    <div style={{ fontSize: 14, fontWeight: 600 }}>Failure Details</div>
+                                    {collapsedCoverageGapFailures.length > 0 && (
+                                        <button
+                                            onClick={() => void rescueCollapsedFailures(collapsedCoverageGapFailures)}
+                                            disabled={isRescuingCollapsedFailures}
+                                            style={{
+                                                ...btnStyle,
+                                                background: "var(--status-warning-soft-bg)",
+                                                color: "var(--status-progress-fg)",
+                                                opacity: isRescuingCollapsedFailures ? 0.6 : 1,
+                                                cursor: isRescuingCollapsedFailures ? "not-allowed" : "pointer",
+                                            }}
+                                        >
+                                            {isRescuingCollapsedFailures
+                                                ? "Recovering Blocked Chunks..."
+                                                : `Recover ${collapsedCoverageGapFailures.length} Collapsed Blocked Chunk(s)`}
+                                        </button>
+                                    )}
+                                </div>
+                                {(retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
+                                    <div style={{
+                                        marginBottom: 12,
+                                        padding: "10px 12px",
+                                        borderRadius: 8,
+                                        background: "rgba(251,191,36,0.08)",
+                                        border: "1px solid rgba(251,191,36,0.25)",
+                                        fontSize: 12,
+                                        color: "#fcd34d",
+                                        lineHeight: 1.5,
+                                    }}>
+                                        <div>Retry All Failures skips chunks that are already in the Safety Queue.</div>
+                                        {retryNotice && <div>{retryNotice}</div>}
+                                        {collapsedCoverageGapFailures.length > 0 && (
+                                            <div>
+                                                The recover action above converts the current collapsed `coverage_gap` extraction failures into editable safety-review items for this world only.
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                                 <div style={{
                                     maxHeight: 220,
                                     overflowY: "auto",
@@ -1538,6 +1720,46 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 )}
             </div>
         </div>
+
+        {isReingestModalOpen && (
+            <div
+                role="dialog"
+                aria-modal="true"
+                style={{
+                    position: "fixed",
+                    inset: 0,
+                    zIndex: 1000,
+                    background: "var(--overlay-strong)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 20,
+                }}
+            >
+                <div
+                    style={{
+                        width: "100%",
+                        maxWidth: 1100,
+                        maxHeight: "92vh",
+                        overflow: "hidden",
+                        display: "flex",
+                        flexDirection: "column",
+                        background: "var(--background)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius)",
+                        boxShadow: "0 24px 48px var(--shadow-color)",
+                    }}
+                >
+                    <WorldReingestSetupContent
+                        worldId={worldId}
+                        mode="modal"
+                        onClose={() => setIsReingestModalOpen(false)}
+                        onSubmit={handleReingestModalSubmit}
+                    />
+                </div>
+            </div>
+        )}
+        </>
     );
 }
 

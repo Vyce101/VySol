@@ -111,9 +111,9 @@ For most casual use cases, the defaults are already more than enough.
 
 The main ingest page now shows a read-only snapshot of the current world's saved ingest settings.
 
-Editable ingest settings live on the dedicated `Re-ingest` setup page.
+Editable ingest settings live in the `Re-ingest` popup opened from the main ingest page.
 
-That page lets you change:
+That popup lets you change:
 
 - Chunk size
 - Chunk overlap
@@ -141,14 +141,14 @@ What they mean:
 Important behavior:
 
 - The main ingest page is now a read-only snapshot of the world's saved settings and effective prompts
-- Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup page
-- Starting `Re-ingest` from that setup page saves the edited settings as the world's new defaults before the rebuild begins
+- Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup popup
+- Starting `Re-ingest` from that popup saves the edited settings as the world's new defaults before the rebuild begins
 
 ## Prompt Snapshot
 
 The main ingest page now shows a read-only `Prompt Snapshot` for the current world.
 
-If you want to change these prompts for a rebuild, use the dedicated `Re-ingest` setup page.
+If you want to change these prompts for a rebuild, use the `Re-ingest` popup.
 
 Graph Architect Prompt:
 
@@ -184,9 +184,10 @@ Important:
 Basic flow:
 
 1. Add one or more `.txt` files.
-2. Review the world's current ingest snapshot and prompt snapshot.
-3. Click `Start Ingestion` for a brand-new world, `Resume` for pending/resumable work, or `Re-ingest` for a full rebuild.
-4. If you want new chunk settings or world-specific prompt changes before a full rebuild, open the `Re-ingest` setup page from the settings icon next to `Re-ingest`.
+2. Expand `Books in This World` if you want to review the current source list from the left column.
+3. Review the world's current ingest snapshot and prompt snapshot.
+4. Click `Start Ingestion` for a brand-new world, `Resume` for pending/resumable work, or `Re-ingest` for a full rebuild.
+5. If you want new chunk settings or world-specific prompt changes before a full rebuild, open the `Re-ingest` popup from the settings icon next to `Re-ingest`.
 
 Reading the ingest progress header:
 
@@ -217,7 +218,7 @@ After ingestion finishes:
 If extraction hits a safety block:
 
 - The ingest log warns you as soon as the block is detected
-- A `Safety Review Queue` appears for blocked chunks
+- Use the `Safety Queue` button in the left control column to open the blocked-chunk workspace on the same page
 - Each review item keeps a read-only `[B#:C#]` prefix, a separate read-only overlap box when overlap exists, and one editable `Chunk Body` field
 - `Test` retries that exact chunk with your edited chunk body while keeping the original source chunk untouched
 - `Reset` always restores the true original source chunk, even after multiple edits or a prior successful repair
@@ -248,23 +249,16 @@ Use the rebuild and retry actions based on what went wrong:
 
 - Fully rebuilds chunks, extraction, graph data, and vectors using the world's currently saved ingest settings and world-specific prompt overrides
 - The main `Re-ingest` button uses the saved settings exactly as shown in the read-only snapshot on the ingest page
-- The small settings icon next to `Re-ingest` opens a dedicated setup page where you can edit chunk settings, glean amount, embedding model, and the world-local ingest/entity-resolution prompts before starting the rebuild
-- Starting `Re-ingest` from that setup page saves those values as the world's new saved settings and prompt overrides
+- The small settings icon next to `Re-ingest` opens a popup where you can edit chunk settings, glean amount, embedding model, and the world-local ingest/entity-resolution prompts before starting the rebuild
+- Each prompt in that popup opens in its own collapsible section so you can expand only the prompt you want to edit
+- Starting `Re-ingest` from that popup saves those values as the world's new saved settings and prompt overrides
 - If this world has repaired chunk overrides, `Re-ingest` can optionally reuse them when chunk size and overlap stay the same
-
-`Retry Embedding Failures`
-
-- Retries only failed embedding work
-
-`Retry Extraction Failures`
-
-- Retries only failed extraction work
-- Skips chunks that are still in the unresolved Safety Review Queue and points you back to that queue instead of retrying them from source text
 
 `Retry All Failures`
 
 - Retries both failed extraction and failed embedding work
 - Also skips unresolved Safety Review Queue chunks and leaves those to the review flow
+- Only appears when the world is idle and `Failed Records` is greater than `0`
 
 Important behavior:
 
@@ -273,6 +267,7 @@ Important behavior:
 - `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
 - `Re-embed All` can reuse active repaired chunk bodies when its locked-source checks still pass
 - `Re-ingest` can also reuse repaired chunk bodies, but only when chunk size and overlap stay the same and you leave repaired-chunk reuse enabled
+- `Retry All Failures` only appears when there are actual failed records to retry, so no button usually means the current world has no failures
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
 - The one-shot collapsed-chunk recovery action is only for the current world and current failed chunks; it does not teach future ingests to always treat those chunks as safety-blocked
 

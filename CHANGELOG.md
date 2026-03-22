@@ -16,7 +16,7 @@ All notable user-visible changes to this project will be documented in this file
 - Added a per-message `Context Graph` view in Context X-Ray for newer chat messages.
 - Added a Safety Review Queue for extraction safety blocks, including one-shot recovery for already-collapsed blocked chunks and in-app chunk editing/testing.
 - Added inline chat renaming in the sidebar, with conflict-safe saves that preserve Recent ordering.
-- Added a dedicated world-specific `Re-ingest` setup page for editing saved chunk settings, glean amount, world-local ingest prompts, and repaired-chunk reuse before starting a full rebuild.
+- Added a world-specific `Re-ingest` settings editor for editing saved chunk settings, glean amount, world-local ingest prompts, and repaired-chunk reuse before starting a full rebuild.
 
 ### Changed
 
@@ -38,6 +38,7 @@ All notable user-visible changes to this project will be documented in this file
 - Changed entity resolution to expose per-run unique-node embedding batch and delay controls in the UI.
 - Changed the ingest page to use one `Re-ingest` rebuild action with a read-only world snapshot on the main page and world-local saved prompt precedence (`world -> global -> default`) for ingest/entity-resolution prompts.
 - Changed full `Re-ingest` to optionally reuse repaired chunk overrides when the chunk map stays the same instead of forcing users through separate rebuild buttons and warning cards.
+- Changed the ingest UI so `Re-ingest` settings open in an in-page popup, `Books in This World` collapses inside the left control column, `Safety Queue` opens as an on-page workspace, and `Retry All Failures` appears only when failures exist.
 
 ### Fixed
 

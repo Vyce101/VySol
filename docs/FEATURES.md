@@ -104,8 +104,9 @@ Important behavior:
 - `Re-embed All` reuses active repaired chunk bodies when the locked source snapshot and chunk map still match, so repaired text stays aligned with rebuilt vectors
 - `Re-ingest` is now the single full rebuild path for chunks, extraction, graph data, and vectors
 - The main ingest page keeps the current world's ingest settings and prompt values as a read-only snapshot
-- A dedicated `Re-ingest` setup page lets you edit world-local chunk settings, glean amount, embedding model, and the ingest/entity-resolution prompts before starting a rebuild
-- Starting `Re-ingest` from that setup page saves those values as the world's new saved defaults before the rebuild begins
+- A `Re-ingest` popup on the main ingest page lets you edit world-local chunk settings, glean amount, embedding model, and the ingest/entity-resolution prompts before starting a rebuild
+- Each prompt editor in that popup is collapsible so you can expand only the prompt you need
+- Starting `Re-ingest` from that popup saves those values as the world's new saved defaults before the rebuild begins
 - If repaired chunk overrides exist, `Re-ingest` can optionally reuse them, but only when chunk size and overlap stay the same
 
 ## Stable Ingest Progress
@@ -132,6 +133,7 @@ Important behavior:
 - Safety-blocked chunks warn in the live ingest log as soon as they are detected
 - The queue groups blocked chunks by source and keeps the original source text separate from your editable repair draft
 - Each item shows a read-only provenance prefix, a read-only overlap box when present, and one editable chunk-body field
+- The `Safety Queue` opens as a dedicated panel from the main ingest page instead of sending you to a separate screen
 - `Reset` always restores the original source chunk, not your last attempted edit
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
