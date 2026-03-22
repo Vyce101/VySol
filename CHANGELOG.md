@@ -51,6 +51,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed chat auto-scroll so any upward scroll disables snapping until the user reaches the bottom again.
 - Fixed Gemini key rotation so extraction, embeddings, retrieval, and Gemini chat wait through shared cooldown windows, fail over on transient timeout/connect failures, and stop skipping extra keys after some retries.
 - Fixed ingest progress so long pauses now surface as queued slot or API-key cooldown waits instead of looking like the run silently froze.
+- Fixed the ingest page so adding or deleting pending books refreshes the action controls immediately instead of showing stale `Start Ingestion` / completion state until a page reload.
 
 ### Removed
 

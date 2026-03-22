@@ -338,49 +338,73 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         } catch { /* ignore */ }
     }
 
-    async function loadWorld() {
-        try {
-            const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
-            setReembedEligibility(data.reembed_eligibility ?? null);
-            if (data.safety_review_summary) {
-                setSafetyReviewSummary(data.safety_review_summary);
-            }
-            if (data.ingest_settings) {
-                setSavedIngestSettings(data.ingest_settings);
+    const applyWorldData = (data: WorldResponse, options?: { syncIngestInputs?: boolean }) => {
+        const syncIngestInputs = options?.syncIngestInputs ?? true;
+        setReembedEligibility(data.reembed_eligibility ?? null);
+        setSafetyReviewSummary(data.safety_review_summary ?? null);
+        if (data.ingest_settings) {
+            setSavedIngestSettings(data.ingest_settings);
+            if (syncIngestInputs) {
                 setChunkSize(data.ingest_settings.chunk_size_chars);
                 setChunkOverlap(data.ingest_settings.chunk_overlap_chars);
                 setEmbeddingModel(data.ingest_settings.embedding_model);
             }
-            const liveRun = data.ingestion_status === "in_progress" && data.active_ingestion_run === true;
-            if (liveRun) {
-                setIngesting(true);
-                setIsAborting(false);
-                connectToSSE();
-            } else {
-                esRef.current?.close();
-                setIngesting(false);
-                setIsAborting(false);
-            }
+        }
+        const liveRun = data.ingestion_status === "in_progress" && data.active_ingestion_run === true;
+        if (liveRun) {
+            setIngesting(true);
+            setIsAborting(false);
+            connectToSSE();
+        } else {
+            esRef.current?.close();
+            setIngesting(false);
+            setIsAborting(false);
+        }
+    };
+
+    const applySourcesData = (data: Source[]) => {
+        setSources(data);
+    };
+
+    const applyCheckpointData = (data: Checkpoint) => {
+        setCheckpoint(data);
+        syncProgressFromPayload(data);
+        setIsAborting(data.progress_phase === "aborting");
+        if (data.safety_review_summary) {
+            setSafetyReviewSummary(data.safety_review_summary);
+        }
+    };
+
+    async function loadWorld() {
+        try {
+            const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
+            applyWorldData(data);
         } catch { /* ignore */ }
     }
 
     async function loadSources() {
         try {
             const data = await apiFetch<Source[]>(`/worlds/${worldId}/sources`);
-            setSources(data);
+            applySourcesData(data);
         } catch { /* ignore */ }
     }
 
     async function loadCheckpoint() {
         try {
             const data = await apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`);
-            setCheckpoint(data);
-            syncProgressFromPayload(data);
-            setIsAborting(data.progress_phase === "aborting");
-            if (data.safety_review_summary) {
-                setSafetyReviewSummary(data.safety_review_summary);
-            }
+            applyCheckpointData(data);
         } catch { /* ignore */ }
+    }
+
+    async function refreshIngestActionState() {
+        const [worldData, sourcesData, checkpointData] = await Promise.all([
+            apiFetch<WorldResponse>(`/worlds/${worldId}`),
+            apiFetch<Source[]>(`/worlds/${worldId}/sources`),
+            apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
+        ]);
+        applyWorldData(worldData, { syncIngestInputs: false });
+        applySourcesData(sourcesData);
+        applyCheckpointData(checkpointData);
     }
 
     async function loadSafetyReviews() {
@@ -398,6 +422,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }
 
     const handleUpload = async (files: FileList | File[]) => {
+        let uploadedCount = 0;
         for (const file of Array.from(files)) {
             if (!file.name.endsWith(".txt")) {
                 alert("Only .txt files are supported.");
@@ -407,11 +432,18 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             formData.append("file", file);
             try {
                 await apiUpload(`/worlds/${worldId}/sources`, formData);
+                uploadedCount += 1;
             } catch (err: unknown) {
                 alert((err as Error).message);
             }
         }
-        loadSources();
+        if (uploadedCount > 0) {
+            try {
+                await refreshIngestActionState();
+            } catch (err: unknown) {
+                alert((err as Error).message);
+            }
+        }
     };
 
     const handleDrop = (e: React.DragEvent) => {
@@ -617,8 +649,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const deleteSource = async (sourceId: string) => {
         try {
             await apiFetch(`/worlds/${worldId}/sources/${sourceId}`, { method: "DELETE" });
-            void loadWorld();
-            void loadSources();
+            await refreshIngestActionState();
         } catch (err: unknown) {
             alert((err as Error).message);
         }
