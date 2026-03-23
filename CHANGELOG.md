@@ -44,6 +44,7 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed ingest-family color consistency so dark mode uses the intended purple accent, light mode uses the intended blue accent, safety-review passed states reuse the same success green, and washed-out or invisible ingest progress/book/status accents render correctly again.
 - Fixed glean default/input behavior and clarified the currently supported OS.
 - Fixed launcher startup state detection.
 - Fixed Gemini chat payload assembly for the Gemini SDK request shape.

@@ -1049,9 +1049,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 borderRadius: 9999,
                                 fontSize: 11,
                                 fontWeight: 700,
-                                background: "var(--background-secondary)",
-                                color: "var(--text-subtle)",
-                                border: "1px solid var(--border)",
+                                background: "var(--primary)",
+                                color: "var(--primary-contrast)",
+                                border: "1px solid var(--primary)",
                             }}>
                                 {bookCountLabel}
                             </span>
@@ -1102,7 +1102,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             }}>
                                                 <span style={{
                                                     padding: "2px 8px", borderRadius: 9999, fontSize: 11, fontWeight: 500,
-                                                    background: "var(--status-info-pill-bg)", color: "var(--status-info-pill-fg)",
+                                                    background: "var(--primary)", color: "var(--primary-contrast)",
                                                 }}>Book {s.book_number}</span>
                                                 <StatusChip status={s.status} />
                                                 {s.status === "pending" && (
@@ -1141,9 +1141,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 <div style={{
                                     padding: "12px 14px",
                                     borderRadius: 10,
-                                    border: "1px solid rgba(34,197,94,0.28)",
-                                    background: "rgba(34,197,94,0.08)",
-                                    color: "#86efac",
+                                    border: "1px solid var(--status-success-soft-border)",
+                                    background: "var(--status-success-soft-bg)",
+                                    color: "var(--status-success-soft-fg)",
                                     fontSize: 13,
                                     fontWeight: 600,
                                     textAlign: "center",
@@ -1190,7 +1190,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             disabled={Boolean(rebuildBlockedReason)}
                                             style={{
                                                 ...btnStyle,
-                                                background: "var(--status-progress-bg)",
+                                                background: "var(--primary)",
                                                 color: "var(--primary-contrast)",
                                                 flex: 1,
                                                 opacity: rebuildBlockedReason ? 0.45 : 1,
@@ -1239,9 +1239,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                         ...btnStyle,
                                         width: "100%",
                                         justifyContent: "space-between",
-                                        background: hasUnresolvedSafetyQueue ? "rgba(248,113,113,0.12)" : "var(--background)",
-                                        color: hasUnresolvedSafetyQueue ? "#fecaca" : "var(--text-primary)",
-                                        border: `1px solid ${hasUnresolvedSafetyQueue ? "rgba(248,113,113,0.25)" : "var(--border)"}`,
+                                        background: hasUnresolvedSafetyQueue ? "var(--status-error-soft-bg)" : "var(--background)",
+                                        color: hasUnresolvedSafetyQueue ? "var(--status-error-soft-fg)" : "var(--text-primary)",
+                                        border: `1px solid ${hasUnresolvedSafetyQueue ? "var(--status-error-soft-border)" : "var(--border)"}`,
                                     }}
                                 >
                                     <span>{safetyQueueToggleLabel}</span>
@@ -1268,10 +1268,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         marginBottom: 12,
                         padding: "10px 12px",
                         borderRadius: 8,
-                        background: "rgba(59,130,246,0.08)",
-                        border: "1px solid rgba(59,130,246,0.2)",
+                        background: "var(--background)",
+                        border: "1px solid var(--border)",
                         fontSize: 12,
-                        color: "#bfdbfe",
+                        color: "var(--text-primary)",
                         lineHeight: 1.5,
                     }}>
                         {savedIngestSettings?.locked_at
@@ -1350,9 +1350,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 marginBottom: 24,
                                 padding: "12px 14px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(248,113,113,0.25)",
-                                background: "rgba(248,113,113,0.08)",
-                                color: "#fecaca",
+                                border: "1px solid var(--status-error-soft-border)",
+                                background: "var(--status-error-soft-bg)",
+                                color: "var(--status-error-soft-fg)",
                                 lineHeight: 1.5,
                             }}>
                                 Safety review available. {unresolvedReviewCount} blocked chunk(s) have been queued for repair.
@@ -1482,9 +1482,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                                 borderRadius: 9999,
                                                 fontSize: 11,
                                                 fontWeight: 700,
-                                                background: failedRecordCount > 0 ? "rgba(248,113,113,0.14)" : "var(--background-secondary)",
-                                                color: failedRecordCount > 0 ? "#fecaca" : "var(--text-subtle)",
-                                                border: failedRecordCount > 0 ? "1px solid rgba(248,113,113,0.22)" : "1px solid var(--border)",
+                                                background: failedRecordCount > 0 ? "var(--status-error-soft-bg)" : "var(--background-secondary)",
+                                                color: failedRecordCount > 0 ? "var(--status-error-soft-fg)" : "var(--text-subtle)",
+                                                border: failedRecordCount > 0 ? "1px solid var(--status-error-soft-border)" : "1px solid var(--border)",
                                             }}>
                                                 Failed Records: {failedRecordCount}
                                             </span>
@@ -1514,15 +1514,15 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                     <>
                                         <div>
                                             <div style={{ height: 8, background: "var(--border)", borderRadius: 999, overflow: "hidden" }}>
-                                                <div
-                                                    style={{
-                                                        height: "100%",
-                                                        width: `${progressSummary.overallPercent}%`,
-                                                        background: "linear-gradient(90deg, var(--primary), var(--primary-light))",
-                                                        borderRadius: 999,
-                                                        transition: "width 0.3s ease",
-                                                    }}
-                                                />
+                                                    <div
+                                                        style={{
+                                                            height: "100%",
+                                                            width: `${progressSummary.overallPercent}%`,
+                                                            backgroundColor: "var(--primary)",
+                                                            borderRadius: 999,
+                                                            transition: "width 0.3s ease",
+                                                        }}
+                                                    />
                                             </div>
                                             {progressSummary.waitRetryAfterSeconds && progressSummary.waitState === "waiting_for_api_key" && (
                                                 <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 8 }}>
@@ -1571,9 +1571,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                                                 height: "100%",
                                                                 width: `${row.percent}%`,
                                                                 borderRadius: 999,
-                                                                background: row.key === "embedded" || row.key === "reembed"
-                                                                    ? "linear-gradient(90deg, var(--primary), var(--primary-light))"
-                                                                    : "linear-gradient(90deg, rgba(8,146,208,0.45), rgba(8,146,208,0.82))",
+                                                                backgroundColor: "var(--primary)",
                                                                 transition: "width 0.3s ease",
                                                             }}
                                                         />
@@ -1591,9 +1589,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 marginBottom: 24,
                                 padding: "12px 14px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(248,113,113,0.25)",
-                                background: "rgba(248,113,113,0.08)",
-                                color: "#fecaca",
+                                border: "1px solid var(--status-error-soft-border)",
+                                background: "var(--status-error-soft-bg)",
+                                color: "var(--status-error-soft-fg)",
                                 lineHeight: 1.5,
                             }}>
                                 Safety review available. {unresolvedReviewCount} blocked chunk(s) have been queued for repair.
@@ -1606,9 +1604,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 marginBottom: 24,
                                 padding: "12px 14px",
                                 borderRadius: 10,
-                                border: "1px solid rgba(251,191,36,0.25)",
-                                background: "rgba(251,191,36,0.08)",
-                                color: "#fde68a",
+                                border: "1px solid var(--status-warning-soft-border)",
+                                background: "var(--status-warning-soft-bg)",
+                                color: "var(--status-warning-soft-fg)",
                                 lineHeight: 1.5,
                             }}>
                                 Safety Queue has {unresolvedReviewCount} review item{unresolvedReviewCount === 1 ? "" : "s"} ready.
@@ -1643,10 +1641,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                         marginBottom: 12,
                                         padding: "10px 12px",
                                         borderRadius: 8,
-                                        background: "rgba(251,191,36,0.08)",
-                                        border: "1px solid rgba(251,191,36,0.25)",
+                                        background: "var(--status-warning-soft-bg)",
+                                        border: "1px solid var(--status-warning-soft-border)",
                                         fontSize: 12,
-                                        color: "#fcd34d",
+                                        color: "var(--status-warning-soft-fg)",
                                         lineHeight: 1.5,
                                     }}>
                                         <div>Retry All Failures skips chunks that are already in the Safety Queue.</div>
@@ -1875,7 +1873,7 @@ function LogEntryRow({ entry, onViewBlocked }: { entry: LogEntry, onViewBlocked:
             {!isError && !isComplete && !isPartialComplete && !isAgentDone && <Loader2 size={13} style={{ flexShrink: 0, color: "var(--text-muted)" }} />}
 
             {entry.book_number !== undefined && entry.chunk_index !== undefined && (
-                <span style={{ padding: "1px 6px", borderRadius: 4, background: "var(--status-info-pill-bg)", color: "var(--status-info-pill-fg)", fontSize: 11, fontFamily: "monospace" }}>
+                <span style={{ padding: "1px 6px", borderRadius: 4, background: "var(--primary)", color: "var(--primary-contrast)", fontSize: 11, fontFamily: "monospace" }}>
                     B{entry.book_number}:C{entry.chunk_index}
                 </span>
             )}
@@ -1928,29 +1926,49 @@ function LogEntryRow({ entry, onViewBlocked }: { entry: LogEntry, onViewBlocked:
 
 function safetyReviewStatusPresentation(review: SafetyReviewItem): { label: string; bg: string; fg: string } {
     if (review.status === "resolved") {
-        return { label: "Resolved", bg: "rgba(34,197,94,0.16)", fg: "#86efac" };
+        return { label: "Resolved", bg: "var(--status-success-soft-bg)", fg: "var(--status-success-soft-fg)" };
     }
     if (review.status === "testing") {
-        return { label: "Testing", bg: "rgba(59,130,246,0.16)", fg: "#bfdbfe" };
+        return { label: "Testing", bg: "var(--accent-soft-bg)", fg: "var(--accent-soft-fg)" };
     }
     if (review.status === "draft") {
-        return { label: "Draft", bg: "rgba(251,191,36,0.16)", fg: "#fde68a" };
+        return { label: "Draft", bg: "var(--status-warning-soft-bg)", fg: "var(--status-warning-soft-fg)" };
     }
-    return { label: "Blocked", bg: "rgba(248,113,113,0.16)", fg: "#fecaca" };
+    return { label: "Blocked", bg: "var(--status-error-soft-bg)", fg: "var(--status-error-soft-fg)" };
 }
 
-function safetyReviewOutcomePresentation(review: SafetyReviewItem): { label: string; color: string } | null {
+function safetyReviewOutcomePresentation(review: SafetyReviewItem): { label: string; background: string; border: string; color: string } | null {
     if (review.last_test_outcome === "passed") {
-        return { label: "Passed extraction and embedding.", color: "#86efac" };
+        return {
+            label: "Passed extraction and embedding.",
+            background: "var(--status-success-bg)",
+            border: "var(--status-success-fg)",
+            color: "var(--status-success-fg)",
+        };
     }
     if (review.last_test_outcome === "still_safety_blocked") {
-        return { label: "Still safety blocked.", color: "#fecaca" };
+        return {
+            label: "Still safety blocked.",
+            background: "var(--status-error-soft-bg)",
+            border: "var(--status-error-soft-border)",
+            color: "var(--status-error-soft-fg)",
+        };
     }
     if (review.last_test_outcome === "transient_failure") {
-        return { label: "Latest test hit a transient failure such as rate limiting.", color: "#fde68a" };
+        return {
+            label: "Latest test hit a transient failure such as rate limiting.",
+            background: "var(--status-warning-soft-bg)",
+            border: "var(--status-warning-soft-border)",
+            color: "var(--status-warning-soft-fg)",
+        };
     }
     if (review.last_test_outcome === "other_failure") {
-        return { label: "Latest test failed for another reason.", color: "#bfdbfe" };
+        return {
+            label: "Latest test failed for another reason.",
+            background: "var(--accent-soft-bg)",
+            border: "var(--accent-soft-border)",
+            color: "var(--accent-soft-fg)",
+        };
     }
     return null;
 }
@@ -2062,8 +2080,8 @@ function SafetyReviewPanel({
                                             <div style={{
                                                 padding: "10px 12px",
                                                 borderRadius: 8,
-                                                background: "rgba(15,23,42,0.22)",
-                                                border: "1px solid var(--border)",
+                                                background: lastOutcome.background,
+                                                border: `1px solid ${lastOutcome.border}`,
                                                 fontSize: 12,
                                                 color: lastOutcome.color,
                                                 lineHeight: 1.45,
@@ -2081,10 +2099,10 @@ function SafetyReviewPanel({
                                             <div style={{
                                                 padding: "10px 12px",
                                                 borderRadius: 8,
-                                                background: "rgba(251,191,36,0.08)",
-                                                border: "1px solid rgba(251,191,36,0.2)",
+                                                background: "var(--status-warning-soft-bg)",
+                                                border: "1px solid var(--status-warning-soft-border)",
                                                 fontSize: 12,
-                                                color: "#fde68a",
+                                                color: "var(--status-warning-soft-fg)",
                                                 lineHeight: 1.45,
                                             }}>
                                                 The current graph is still using the last passed version for this chunk. Test this draft to replace it.
@@ -2320,16 +2338,12 @@ function StaticPromptField({ label, prompt }: { label: string; prompt?: WorldPro
                     padding: "2px 8px",
                     borderRadius: 9999,
                     fontWeight: 600,
-                    background: isWorld
-                        ? "var(--primary-soft-strong)"
-                        : isGlobal
-                            ? "rgba(59,130,246,0.16)"
-                            : "var(--status-pending-bg)",
-                    color: isWorld
-                        ? "var(--primary-light)"
-                        : isGlobal
-                            ? "#bfdbfe"
-                            : "var(--status-pending-fg)",
+                    background: isWorld || isGlobal
+                        ? "var(--accent-pill-bg)"
+                        : "var(--status-pending-bg)",
+                    color: isWorld || isGlobal
+                        ? "var(--accent-pill-fg)"
+                        : "var(--status-pending-fg)",
                     textTransform: "lowercase",
                 }}>
                     {sourceLabel}

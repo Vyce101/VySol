@@ -333,16 +333,12 @@ export default function WorldReingestSetupContent({
                                                 borderRadius: 9999,
                                                 fontWeight: 600,
                                                 textTransform: "lowercase",
-                                                background: promptSources[key] === "world"
-                                                    ? "var(--primary-soft-strong)"
-                                                    : promptSources[key] === "global"
-                                                        ? "rgba(59,130,246,0.16)"
-                                                        : "var(--status-pending-bg)",
-                                                color: promptSources[key] === "world"
-                                                    ? "var(--primary-light)"
-                                                    : promptSources[key] === "global"
-                                                        ? "#bfdbfe"
-                                                        : "var(--status-pending-fg)",
+                                                background: promptSources[key] === "world" || promptSources[key] === "global"
+                                                    ? "var(--primary)"
+                                                    : "var(--status-pending-bg)",
+                                                color: promptSources[key] === "world" || promptSources[key] === "global"
+                                                    ? "var(--primary-contrast)"
+                                                    : "var(--status-pending-fg)",
                                             }}>
                                                 {formatPromptSourceLabel(promptSources[key])}
                                             </span>
