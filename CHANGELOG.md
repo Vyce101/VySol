@@ -30,6 +30,7 @@ All notable user-visible changes to this project will be documented in this file
 - Renamed the default embedding model to `gemini-embedding-2-preview`.
 - Clarified the ingest progress header with tooltip help that explains the difference between `Failed Records` and `World Blockers` and points users toward the right recovery action.
 - Clarified the ingest failure-help area with a step-by-step recovery list and renamed the manual rescue action to explain that it moves failed chunks into the Safety Queue.
+- Changed brand-new worlds to expose an inline first-run ingest setup editor on the main ingest page, while keeping the read-only snapshot and `Re-ingest` popup flow for worlds that already have ingest history.
 - Changed retrieval entry-node indexing to use one persistent vector per current graph node, with `Re-embed All` rebuilding from the current saved graph state.
 - Changed model-context assembly and Context X-Ray to preserve real graph nodes even when different nodes share the same display name, instead of fake-merging them by label.
 - Changed `# RAG Chunks` context assembly to keep full chunk text and `[B#:C#]` provenance tags while ordering included chunks by temporal provenance.
@@ -47,6 +48,7 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed ingest action gating so `Resume` and `Retry All Failures` no longer stay visible when the only remaining failed chunks already belong to the Safety Queue after a failed repair test.
 - Fixed ingest and entity-resolution UI honesty so non-terminal ingest chunk errors no longer close the live progress stream, stale runtime refreshes now surface a visible warning with retry, and normal entity-resolution `reason` updates no longer render as false failure banners.
 - Fixed entity resolution commit recovery so interrupted final meta writes now preserve a truthful `commit_pending` state, staged vector snapshot failures no longer mutate the live graph first, and stale-run recovery can finish a pending committed result instead of pretending it rolled back.
 - Fixed ingest audit/progress truthfulness so unreadable vector collections now surface as explicit world blockers instead of fake missing coverage, `Re-embed All` keeps progressing through world-level unique-node rebuild and audit phases after chunk work finishes, and world-scope blockers are visible in the main progress UI instead of hiding only in the agent log.

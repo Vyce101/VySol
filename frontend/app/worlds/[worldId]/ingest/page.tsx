@@ -1,9 +1,15 @@
 "use client";
 
 import { useState, useEffect, useRef, use } from "react";
-import { Upload, FileText, Trash2, Play, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2, Settings2, Info } from "lucide-react";
+import { Upload, FileText, Trash2, ChevronDown, ChevronUp, CheckCircle, XCircle, Loader2, Settings2, Info } from "lucide-react";
 import EntityResolutionPanel from "@/components/EntityResolutionPanel";
-import WorldReingestSetupContent, { type ReingestSetupSubmission } from "@/components/WorldReingestSetupContent";
+import WorldReingestSetupContent, {
+    WorldIngestSetupForm,
+    buildIngestSetupSubmission,
+    createWorldIngestSetupDraft,
+    type ReingestSetupSubmission,
+    type WorldIngestSetupDraft,
+} from "@/components/WorldReingestSetupContent";
 import { apiFetch, apiUpload, apiStreamGet } from "@/lib/api";
 import { buildIngestActivityLabel, resolveStableIngestProgress } from "@/lib/ingest-progress";
 import {
@@ -103,6 +109,7 @@ interface ReembedEligibility {
 }
 
 interface WorldResponse {
+    world_name?: string;
     ingestion_status?: string;
     ingest_settings?: WorldIngestSettings;
     active_ingestion_run?: boolean;
@@ -177,6 +184,7 @@ interface SafetyReviewSummary {
     blocked_reviews: number;
     draft_reviews: number;
     testing_reviews: number;
+    unresolved_chunk_ids?: string[];
     blocks_rebuild: boolean;
     blocking_message?: string | null;
 }
@@ -335,11 +343,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const logEndRef = useRef<HTMLDivElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
     const esRef = useRef<EventSource | null>(null);
+    const initialIngestDraftWorldIdRef = useRef<string | null>(null);
+    const initialIngestDraftDirtyRef = useRef(false);
 
     // Read-only world ingest config state
+    const [worldName, setWorldName] = useState("World");
     const [savedIngestSettings, setSavedIngestSettings] = useState<WorldIngestSettings | null>(null);
     const [reembedEligibility, setReembedEligibility] = useState<ReembedEligibility | null>(null);
     const [prompts, setPrompts] = useState<Record<string, WorldPromptState>>({} as Record<string, WorldPromptState>);
+    const [initialIngestDraft, setInitialIngestDraft] = useState<WorldIngestSetupDraft | null>(null);
+    const [initialIngestDraftDirty, setInitialIngestDraftDirty] = useState(false);
     const [hasActiveChunkOverrides, setHasActiveChunkOverrides] = useState(false);
     const [activeChunkOverrideCount, setActiveChunkOverrideCount] = useState(0);
     const [reuseActiveChunkOverrides, setReuseActiveChunkOverrides] = useState(true);
@@ -387,6 +400,18 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             synthesized_failures: Math.max(Number(previous.synthesized_failures ?? 0), Number(incoming.synthesized_failures ?? 0)),
         };
     };
+
+    useEffect(() => {
+        initialIngestDraftDirtyRef.current = initialIngestDraftDirty;
+    }, [initialIngestDraftDirty]);
+
+    useEffect(() => {
+        setWorldName("World");
+        setInitialIngestDraft(null);
+        setInitialIngestDraftDirty(false);
+        initialIngestDraftWorldIdRef.current = null;
+        initialIngestDraftDirtyRef.current = false;
+    }, [worldId]);
 
     const syncSafetyReviewState = (reviews: SafetyReviewItem[], summary?: SafetyReviewSummary | null) => {
         setSafetyReviews(reviews);
@@ -446,6 +471,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const applyWorldData = (data: WorldResponse) => {
+        setWorldName(data.world_name || "World");
         setReembedEligibility(data.reembed_eligibility ?? null);
         setSafetyReviewSummary(data.safety_review_summary ?? null);
     };
@@ -533,6 +559,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setHasActiveChunkOverrides(Boolean(data.has_active_chunk_overrides));
         setActiveChunkOverrideCount(Number(data.active_chunk_override_count ?? 0));
         setReuseActiveChunkOverrides((prev) => (data.has_active_chunk_overrides ? prev : true));
+        const nextInitialDraft = createWorldIngestSetupDraft(data);
+        const shouldResetInitialDraft = initialIngestDraftWorldIdRef.current !== worldId || !initialIngestDraftDirtyRef.current;
+        if (shouldResetInitialDraft) {
+            initialIngestDraftWorldIdRef.current = worldId;
+            initialIngestDraftDirtyRef.current = false;
+            setInitialIngestDraftDirty(false);
+            setInitialIngestDraft(nextInitialDraft);
+        }
     };
 
     async function loadWorld() {
@@ -963,30 +997,49 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const failureRecords = checkpoint?.failures || [];
-    const safetyReviewByChunkId = safetyReviews.reduce<Record<string, SafetyReviewItem>>((lookup, review) => {
-        lookup[review.chunk_id] = review;
+    const unresolvedSafetyReviewByChunkId = safetyReviews.reduce<Record<string, SafetyReviewItem>>((lookup, review) => {
+        if (review.status !== "resolved") {
+            lookup[review.chunk_id] = review;
+        }
         return lookup;
     }, {});
+    const unresolvedSafetyReviewChunkIds = new Set<string>([
+        ...Object.keys(unresolvedSafetyReviewByChunkId),
+        ...(safetyReviewSummary?.unresolved_chunk_ids ?? []),
+    ]);
     const collapsedCoverageGapFailures = failureRecords.filter((failure) => (
         failure.stage === "extraction"
         && failure.error_type === "coverage_gap"
-        && !safetyReviewByChunkId[failure.chunk_id]
+        && !unresolvedSafetyReviewChunkIds.has(failure.chunk_id)
     ));
     const hasPending = sources.some((s) => s.status === "pending" || s.status === "ingesting");
-    const hasRetryableFailures = failureRecords.some(
-        (failure) => !(failure.stage === "extraction" && safetyReviewByChunkId[failure.chunk_id])
+    const hasRetryableFailuresOutsideSafetyQueue = failureRecords.some(
+        (failure) => !unresolvedSafetyReviewChunkIds.has(failure.chunk_id)
     );
     const hasAnyIngested = sources.some((s) => s.chunk_count > 0 || s.ingested_at !== null || s.status === "partial_failure" || s.status === "complete");
     const allComplete = sources.length > 0 && sources.every((s) => s.status === "complete");
+    const isPendingOnlyInitialCheckpoint = Boolean(
+        checkpoint?.can_resume
+        && checkpoint?.reason === "pending_work"
+        && !hasAnyIngested
+        && !hasRetryableFailuresOutsideSafetyQueue
+        && Number(checkpoint?.chunks_total ?? 0) === 0
+        && Number(checkpoint?.chunk_index ?? 0) === 0
+        && checkpoint?.active_ingestion_run !== true
+    );
+    const showResume = Boolean(checkpoint?.can_resume) && !ingesting && !isPendingOnlyInitialCheckpoint;
+    const showInitialIngestSetup = !ingesting && !hasAnyIngested && !showResume;
     const showReingestAction = !ingesting && hasAnyIngested;
     const showReembedAction = !ingesting && hasAnyIngested;
     const canReembedAll = Boolean(showReembedAction && reembedEligibility?.can_reembed_all);
     const reembedDisabledReason = reembedEligibility?.message || "Re-embed All is not currently safe for this world.";
+    const initialIngestSubmitDisabledReason = hasPending
+        ? null
+        : "Add at least one pending .txt file before starting ingestion.";
     const previousSettingsSummary = savedIngestSettings
         ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedIngestSettings.embedding_model}`
         : null;
     const canResolveEntitiesBase = !ingesting && allComplete && hasAnyIngested;
-    const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
     const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
         lookup[source.source_id] = source.display_name;
@@ -1041,7 +1094,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         : null;
     const hasProgress = progressSummary.totalWorkUnits > 0;
     const showProgressSummary = ingesting || hasProgress;
-    const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !hasBlockingIssues && !showResume;
+    const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailuresOutsideSafetyQueue && !hasBlockingIssues && !showResume;
     const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && !hasBlockingIssues && !hasProgress;
     const progressHeaderLabel = progressSummary.isAborting
         ? "Stopping ingest..."
@@ -1052,7 +1105,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         groups[key].push(review);
         return groups;
     }, {});
-    const showRetryAllButton = !ingesting && failedRecordCount > 0;
+    const showRetryAllButton = !ingesting && hasRetryableFailuresOutsideSafetyQueue;
     const bookCountLabel = `${sources.length} book${sources.length === 1 ? "" : "s"}`;
     const booksSummaryLabel = sources.length === 0
         ? "No books uploaded yet."
@@ -1074,7 +1127,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     if (showResume) {
         failureActionSteps.push("If Resume is available, try Resume first.");
     }
-    if (hasRetryableFailures) {
+    if (hasRetryableFailuresOutsideSafetyQueue) {
         failureActionSteps.push("If failures remain, click Retry All Failures.");
     }
     if (collapsedCoverageGapFailures.length > 0) {
@@ -1104,7 +1157,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             if (showResume) {
                 return "Next step: use Resume.";
             }
-            if (hasRetryableFailures) {
+            if (hasRetryableFailuresOutsideSafetyQueue) {
                 return "Next step: use Retry All Failures.";
             }
             return "Next step: use Re-ingest.";
@@ -1120,7 +1173,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 ? "No specific books or chunks are failing right now."
                 : "These are specific books or chunks that failed during ingest.",
             failedRecordCount > 0
-                ? (hasRetryableFailures
+                ? (hasRetryableFailuresOutsideSafetyQueue
                     ? "Next step: use Retry All Failures."
                     : hasUnresolvedSafetyQueue
                         ? "Next step: fix Safety Queue items there."
@@ -1146,11 +1199,26 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         });
         setIsReingestModalOpen(false);
     };
+    const handleInitialIngestDraftChange = (nextDraft: WorldIngestSetupDraft) => {
+        initialIngestDraftWorldIdRef.current = worldId;
+        initialIngestDraftDirtyRef.current = true;
+        setInitialIngestDraftDirty(true);
+        setInitialIngestDraft(nextDraft);
+    };
+    const handleInitialIngestSubmit = async () => {
+        if (!initialIngestDraft) return;
+        const submission = buildIngestSetupSubmission(initialIngestDraft);
+        initialIngestDraftDirtyRef.current = false;
+        setInitialIngestDraftDirty(false);
+        await startIngestion(false, "default", submission.ingest_settings, {
+            promptOverrides: submission.prompt_overrides,
+        });
+    };
     const toggleSafetyQueuePanel = () => {
         setActiveRightPanel((prev) => prev === "safety_queue" ? "progress" : "safety_queue");
     };
     const openReviewForFailure = (failure: StageFailure) => {
-        const review = safetyReviewByChunkId[failure.chunk_id];
+        const review = unresolvedSafetyReviewByChunkId[failure.chunk_id];
         if (!review) return;
         setActiveRightPanel("safety_queue");
         setPendingFocusReviewId(review.review_id);
@@ -1322,20 +1390,35 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 </div>
                             )}
 
-                            {!hasAnyIngested && !showResume && (
-                                <button
-                                    onClick={() => { startIngestion(false); }}
-                                    disabled={!hasPending}
-                                    style={{
-                                        ...btnStyle,
-                                        background: "var(--primary)",
-                                        color: "var(--primary-contrast)",
-                                        width: "100%",
-                                        opacity: !hasPending ? 0.4 : 1,
-                                    }}
-                                >
-                                    <Play size={14} /> Start Ingestion
-                                </button>
+                            {showInitialIngestSetup && (
+                                initialIngestDraft ? (
+                                    <WorldIngestSetupForm
+                                        draft={initialIngestDraft}
+                                        layout="inline"
+                                        variant="initial_ingest"
+                                        worldName={worldName}
+                                        submitLabel="Start Ingestion"
+                                        submitDisabled={!hasPending}
+                                        submitDisabledReason={initialIngestSubmitDisabledReason}
+                                        onDraftChange={handleInitialIngestDraftChange}
+                                        onSubmit={() => void handleInitialIngestSubmit()}
+                                    />
+                                ) : (
+                                    <div style={{
+                                        border: "1px solid var(--border)",
+                                        borderRadius: 16,
+                                        background: "var(--background)",
+                                        padding: 16,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        gap: 10,
+                                        color: "var(--text-subtle)",
+                                    }}>
+                                        <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+                                        Loading ingest setup...
+                                    </div>
+                                )
                             )}
 
                             {showResume && (
@@ -1432,52 +1515,56 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     disabledReason={resolveEntitiesDisabledReason}
                 />
 
-                {/* Collapsible Ingestion Settings */}
-                <CollapsibleSection title="Ingestion Settings" open={showSettings} onToggle={() => setShowSettings(!showSettings)}>
-                    <div style={{
-                        marginBottom: 12,
-                        padding: "10px 12px",
-                        borderRadius: 8,
-                        background: "var(--background)",
-                        border: "1px solid var(--border)",
-                        fontSize: 12,
-                        color: "var(--text-primary)",
-                        lineHeight: 1.5,
-                    }}>
-                        {savedIngestSettings?.locked_at
-                            ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest popup if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
-                            : "This world has not locked ingest settings yet. The snapshot below shows what will be used the next time you start or re-ingest this world."}
-                    </div>
-                    {previousSettingsSummary && (
-                        <div style={{
-                            marginBottom: 12,
-                            padding: "10px 12px",
-                            borderRadius: 8,
-                            background: "var(--background)",
-                            border: "1px solid var(--border)",
-                            fontSize: 12,
-                            color: "var(--text-subtle)",
-                            lineHeight: 1.5,
-                        }}>
-                            {previousSettingsSummary}
-                        </div>
-                    )}
-                    <ReadOnlySettingRow label="Chunk Size (chars)" value={savedIngestSettings?.chunk_size_chars?.toLocaleString() ?? "-"} />
-                    <ReadOnlySettingRow label="Chunk Overlap (chars)" value={savedIngestSettings?.chunk_overlap_chars?.toLocaleString() ?? "-"} />
-                    <ReadOnlySettingRow label="World Embedding Model" value={savedIngestSettings?.embedding_model ?? "-"} mono />
-                    <ReadOnlySettingRow label="Graph Architect Glean Amount" value={savedIngestSettings?.glean_amount?.toLocaleString() ?? "-"} />
-                </CollapsibleSection>
+                {!showInitialIngestSetup && (
+                    <>
+                        {/* Collapsible Ingestion Settings */}
+                        <CollapsibleSection title="Ingestion Settings" open={showSettings} onToggle={() => setShowSettings(!showSettings)}>
+                            <div style={{
+                                marginBottom: 12,
+                                padding: "10px 12px",
+                                borderRadius: 8,
+                                background: "var(--background)",
+                                border: "1px solid var(--border)",
+                                fontSize: 12,
+                                color: "var(--text-primary)",
+                                lineHeight: 1.5,
+                            }}>
+                                {savedIngestSettings?.locked_at
+                                    ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest popup if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
+                                    : "This world has not locked ingest settings yet. The snapshot below shows what will be used the next time you start or re-ingest this world."}
+                            </div>
+                            {previousSettingsSummary && (
+                                <div style={{
+                                    marginBottom: 12,
+                                    padding: "10px 12px",
+                                    borderRadius: 8,
+                                    background: "var(--background)",
+                                    border: "1px solid var(--border)",
+                                    fontSize: 12,
+                                    color: "var(--text-subtle)",
+                                    lineHeight: 1.5,
+                                }}>
+                                    {previousSettingsSummary}
+                                </div>
+                            )}
+                            <ReadOnlySettingRow label="Chunk Size (chars)" value={savedIngestSettings?.chunk_size_chars?.toLocaleString() ?? "-"} />
+                            <ReadOnlySettingRow label="Chunk Overlap (chars)" value={savedIngestSettings?.chunk_overlap_chars?.toLocaleString() ?? "-"} />
+                            <ReadOnlySettingRow label="World Embedding Model" value={savedIngestSettings?.embedding_model ?? "-"} mono />
+                            <ReadOnlySettingRow label="Graph Architect Glean Amount" value={savedIngestSettings?.glean_amount?.toLocaleString() ?? "-"} />
+                        </CollapsibleSection>
 
-                {/* Collapsible Prompt Snapshot */}
-                <CollapsibleSection title="Prompt Snapshot" open={showPrompts} onToggle={() => setShowPrompts(!showPrompts)}>
-                    {WORLD_INGEST_PROMPT_FIELDS.map(({ key, label }) => (
-                        <StaticPromptField
-                            key={`${key}:${prompts[key]?.source || "default"}:${prompts[key]?.value || ""}`}
-                            label={label}
-                            prompt={prompts[key]}
-                        />
-                    ))}
-                </CollapsibleSection>
+                        {/* Collapsible Prompt Snapshot */}
+                        <CollapsibleSection title="Prompt Snapshot" open={showPrompts} onToggle={() => setShowPrompts(!showPrompts)}>
+                            {WORLD_INGEST_PROMPT_FIELDS.map(({ key, label }) => (
+                                <StaticPromptField
+                                    key={`${key}:${prompts[key]?.source || "default"}:${prompts[key]?.value || ""}`}
+                                    label={label}
+                                    prompt={prompts[key]}
+                                />
+                            ))}
+                        </CollapsibleSection>
+                    </>
+                )}
             </div>
 
             {/* Right Panel — Progress */}
@@ -1610,13 +1697,13 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         <p style={{ fontSize: 16 }}>
                             {hasUnresolvedSafetyQueue
                                 ? "This world has safety review items waiting in the queue."
-                                : hasRetryableFailures
+                                : hasRetryableFailuresOutsideSafetyQueue
                                 ? "This world has retryable ingest failures."
                                 : hasAnyIngested
                                     ? "Ingestion complete for this world."
                                     : "Start ingestion to see progress."}
                         </p>
-                        {(hasAnyIngested || hasRetryableFailures || hasUnresolvedSafetyQueue) && (
+                        {(hasAnyIngested || hasRetryableFailuresOutsideSafetyQueue || hasUnresolvedSafetyQueue) && (
                             <p style={{ fontSize: 13, marginTop: 6, maxWidth: 520, textAlign: "center", lineHeight: 1.5 }}>
                                 {hasUnresolvedSafetyQueue
                                     ? "Open the Safety Queue from the left column to edit blocked chunks and test repairs."
@@ -1927,7 +2014,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                                 Attempts: {failure.attempt_count}
                                             </div>
                                             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                                {safetyReviewByChunkId[failure.chunk_id] && failure.stage === "extraction" && (
+                                                {unresolvedSafetyReviewByChunkId[failure.chunk_id] && failure.stage === "extraction" && (
                                                     <button
                                                         onClick={() => openReviewForFailure(failure)}
                                                         style={{

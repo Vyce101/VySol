@@ -499,6 +499,49 @@ def test_build_chunk_plan_respects_stage_retry_modes():
     assert all_modes[4] == "full"
 
 
+def test_build_chunk_plan_skips_unresolved_safety_queue_chunks_for_retry_and_resume(monkeypatch):
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [1, 2],
+        "stage_failures": [
+            {"stage": "embedding", "chunk_index": 1, "chunk_id": "chunk_world-1_source-a_1"},
+            {"stage": "extraction", "chunk_index": 2, "chunk_id": "chunk_world-1_source-a_2"},
+        ],
+    }
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_unresolved_safety_review_chunk_ids",
+        lambda world_id: {
+            "chunk_world-1_source-a_1",
+            "chunk_world-1_source-a_2",
+        },
+    )
+
+    retry_plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=4,
+        resume=True,
+        retry_only=True,
+        retry_stage="all",
+        checkpoint=None,
+    )
+    assert retry_plan == {}
+
+    resume_plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=4,
+        resume=True,
+        retry_only=False,
+        retry_stage="all",
+        checkpoint={"source_id": "source-a", "last_completed_chunk_index": 0},
+    )
+    assert 1 not in resume_plan
+    assert 2 not in resume_plan
+    assert resume_plan[3] == "full"
+
+
 def test_checkpoint_ignores_stale_failures_after_audit(monkeypatch):
     meta = {
         "world_id": "world-1",
@@ -546,6 +589,174 @@ def test_checkpoint_ignores_stale_failures_after_audit(monkeypatch):
     assert checkpoint["chunks_total"] == 0
     assert checkpoint["failures"] == []
     assert checkpoint["stage_counters"]["failed_records"] == 0
+
+
+def test_checkpoint_hides_resume_when_only_unresolved_safety_queue_failures_remain(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 3,
+                "status": "partial_failure",
+                "failed_chunks": [1],
+                "stage_failures": [
+                    {"stage": "embedding", "chunk_index": 1, "chunk_id": "chunk_world-1_source-a_1"},
+                ],
+                "extracted_chunks": [0, 1],
+                "embedded_chunks": [0],
+            }
+        ],
+    }
+    monkeypatch.setattr(ingestion_engine, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_engine, "_load_checkpoint", lambda world_id: {
+        "source_id": "source-a",
+        "last_completed_chunk_index": 0,
+        "chunks_total": 3,
+    })
+    monkeypatch.setattr(ingestion_engine, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "audit_ingestion_integrity",
+        lambda world_id, synthesize_failures=True, persist=True: {
+            "world": {"failed_records": 1},
+            "failures": list(meta["sources"][0]["stage_failures"]),
+            "blocking_issues": [],
+        },
+    )
+    monkeypatch.setattr(ingestion_engine, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_unresolved_safety_review_chunk_ids",
+        lambda world_id: {"chunk_world-1_source-a_1"},
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "get_safety_review_summary",
+        lambda world_id: {"total_reviews": 1, "unresolved_reviews": 1},
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_build_progress_event",
+        lambda *args, **kwargs: {
+            "active_ingestion_run": False,
+            "progress_phase": "idle",
+            "progress_scope": "source",
+            "completed_chunks_current_phase": 0,
+            "total_chunks_current_phase": 0,
+            "completed_work_units": 0,
+            "total_work_units": 0,
+            "overall_percent": 0.0,
+            "progress_percent": 0.0,
+            "active_operation": "default",
+            "wait_state": None,
+            "wait_stage": None,
+            "wait_label": None,
+            "wait_retry_after_seconds": None,
+            "progress_source_id": None,
+            "progress_source_display_name": None,
+            "progress_source_book_number": None,
+        },
+    )
+
+    checkpoint = ingestion_engine.get_checkpoint_info("world-1")
+
+    assert checkpoint["can_resume"] is False
+    assert checkpoint["chunk_index"] == 0
+    assert checkpoint["chunks_total"] == 0
+    assert checkpoint["stage_counters"]["failed_records"] == 1
+
+
+def test_checkpoint_keeps_resume_when_pending_sources_exist_beside_safety_queue_work(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 3,
+                "status": "partial_failure",
+                "failed_chunks": [1],
+                "stage_failures": [
+                    {"stage": "embedding", "chunk_index": 1, "chunk_id": "chunk_world-1_source-a_1"},
+                ],
+                "extracted_chunks": [0, 1],
+                "embedded_chunks": [0],
+            },
+            {
+                "source_id": "source-b",
+                "book_number": 2,
+                "display_name": "Book 2",
+                "chunk_count": 2,
+                "status": "pending",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [],
+                "embedded_chunks": [],
+            },
+        ],
+    }
+    monkeypatch.setattr(ingestion_engine, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_engine, "_load_checkpoint", lambda world_id: {
+        "source_id": "source-a",
+        "last_completed_chunk_index": 0,
+        "chunks_total": 3,
+    })
+    monkeypatch.setattr(ingestion_engine, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "audit_ingestion_integrity",
+        lambda world_id, synthesize_failures=True, persist=True: {
+            "world": {"failed_records": 1},
+            "failures": list(meta["sources"][0]["stage_failures"]),
+            "blocking_issues": [],
+        },
+    )
+    monkeypatch.setattr(ingestion_engine, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_unresolved_safety_review_chunk_ids",
+        lambda world_id: {"chunk_world-1_source-a_1"},
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "get_safety_review_summary",
+        lambda world_id: {"total_reviews": 1, "unresolved_reviews": 1},
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_build_progress_event",
+        lambda *args, **kwargs: {
+            "active_ingestion_run": False,
+            "progress_phase": "idle",
+            "progress_scope": "source",
+            "completed_chunks_current_phase": 0,
+            "total_chunks_current_phase": 0,
+            "completed_work_units": 0,
+            "total_work_units": 0,
+            "overall_percent": 0.0,
+            "progress_percent": 0.0,
+            "active_operation": "default",
+            "wait_state": None,
+            "wait_stage": None,
+            "wait_label": None,
+            "wait_retry_after_seconds": None,
+            "progress_source_id": None,
+            "progress_source_display_name": None,
+            "progress_source_book_number": None,
+        },
+    )
+
+    checkpoint = ingestion_engine.get_checkpoint_info("world-1")
+
+    assert checkpoint["can_resume"] is True
+    assert checkpoint["source_id"] == "source-b"
+    assert checkpoint["reason"] == "pending_work"
 
 
 def test_checkpoint_includes_blocking_issues_without_fake_failures(monkeypatch):
@@ -627,7 +838,7 @@ def test_retry_endpoint_rejects_when_only_stale_failures_exist(monkeypatch):
     monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
     monkeypatch.setattr(ingestion_router, "has_active_ingestion_run", lambda world_id: False)
     monkeypatch.setattr(ingestion_router, "audit_ingestion_integrity", fake_audit)
-    monkeypatch.setattr(ingestion_router, "list_safety_reviews", lambda world_id: [])
+    monkeypatch.setattr(ingestion_router, "get_unresolved_safety_review_chunk_ids", lambda world_id: set())
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
@@ -640,6 +851,101 @@ def test_retry_endpoint_rejects_when_only_stale_failures_exist(monkeypatch):
 
     assert exc.value.status_code == 400
     assert exc.value.detail == "No retryable failures for the requested stage."
+
+
+def test_retry_endpoint_rejects_when_only_unresolved_safety_queue_embedding_failures_exist(monkeypatch):
+    chunk_id = "chunk_world-1_source-a_1"
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "status": "partial_failure",
+                "failed_chunks": [1],
+                "stage_failures": [
+                    {"stage": "embedding", "chunk_index": 1, "chunk_id": chunk_id},
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(
+        ingestion_router,
+        "audit_ingestion_integrity",
+        lambda world_id, synthesize_failures=True, persist=True: {
+            "world": {"failed_records": 1},
+            "failures": list(meta["sources"][0]["stage_failures"]),
+        },
+    )
+    monkeypatch.setattr(
+        ingestion_router,
+        "get_unresolved_safety_review_chunk_ids",
+        lambda world_id: {chunk_id},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ingestion_router.ingest_retry(
+                "world-1",
+                ingestion_router.IngestRetryRequest(stage="all"),
+                BackgroundTasks(),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "These failures are already in the Safety Queue. Edit and test those chunks there instead of retrying them from source."
+
+
+def test_retry_endpoint_keeps_non_queue_failures_when_queue_owned_failures_are_skipped(monkeypatch):
+    queue_chunk_id = "chunk_world-1_source-a_1"
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "status": "partial_failure",
+                "failed_chunks": [1, 2],
+                "stage_failures": [
+                    {"stage": "embedding", "chunk_index": 1, "chunk_id": queue_chunk_id},
+                    {"stage": "extraction", "chunk_index": 2, "chunk_id": "chunk_world-1_source-a_2"},
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(
+        ingestion_router,
+        "audit_ingestion_integrity",
+        lambda world_id, synthesize_failures=True, persist=True: {
+            "world": {"failed_records": 2},
+            "failures": list(meta["sources"][0]["stage_failures"]),
+        },
+    )
+    monkeypatch.setattr(
+        ingestion_router,
+        "get_unresolved_safety_review_chunk_ids",
+        lambda world_id: {queue_chunk_id},
+    )
+
+    result = asyncio.run(
+        ingestion_router.ingest_retry(
+            "world-1",
+            ingestion_router.IngestRetryRequest(stage="all"),
+            BackgroundTasks(),
+        )
+    )
+
+    assert result["status"] == "accepted"
+    assert result["skipped_safety_review_chunks"] == 1
+    assert result["retry_notice"] == "Skipped 1 failure(s) that are already in the Safety Queue. Edit and test those chunks from the review panel instead."
 
 
 def test_recover_stale_ingestion_marks_partial_failure_when_embeddings_are_missing(monkeypatch):
@@ -828,6 +1134,55 @@ def test_start_endpoint_allows_stale_in_progress_world_once_recovered(monkeypatc
     )
 
     assert result["status"] == "accepted"
+
+
+def test_start_endpoint_rejects_resume_when_only_safety_queue_work_remains(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "status": "partial_failure",
+                "failed_chunks": [1],
+                "stage_failures": [
+                    {"stage": "embedding", "chunk_index": 1, "chunk_id": "chunk_world-1_source-a_1"},
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "recover_stale_ingestion", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(
+        ingestion_router,
+        "audit_ingestion_integrity",
+        lambda world_id, synthesize_failures=True, persist=True: {
+            "world": {"failed_records": 1},
+            "failures": list(meta["sources"][0]["stage_failures"]),
+        },
+    )
+    monkeypatch.setattr(ingestion_router, "get_actionable_resume_sources", lambda world_id, sources=None: [])
+    monkeypatch.setattr(
+        ingestion_router,
+        "get_safety_review_summary",
+        lambda world_id: {"total_reviews": 1, "unresolved_reviews": 1},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ingestion_router.ingest_start(
+                "world-1",
+                ingestion_router.IngestStartRequest(resume=True),
+                BackgroundTasks(),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == (
+        "Resume is unavailable because the remaining failed chunks are already in the Safety Queue. "
+        "Continue testing or fixing them there instead."
+    )
 
 
 def test_start_endpoint_still_rejects_true_live_run(monkeypatch):

@@ -130,9 +130,9 @@ Important behavior:
 
 ## Ingestion Settings
 
-The main ingest page now shows a read-only snapshot of the current world's saved ingest settings.
+Brand-new worlds now show an inline `Ingestion Setup` editor on the main ingest page before the first run starts.
 
-Editable ingest settings live in the `Re-ingest` popup opened from the main ingest page.
+After a world has ingest history, the main ingest page switches back to a read-only snapshot and editable settings move into the `Re-ingest` popup.
 
 That popup lets you change:
 
@@ -161,15 +161,16 @@ What they mean:
 
 Important behavior:
 
-- The main ingest page is now a read-only snapshot of the world's saved settings and effective prompts
-- Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup popup
-- Starting `Re-ingest` from that popup saves the edited settings as the world's new defaults before the rebuild begins
+- Brand-new worlds can edit settings and prompts inline before the first ingest starts
+- Once a world has resumable or completed ingest history, the main page returns to a read-only snapshot of the world's saved settings and effective prompts
+- Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup popup for rebuilds
+- Starting either the first ingest or `Re-ingest` with edited values saves those settings as the world's new defaults
 
 ## Prompt Snapshot
 
-The main ingest page now shows a read-only `Prompt Snapshot` for the current world.
+Brand-new worlds can edit prompt overrides inline before the first ingest starts.
 
-If you want to change these prompts for a rebuild, use the `Re-ingest` popup.
+After the first ingest, the main page shows a read-only `Prompt Snapshot`, and rebuild-time prompt edits move to the `Re-ingest` popup.
 
 Graph Architect Prompt:
 
@@ -207,9 +208,9 @@ Basic flow:
 
 1. Add one or more `.txt` files.
 2. Expand `Books in This World` if you want to review the current source list from the left column.
-3. Review the world's current ingest snapshot and prompt snapshot.
+3. For a brand-new world, review and edit the inline `Ingestion Setup` panel before starting the first run.
 4. Click `Start Ingestion` for a brand-new world, `Resume` for pending/resumable work, or `Re-ingest` for a full rebuild.
-5. If you want new chunk settings or world-specific prompt changes before a full rebuild, open the `Re-ingest` popup from the settings icon next to `Re-ingest`.
+5. After a world has ingest history, use the `Re-ingest` popup from the settings icon next to `Re-ingest` when you want different chunk settings or world-specific prompt changes for a rebuild.
 
 Reading the ingest progress header:
 
@@ -293,11 +294,12 @@ Important behavior:
 
 - `Resume` is the normal path when you simply add another new source after a previous ingest
 - If the failure-help box appears, the normal order is `Resume` -> `Retry All Failures` -> `Add failed chunks to Safety Queue` -> `Fix Safety Queue`
+- `Resume` only appears when there is still non-Safety-Queue ingest work left to run; if only Safety Queue items remain, keep working there instead
 - When you add or remove pending sources, the ingest action area now refreshes immediately so `Resume`, `Re-ingest`, and completion state stay in sync without leaving the page
 - `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
 - `Re-embed All` can reuse active repaired chunk bodies when its locked-source checks still pass
 - `Re-ingest` can also reuse repaired chunk bodies, but only when chunk size and overlap stay the same and you leave repaired-chunk reuse enabled
-- `Retry All Failures` only appears when there are actual failed records to retry, so no button usually means the current world has no failures
+- `Retry All Failures` only appears when there are actual failed records outside the Safety Queue to retry, so no button can also mean the remaining failures already belong to the Safety Queue
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
 - `Add failed chunks to Safety Queue` is a manual fallback for stubborn extraction failures that still need repair work after `Resume` and `Retry All Failures`
 - That action is only for the current world and current failed chunks; it moves those failed chunks into the Safety Queue for editing and does not teach future ingests to always treat them as safety-blocked

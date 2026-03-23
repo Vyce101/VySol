@@ -122,10 +122,11 @@ Important behavior:
 - `Re-embed All` is blocked if a previously ingested source is missing, changed, partially ingested, failed, or comes from an older world that predates stored source snapshots
 - `Re-embed All` reuses active repaired chunk bodies when the locked source snapshot and chunk map still match, so repaired text stays aligned with rebuilt vectors
 - `Re-ingest` is now the single full rebuild path for chunks, extraction, graph data, and vectors
-- The main ingest page keeps the current world's ingest settings and prompt values as a read-only snapshot
-- A `Re-ingest` popup on the main ingest page lets you edit world-local chunk settings, glean amount, embedding model, and the ingest/entity-resolution prompts before starting a rebuild
+- Brand-new worlds now expose an inline first-run setup editor on the main ingest page so users can change chunk settings, glean amount, embedding model, and ingest/entity-resolution prompts before the first ingest starts
+- After a world has ingest history, the main ingest page keeps the current world's ingest settings and prompt values as a read-only snapshot
+- A `Re-ingest` popup on the main ingest page lets you edit those same world-local settings and prompts before starting a rebuild
 - Each prompt editor in that popup is collapsible so you can expand only the prompt you need
-- Starting `Re-ingest` from that popup saves those values as the world's new saved defaults before the rebuild begins
+- Starting either the first ingest or `Re-ingest` with edited values saves those values as the world's new saved defaults before the run begins
 - If repaired chunk overrides exist, `Re-ingest` can optionally reuse them, but only when chunk size and overlap stay the same
 
 ## Stable Ingest Progress
@@ -159,8 +160,9 @@ Important behavior:
 - `Reset` always restores the original source chunk, not your last attempted edit
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
-- Retry actions skip unresolved safety-review chunks so they do not silently fall back to original source text
+- Retry and resume actions skip unresolved Safety Queue chunks so they do not silently fall back to original source text
 - The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items
+- If the only remaining failed chunks already belong to the Safety Queue, the main ingest page stops showing `Resume` and `Retry All Failures` and points you back to the queue instead
 - `Add failed chunks to Safety Queue` is world-local and temporary; it moves stubborn failed extraction chunks into the review queue for editing when automatic retry paths did not clear them
 - `Re-ingest` can optionally reuse repaired chunk overrides when the chunk map stays the same, and `Re-embed All` continues to respect those repaired chunk bodies when its locked-source checks still pass
 

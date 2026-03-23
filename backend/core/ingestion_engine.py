@@ -912,6 +912,7 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
     testing_reviews = 0
     blocking_unresolved_reviews = 0
     blocking_active_override_reviews = 0
+    unresolved_chunk_ids: list[str] = []
 
     for review in reviews:
         status = str(review.get("status") or "blocked")
@@ -919,6 +920,9 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
             resolved_reviews += 1
         else:
             unresolved_reviews += 1
+            chunk_id = str(review.get("chunk_id") or "").strip()
+            if chunk_id:
+                unresolved_chunk_ids.append(chunk_id)
         if status == "blocked":
             blocked_reviews += 1
         elif status == "draft":
@@ -958,6 +962,7 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
         "blocked_reviews": blocked_reviews,
         "draft_reviews": draft_reviews,
         "testing_reviews": testing_reviews,
+        "unresolved_chunk_ids": sorted(set(unresolved_chunk_ids)),
         "blocks_rebuild": blocks_rebuild,
         "blocking_message": blocking_message,
     }
@@ -1396,6 +1401,80 @@ def _unresolved_safety_review_chunk_ids(world_id: str) -> set[str]:
         for review in cache.get("reviews", [])
         if str(review.get("status") or "") in {"blocked", "draft", "testing"}
     }
+
+
+def get_unresolved_safety_review_chunk_ids(world_id: str) -> set[str]:
+    return _unresolved_safety_review_chunk_ids(world_id)
+
+
+def _matches_unresolved_safety_review_chunk(
+    world_id: str,
+    source: dict,
+    *,
+    unresolved_review_chunk_ids: set[str],
+    chunk_id: str | None = None,
+    chunk_index: int | None = None,
+) -> bool:
+    normalized_chunk_id = str(chunk_id or "").strip()
+    if not normalized_chunk_id and chunk_index is not None:
+        source_id = str(source.get("source_id") or "").strip()
+        if source_id:
+            normalized_chunk_id = _chunk_id(world_id, source_id, int(chunk_index))
+    return bool(normalized_chunk_id and normalized_chunk_id in unresolved_review_chunk_ids)
+
+
+def _source_has_actionable_resume_work(
+    world_id: str,
+    source: dict,
+    *,
+    unresolved_review_chunk_ids: set[str],
+) -> bool:
+    status = str(source.get("status") or "").lower()
+    if status in {"pending", "ingesting"}:
+        return True
+
+    for failure in source.get("stage_failures") or []:
+        if not isinstance(failure, dict):
+            continue
+        try:
+            chunk_index = int(failure.get("chunk_index"))
+        except (TypeError, ValueError, AttributeError):
+            chunk_index = None
+        if _matches_unresolved_safety_review_chunk(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+            chunk_id=str(failure.get("chunk_id") or ""),
+            chunk_index=chunk_index,
+        ):
+            continue
+        return True
+
+    for chunk_index in _normalize_index_list(source.get("failed_chunks", [])):
+        if _matches_unresolved_safety_review_chunk(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+            chunk_index=chunk_index,
+        ):
+            continue
+        return True
+
+    return False
+
+
+def get_actionable_resume_sources(world_id: str, *, sources: list[dict] | None = None) -> list[dict]:
+    source_rows = list(sources if sources is not None else _load_meta(world_id).get("sources", []))
+    unresolved_review_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
+    return [
+        source
+        for source in source_rows
+        if _source_has_actionable_resume_work(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+        )
+    ]
 
 
 def _get_active_override_map(world_id: str) -> dict[str, str]:
@@ -2812,7 +2891,8 @@ def _build_chunk_plan(
 ) -> dict[int, ChunkMode]:
     _ensure_source_tracking(source)
     plan: dict[int, ChunkMode] = {}
-    skipped_extraction_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
+    unresolved_review_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
+    skipped_review_chunk_indices: set[int] = set()
 
     if reembed_all:
         return {idx: "embedding_only" for idx in range(max(0, chunks_total))}
@@ -2826,6 +2906,14 @@ def _build_chunk_plan(
 
     if resume and source.get("failed_chunks") and not source.get("stage_failures"):
         for idx in _normalize_index_list(source.get("failed_chunks", []), max_index=chunks_total - 1):
+            if _matches_unresolved_safety_review_chunk(
+                world_id,
+                source,
+                unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+                chunk_index=idx,
+            ):
+                skipped_review_chunk_indices.add(idx)
+                continue
             plan[idx] = "full_cleanup"
 
     stage_failures = _stage_failures_for(source, retry_stage)
@@ -2839,9 +2927,16 @@ def _build_chunk_plan(
         if idx < 0 or idx >= chunks_total:
             continue
         stage = str(rec.get("stage", "")).lower()
+        if _matches_unresolved_safety_review_chunk(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+            chunk_id=str(rec.get("chunk_id") or ""),
+            chunk_index=idx,
+        ):
+            skipped_review_chunk_indices.add(idx)
+            continue
         if stage == "extraction":
-            if str(rec.get("chunk_id") or "") in skipped_extraction_chunk_ids:
-                continue
             extraction_failed.add(idx)
         elif stage == "embedding":
             embedding_failed.add(idx)
@@ -2851,6 +2946,8 @@ def _build_chunk_plan(
     for idx in embedding_failed:
         if plan.get(idx) != "full_cleanup":
             plan[idx] = "embedding_only"
+    for idx in skipped_review_chunk_indices:
+        plan.pop(idx, None)
 
     return {idx: plan[idx] for idx in sorted(plan.keys())}
 
@@ -3871,16 +3968,9 @@ def get_checkpoint_info(world_id: str) -> dict:
         aborting=bool(meta.get("ingestion_abort_requested_at")),
     )
     safety_review_summary = get_safety_review_summary(world_id)
+    actionable_resume_sources = get_actionable_resume_sources(world_id, sources=sources)
 
-    retryable_sources = [
-        s
-        for s in sources
-        if s.get("status") in ("pending", "ingesting", "partial_failure")
-        or s.get("failed_chunks")
-        or s.get("stage_failures")
-    ]
-
-    if not retryable_sources:
+    if not actionable_resume_sources:
         return {
             "can_resume": False,
             "chunk_index": 0,
@@ -3894,7 +3984,7 @@ def get_checkpoint_info(world_id: str) -> dict:
         }
 
     try:
-        source = cp_source if cp_source in retryable_sources else retryable_sources[0]
+        source = cp_source if cp_source in actionable_resume_sources else actionable_resume_sources[0]
         failed_chunks = _normalize_index_list(source.get("failed_chunks", []))
         chunks_total = int(source.get("chunk_count") or (cp.get("chunks_total", 0) if cp else 0))
         cp_completed = (int(cp.get("last_completed_chunk_index", -1)) + 1) if cp else 0

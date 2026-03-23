@@ -23,12 +23,13 @@ from core.ingestion_engine import (
     abort_ingestion,
     discard_safety_review,
     drain_sse_events,
+    get_actionable_resume_sources,
     get_reembed_eligibility,
     get_checkpoint_info,
     get_safety_review_rebuild_guard,
     get_safety_review_summary,
+    get_unresolved_safety_review_chunk_ids,
     has_active_ingestion_run,
-    list_safety_reviews,
     manual_rescue_safety_reviews,
     recover_stale_ingestion,
     start_ingestion,
@@ -179,14 +180,17 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
     if req.resume and operation == "default":
         audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
         meta = _load_meta(world_id)
-        has_work = any(
-            s["status"] in ("pending", "ingesting", "partial_failure")
-            or s.get("failed_chunks")
-            or s.get("stage_failures")
-            for s in meta.get("sources", [])
-        )
-        if not has_work:
-            # Check if there's a checkpoint to resume from
+        actionable_sources = get_actionable_resume_sources(world_id, sources=meta.get("sources", []))
+        if not actionable_sources:
+            summary = get_safety_review_summary(world_id)
+            if int(summary.get("unresolved_reviews") or 0) > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Resume is unavailable because the remaining failed chunks are already in the Safety Queue. "
+                        "Continue testing or fixing them there instead."
+                    ),
+                )
             cp = get_checkpoint_info(world_id)
             if not cp.get("can_resume"):
                 raise HTTPException(status_code=400, detail="No pending sources to ingest and no resumable checkpoint.")
@@ -222,11 +226,7 @@ async def ingest_retry(world_id: str, req: IngestRetryRequest, bg: BackgroundTas
         if not sources:
             raise HTTPException(status_code=404, detail="Source not found for this world.")
 
-    unresolved_review_chunk_ids = {
-        str(review.get("chunk_id") or "")
-        for review in list_safety_reviews(world_id)
-        if str(review.get("status") or "") in {"blocked", "draft", "testing"}
-    }
+    unresolved_review_chunk_ids = get_unresolved_safety_review_chunk_ids(world_id)
     retryable_failures: list[dict] = []
     skipped_safety_review_failures: list[dict] = []
     for source in sources:
@@ -239,7 +239,7 @@ async def ingest_retry(world_id: str, req: IngestRetryRequest, bg: BackgroundTas
                     continue
             elif failure_stage != stage:
                 continue
-            if failure_stage == "extraction" and str(failure.get("chunk_id") or "") in unresolved_review_chunk_ids:
+            if str(failure.get("chunk_id") or "") in unresolved_review_chunk_ids:
                 skipped_safety_review_failures.append(failure)
                 continue
             retryable_failures.append(failure)
@@ -247,7 +247,7 @@ async def ingest_retry(world_id: str, req: IngestRetryRequest, bg: BackgroundTas
     if not retryable_failures and skipped_safety_review_failures:
         raise HTTPException(
             status_code=400,
-            detail="These extraction failures are already in the Safety Review queue. Edit and test those chunks there instead of retrying them from source.",
+            detail="These failures are already in the Safety Queue. Edit and test those chunks there instead of retrying them from source.",
         )
     if not retryable_failures:
         raise HTTPException(status_code=400, detail="No retryable failures for the requested stage.")
@@ -257,7 +257,7 @@ async def ingest_retry(world_id: str, req: IngestRetryRequest, bg: BackgroundTas
     retry_notice = None
     if skipped_count > 0:
         retry_notice = (
-            f"Skipped {skipped_count} extraction failure(s) that are already in the Safety Review queue. "
+            f"Skipped {skipped_count} failure(s) that are already in the Safety Queue. "
             "Edit and test those chunks from the review panel instead."
         )
     return {
