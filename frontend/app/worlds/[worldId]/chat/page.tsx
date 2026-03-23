@@ -2,9 +2,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { Children, cloneElement, isValidElement, useState, useEffect, useRef, use, useMemo } from "react";
+import { Children, cloneElement, isValidElement, memo, useState, useEffect, useRef, use, useMemo } from "react";
 import { Send, Loader2, ChevronRight, ChevronLeft, AlertTriangle, Trash2, Info, MessageSquare, Plus, MoreVertical, Edit2, RefreshCw, X, Check } from "lucide-react";
 import { ApiError, apiFetch, apiStreamPost } from "@/lib/api";
+import * as Accordion from "@radix-ui/react-accordion";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -242,7 +243,7 @@ const markdownComponents = {
     ),
 };
 
-function ChatMessageMarkdown({ content }: { content: string }) {
+const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { content: string }) {
     return (
         <ReactMarkdown
             components={markdownComponents}
@@ -252,6 +253,560 @@ function ChatMessageMarkdown({ content }: { content: string }) {
             {content}
         </ReactMarkdown>
     );
+});
+
+interface ChatMessageBubbleProps {
+    msg: Message;
+    index: number;
+    isHovered: boolean;
+    isMenuOpen: boolean;
+    isEditing: boolean;
+    editContent?: string;
+    editBubbleHeight?: number;
+    showStreamingCursor: boolean;
+    onHoverChange: (index: number | null) => void;
+    onToggleMenu: (index: number) => void;
+    onStartEditing: (index: number, content: string) => void;
+    onEditContentChange: (value: string) => void;
+    onCancelEditing: () => void;
+    onSaveEdit: (index: number) => void;
+    onRegenerate: (index: number) => void;
+    onDelete: (index: number) => void;
+    onOpenContext: (payload: any, meta?: any) => void;
+    onMessageBubbleRef: (index: number, element: HTMLDivElement | null) => void;
+}
+
+const ChatMessageBubble = memo(function ChatMessageBubble({
+    msg,
+    index,
+    isHovered,
+    isMenuOpen,
+    isEditing,
+    editContent,
+    editBubbleHeight,
+    showStreamingCursor,
+    onHoverChange,
+    onToggleMenu,
+    onStartEditing,
+    onEditContentChange,
+    onCancelEditing,
+    onSaveEdit,
+    onRegenerate,
+    onDelete,
+    onOpenContext,
+    onMessageBubbleRef,
+}: ChatMessageBubbleProps) {
+    return (
+        <div
+            style={{
+                display: "flex",
+                width: "100%",
+                marginBottom: 16,
+                position: "relative",
+                padding: "0 20px",
+            }}
+            onMouseEnter={() => onHoverChange(index)}
+            onMouseLeave={() => onHoverChange(null)}
+        >
+            <div
+                style={{
+                    width: "100%",
+                    maxWidth: "100%",
+                    display: "flex",
+                    flexDirection: msg.role === "user" ? "row-reverse" : "row",
+                    alignItems: "flex-start",
+                    gap: 0,
+                }}
+            >
+                {isEditing ? (
+                    <div
+                        style={{
+                            position: "relative",
+                            padding: "16px 40px",
+                            borderRadius: "var(--radius)",
+                            background: msg.role === "user" ? "var(--primary)" : "var(--card)",
+                            border: msg.role === "model" ? "1px solid var(--border)" : "none",
+                            color: msg.role === "user" ? "white" : "var(--text-primary)",
+                            fontSize: 14,
+                            lineHeight: 1.6,
+                            width: "100%",
+                            height: editBubbleHeight ?? 140,
+                        }}
+                    >
+                        <textarea
+                            value={editContent ?? ""}
+                            onChange={(e) => onEditContentChange(e.target.value)}
+                            style={{
+                                width: "100%",
+                                height: "100%",
+                                resize: "none",
+                                background: "transparent",
+                                border: msg.role === "user" ? "1px solid rgba(255,255,255,0.35)" : "1px solid var(--border)",
+                                padding: "8px 10px 46px 10px",
+                                color: msg.role === "user" ? "white" : "var(--text-primary)",
+                                borderRadius: 4,
+                                fontFamily: "inherit",
+                                lineHeight: 1.6,
+                            }}
+                        />
+                        <div style={{ position: "absolute", right: 48, bottom: 10, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                            <button onClick={onCancelEditing} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-subtle)", cursor: "pointer", fontSize: 12 }}>
+                                <X size={12} /> Cancel
+                            </button>
+                            <button onClick={() => onSaveEdit(index)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", background: "var(--primary)", border: "none", borderRadius: 4, color: "var(--primary-contrast)", cursor: "pointer", fontSize: 12 }}>
+                                <Check size={12} /> Save
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div
+                        style={{
+                            position: "relative",
+                            padding: "16px 40px",
+                            borderRadius: "var(--radius)",
+                            background: msg.role === "user" ? "var(--primary)" : "var(--card)",
+                            border: msg.role === "model" ? "1px solid var(--border)" : "none",
+                            color: msg.role === "user" ? "white" : "var(--text-primary)",
+                            fontSize: 14,
+                            lineHeight: 1.6,
+                            width: "100%",
+                        }}
+                        ref={(element) => onMessageBubbleRef(index, element)}
+                    >
+                        {(isHovered || isMenuOpen) && (
+                            <div
+                                style={{
+                                    position: "absolute",
+                                    top: 12,
+                                    [msg.role === "user" ? "right" : "left"]: 12,
+                                    zIndex: isMenuOpen ? 50 : 10,
+                                }}
+                            >
+                                <button
+                                    onClick={() => onToggleMenu(index)}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        color: msg.role === "user" ? "rgba(255,255,255,0.7)" : "var(--text-muted)",
+                                        cursor: "pointer",
+                                        padding: 4,
+                                        borderRadius: 4,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                    }}
+                                    title="Message options"
+                                >
+                                    <MoreVertical size={16} />
+                                </button>
+
+                                {isMenuOpen && (
+                                    <div
+                                        style={{
+                                            position: "absolute",
+                                            top: 24,
+                                            [msg.role === "user" ? "right" : "left"]: 0,
+                                            background: "var(--card)",
+                                            border: "1px solid var(--border)",
+                                            borderRadius: 6,
+                                            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+                                            zIndex: 50,
+                                            padding: 4,
+                                            minWidth: 120,
+                                            display: "flex",
+                                            flexDirection: "column",
+                                            gap: 2,
+                                            color: "var(--text-primary)",
+                                        }}
+                                    >
+                                        <ActionMenuItem icon={<Edit2 size={13} />} label="Edit" onClick={() => onStartEditing(index, msg.content)} />
+                                        <ActionMenuItem icon={<RefreshCw size={13} />} label={msg.status === "incomplete" ? "Continue" : "Regenerate"} onClick={() => onRegenerate(index)} />
+                                        {msg.contextPayload && (
+                                            <ActionMenuItem icon={<Info size={13} />} label="Context" onClick={() => onOpenContext(msg.contextPayload, msg.contextMeta)} />
+                                        )}
+                                        <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+                                        <ActionMenuItem icon={<Trash2 size={13} />} label="Delete" onClick={() => onDelete(index)} danger />
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <div
+                            style={{ overflowWrap: "break-word" }}
+                            className={`markdown-content ${msg.role === "user" ? "markdown-content-user" : "markdown-content-model"}`}
+                        >
+                            {(msg.role === "model" || msg.role === "user") ? (
+                                <ChatMessageMarkdown content={msg.content} />
+                            ) : (
+                                msg.content
+                            )}
+                        </div>
+
+                        {msg.role === "model" && msg.status === "incomplete" && (
+                            <div style={{ marginTop: 10, fontSize: 12, color: "var(--status-progress-fg)", display: "flex", alignItems: "center", gap: 6 }}>
+                                <AlertTriangle size={12} /> Interrupted reply. Use Continue to retry from the last user turn.
+                            </div>
+                        )}
+
+                        {showStreamingCursor && (
+                            <span style={{ display: "inline-block", width: 6, height: 16, background: "var(--primary)", marginLeft: 2, animation: "pulse-glow 1s infinite" }} />
+                        )}
+
+                        {msg.nodesUsed && msg.nodesUsed.length > 0 && (
+                            <details style={{ marginTop: 8, fontSize: 12, color: "var(--text-subtle)" }}>
+                                <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                                    <Info size={12} /> {msg.nodesUsed.length} nodes used
+                                </summary>
+                                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                    {msg.nodesUsed.map((n, j) => (
+                                        <span
+                                            key={j}
+                                            style={{
+                                                padding: "2px 8px",
+                                                borderRadius: 9999,
+                                                background: "var(--background)",
+                                                border: "1px solid var(--border)",
+                                                fontSize: 11,
+                                                color: "var(--text-primary)",
+                                            }}
+                                        >
+                                            {n.display_name}
+                                        </span>
+                                    ))}
+                                </div>
+                            </details>
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}, (prev, next) => (
+    prev.msg === next.msg
+    && prev.index === next.index
+    && prev.isHovered === next.isHovered
+    && prev.isMenuOpen === next.isMenuOpen
+    && prev.isEditing === next.isEditing
+    && prev.editContent === next.editContent
+    && prev.editBubbleHeight === next.editBubbleHeight
+    && prev.showStreamingCursor === next.showStreamingCursor
+));
+
+interface ChatMessageListProps {
+    messages: Message[];
+    hoveredMsgIndex: number | null;
+    menuOpenIndex: number | null;
+    editingIndex: number | null;
+    editContent: string;
+    editBubbleHeight: number;
+    streaming: boolean;
+    messagesEndRef: React.RefObject<HTMLDivElement | null>;
+    onHoverChange: (index: number | null) => void;
+    onToggleMenu: (index: number) => void;
+    onStartEditing: (index: number, content: string) => void;
+    onEditContentChange: (value: string) => void;
+    onCancelEditing: () => void;
+    onSaveEdit: (index: number) => void;
+    onRegenerate: (index: number) => void;
+    onDelete: (index: number) => void;
+    onOpenContext: (payload: any, meta?: any) => void;
+    onMessageBubbleRef: (index: number, element: HTMLDivElement | null) => void;
+}
+
+const ChatMessageList = memo(function ChatMessageList({
+    messages,
+    hoveredMsgIndex,
+    menuOpenIndex,
+    editingIndex,
+    editContent,
+    editBubbleHeight,
+    streaming,
+    messagesEndRef,
+    onHoverChange,
+    onToggleMenu,
+    onStartEditing,
+    onEditContentChange,
+    onCancelEditing,
+    onSaveEdit,
+    onRegenerate,
+    onDelete,
+    onOpenContext,
+    onMessageBubbleRef,
+}: ChatMessageListProps) {
+    if (messages.length === 0) {
+        return (
+            <>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)" }}>
+                    <MessageSquare size={48} style={{ marginBottom: 12, opacity: 0.3 }} />
+                    <p>Ask a question about your world</p>
+                    <p style={{ fontSize: 13 }}>Press Ctrl+Enter to send</p>
+                </div>
+                <div ref={messagesEndRef} />
+            </>
+        );
+    }
+
+    return (
+        <>
+            {messages.map((msg, index) => {
+                const isEditing = editingIndex === index;
+                return (
+                    <ChatMessageBubble
+                        key={msg.messageId || index}
+                        msg={msg}
+                        index={index}
+                        isHovered={hoveredMsgIndex === index}
+                        isMenuOpen={menuOpenIndex === index}
+                        isEditing={isEditing}
+                        editContent={isEditing ? editContent : undefined}
+                        editBubbleHeight={isEditing ? editBubbleHeight : undefined}
+                        showStreamingCursor={msg.role === "model" && (msg.status === "streaming" || (streaming && index === messages.length - 1))}
+                        onHoverChange={onHoverChange}
+                        onToggleMenu={onToggleMenu}
+                        onStartEditing={onStartEditing}
+                        onEditContentChange={onEditContentChange}
+                        onCancelEditing={onCancelEditing}
+                        onSaveEdit={onSaveEdit}
+                        onRegenerate={onRegenerate}
+                        onDelete={onDelete}
+                        onOpenContext={onOpenContext}
+                        onMessageBubbleRef={onMessageBubbleRef}
+                    />
+                );
+            })}
+            <div ref={messagesEndRef} />
+        </>
+    );
+}, (prev, next) => (
+    prev.messages === next.messages
+    && prev.hoveredMsgIndex === next.hoveredMsgIndex
+    && prev.menuOpenIndex === next.menuOpenIndex
+    && prev.editingIndex === next.editingIndex
+    && prev.editContent === next.editContent
+    && prev.editBubbleHeight === next.editBubbleHeight
+    && prev.streaming === next.streaming
+));
+
+interface ChatComposerProps {
+    draftKey: string;
+    streaming: boolean;
+    onSend: (draft: string) => Promise<boolean>;
+}
+
+function ChatComposer({ draftKey, streaming, onSend }: ChatComposerProps) {
+    const [draft, setDraft] = useState("");
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+    useEffect(() => {
+        setDraft("");
+        if (textareaRef.current) {
+            textareaRef.current.style.height = "auto";
+        }
+    }, [draftKey]);
+
+    const handleComposerSend = async () => {
+        if (streaming || !draft.trim()) return;
+        const sent = await onSend(draft);
+        if (!sent) return;
+        setDraft("");
+        if (textareaRef.current) {
+            textareaRef.current.style.height = "auto";
+        }
+    };
+
+    return (
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", background: "var(--card)" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", maxWidth: 900, margin: "0 auto" }}>
+                <textarea
+                    ref={textareaRef}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                            e.preventDefault();
+                            void handleComposerSend();
+                        }
+                    }}
+                    placeholder="Ask about your world... (Ctrl+Enter to send)"
+                    rows={1}
+                    style={{
+                        flex: 1,
+                        resize: "none",
+                        maxHeight: 150,
+                        padding: "10px 14px",
+                        minHeight: 44,
+                    }}
+                    onInput={(e) => {
+                        const element = e.target as HTMLTextAreaElement;
+                        element.style.height = "auto";
+                        element.style.height = `${Math.min(element.scrollHeight, 150)}px`;
+                    }}
+                />
+                <button
+                    onClick={() => { void handleComposerSend(); }}
+                    disabled={streaming || !draft.trim()}
+                    style={{
+                        background: "var(--primary)",
+                        color: "var(--primary-contrast)",
+                        border: "none",
+                        borderRadius: "var(--radius)",
+                        padding: "10px 14px",
+                        cursor: "pointer",
+                        opacity: streaming || !draft.trim() ? 0.5 : 1,
+                        transition: "opacity 0.2s",
+                    }}
+                >
+                    {streaming ? <Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} /> : <Send size={18} />}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+type SettingsSectionId = "general" | "chunk" | "graph" | "prompt";
+
+interface ChatSettingsSidebarProps {
+    topK: number;
+    entryTopK: number;
+    hops: number;
+    maxNodes: number;
+    chatPrompt: string;
+    promptSource: string;
+    searchContextMsgs: number;
+    chatHistoryMsgs: number;
+    openSections: SettingsSectionId[];
+    onOpenSectionsChange: React.Dispatch<React.SetStateAction<SettingsSectionId[]>>;
+    onTopKChange: (value: number) => void;
+    onEntryTopKChange: (value: number) => void;
+    onHopsChange: (value: number) => void;
+    onMaxNodesChange: (value: number) => void;
+    onSearchContextMsgsChange: (value: number) => void;
+    onChatHistoryMsgsChange: (value: number) => void;
+    onChatPromptChange: (value: string) => void;
+    onSaveChatPrompt: () => void;
+    onResetChatPrompt: () => void;
+}
+
+function ChatSettingsSidebar({
+    topK,
+    entryTopK,
+    hops,
+    maxNodes,
+    chatPrompt,
+    promptSource,
+    searchContextMsgs,
+    chatHistoryMsgs,
+    openSections,
+    onOpenSectionsChange,
+    onTopKChange,
+    onEntryTopKChange,
+    onHopsChange,
+    onMaxNodesChange,
+    onSearchContextMsgsChange,
+    onChatHistoryMsgsChange,
+    onChatPromptChange,
+    onSaveChatPrompt,
+    onResetChatPrompt,
+}: ChatSettingsSidebarProps) {
+    return (
+        <div style={{
+            width: 320, borderLeft: "1px solid var(--border)", background: "var(--card)",
+            overflowY: "auto", padding: 20, flexShrink: 0,
+        }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-subtle)" }}>
+                Retrieval Settings
+            </h3>
+
+            <Accordion.Root type="multiple" value={openSections} onValueChange={(value) => onOpenSectionsChange(value as SettingsSectionId[])} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <SettingsAccordionSection value="general" title="General Settings" isOpen={openSections.includes("general")}>
+                    <SliderField label="Vector Query (Msgs)" value={searchContextMsgs} min={1} max={10} onChange={onSearchContextMsgsChange} />
+                    <SliderField label="Chat History Context (Msgs)" value={chatHistoryMsgs} min={1} max={20} onChange={onChatHistoryMsgsChange} />
+                </SettingsAccordionSection>
+
+                <SettingsAccordionSection value="chunk" title="Chunk Settings" isOpen={openSections.includes("chunk")}>
+                    <SliderField label="Top K Chunks" value={topK} min={1} max={20} onChange={onTopKChange} />
+                </SettingsAccordionSection>
+
+                <SettingsAccordionSection value="graph" title="Graph Settings" isOpen={openSections.includes("graph")}>
+                    <SliderField label="Entry Nodes" value={entryTopK} min={1} max={20} onChange={onEntryTopKChange} />
+                    <SliderField label="Graph Hops" value={hops} min={0} max={5} onChange={onHopsChange} />
+                    <SliderField label="Max Graph Nodes" value={maxNodes} min={5} max={100} onChange={onMaxNodesChange} />
+                </SettingsAccordionSection>
+
+                <SettingsAccordionSection value="prompt" title="Prompt" isOpen={openSections.includes("prompt")}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <span style={{ fontSize: 13, fontWeight: 500 }}>Chat System Prompt</span>
+                        <span style={{
+                            fontSize: 11, padding: "2px 8px", borderRadius: 9999, fontWeight: 500,
+                            background: promptSource === "custom" ? "var(--primary-soft-strong)" : "var(--status-pending-bg)",
+                            color: promptSource === "custom" ? "var(--primary-light)" : "var(--status-pending-fg)",
+                        }}>
+                            {promptSource}
+                        </span>
+                    </div>
+                    <textarea
+                        value={chatPrompt}
+                        onChange={(e) => onChatPromptChange(e.target.value)}
+                        rows={6}
+                        style={{ width: "100%", resize: "vertical", fontSize: 12, minHeight: 100 }}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button onClick={onSaveChatPrompt} style={{ flex: 1, padding: "6px 12px", background: "var(--primary)", color: "var(--primary-contrast)", border: "none", borderRadius: "var(--radius)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                            Save
+                        </button>
+                        <button onClick={onResetChatPrompt} style={{ flex: 1, padding: "6px 12px", background: "var(--border)", color: "var(--text-subtle)", border: "none", borderRadius: "var(--radius)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                            Reset
+                        </button>
+                    </div>
+                </SettingsAccordionSection>
+            </Accordion.Root>
+        </div>
+    );
+}
+
+function SettingsAccordionSection({
+    value,
+    title,
+    isOpen,
+    children,
+}: {
+    value: SettingsSectionId;
+    title: string;
+    isOpen: boolean;
+    children: React.ReactNode;
+}) {
+    return (
+        <Accordion.Item value={value} style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", background: "var(--background)" }}>
+            <Accordion.Header>
+                <Accordion.Trigger
+                    style={{
+                        width: "100%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "14px 16px",
+                        background: "transparent",
+                        border: "none",
+                        color: "var(--text-primary)",
+                        cursor: "pointer",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        letterSpacing: "0.04em",
+                        textTransform: "uppercase",
+                    }}
+                >
+                    <span>{title}</span>
+                    <ChevronRight size={16} style={{ color: "var(--text-muted)", transform: isOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }} />
+                </Accordion.Trigger>
+            </Accordion.Header>
+            <Accordion.Content style={{ padding: "0 16px 16px" }}>
+                <div style={{ paddingTop: 4 }}>
+                    {children}
+                </div>
+            </Accordion.Content>
+        </Accordion.Item>
+    );
 }
 
 export default function ChatPage({ params }: { params: Promise<{ worldId: string }> }) {
@@ -259,7 +814,6 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [threads, setThreads] = useState<ChatThread[]>([]);
     const [activeChatId, setActiveChatId] = useState<string | null>(null);
     const [chatStates, setChatStates] = useState<Record<string, ChatThreadState>>({});
-    const [input, setInput] = useState("");
 
     // UI Layout states
     const [threadsOpen, setThreadsOpen] = useState(true);
@@ -284,6 +838,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [promptSource, setPromptSource] = useState("default");
     const [searchContextMsgs, setSearchContextMsgs] = useState(3);
     const [chatHistoryMsgs, setChatHistoryMsgs] = useState(1000);
+    const [openSections, setOpenSections] = useState<SettingsSectionId[]>([]);
 
     // Message action states
     const [hoveredMsgIndex, setHoveredMsgIndex] = useState<number | null>(null);
@@ -667,9 +1222,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         }
     }
 
-    const handleSend = async (customInput?: string, customHistory?: Message[]) => {
-        const textToSend = customInput ?? input;
-        if (!textToSend.trim()) return;
+    const handleSend = async (draft: string, customHistory?: Message[]) => {
+        const textToSend = draft.trim();
+        if (!textToSend) return false;
 
         let currentChatId = activeChatId;
 
@@ -678,12 +1233,12 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             currentChatId = await createNewChat(title);
             if (!currentChatId) {
                 alert("Failed to create chat");
-                return;
+                return false;
             }
         }
 
         const currentState = chatStatesRef.current[currentChatId] ?? createEmptyThreadState();
-        if (currentState.streaming) return;
+        if (currentState.streaming) return false;
 
         const userMsg: Message = { role: "user", content: textToSend, status: "complete" };
         const historyToUse = customHistory ?? currentState.messages;
@@ -697,7 +1252,6 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             streaming: true,
             streamRequestId,
         }));
-        if (customInput === undefined) setInput("");
 
         let accum = "";
         let nodesUsed: Message["nodesUsed"] = [];
@@ -710,7 +1264,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         abortChatStream(currentChatId);
         streamAbortControllersRef.current[currentChatId] = controller;
 
-        await apiStreamPost(
+        void apiStreamPost(
             `/worlds/${worldId}/chats/${currentChatId}/message`,
             {
                 message: userMsg.content,
@@ -801,6 +1355,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             },
             { signal: controller.signal }
         );
+
+        return true;
     };
 
     const deleteMessage = async (index: number) => {
@@ -816,12 +1372,12 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         await saveChatHistory(activeChatId, newMessages);
     };
 
-    const startEditing = (index: number) => {
+    const startEditing = (index: number, content: string) => {
         const bubbleEl = messageBubbleRefs.current[index];
         const measuredHeight = bubbleEl ? Math.ceil(bubbleEl.getBoundingClientRect().height) : 140;
         setEditBubbleHeight(Math.max(90, measuredHeight));
         setEditingIndex(index);
-        setEditContent(messages[index].content);
+        setEditContent(content);
         setMenuOpenIndex(null);
     };
 
@@ -869,13 +1425,6 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             }
         }
         await handleSend(promptToResend, newMessages);
-    };
-
-    const handleKeyDown = (e: React.KeyboardEvent) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-            e.preventDefault();
-            handleSend();
-        }
     };
 
     const saveChatPrompt = async () => {
@@ -1044,225 +1593,46 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                 )}
 
                 {/* Messages */}
-                <div 
+                <div
                     ref={scrollContainerRef}
                     onScroll={handleScroll}
                     style={{ flex: 1, overflowY: "auto", padding: "20px 0" }}
                 >
-                    {messages.length === 0 && (
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)" }}>
-                            <div style={{ fontSize: 48, marginBottom: 12, opacity: 0.3 }}>💬</div>
-                            <p>Ask a question about your world</p>
-                            <p style={{ fontSize: 13 }}>Press Ctrl+Enter to send</p>
-                        </div>
-                    )}
-
-                    {messages.map((msg, i) => (
-                        <div 
-                            key={msg.messageId || i}
-                            style={{
-                                display: "flex",
-                                width: "100%",
-                                marginBottom: 16,
-                                position: "relative",
-                                padding: "0 20px"
-                            }}
-                            onMouseEnter={() => setHoveredMsgIndex(i)}
-                            onMouseLeave={() => setHoveredMsgIndex(null)}
-                        >
-                            <div style={{
-                                width: "100%",
-                                maxWidth: "100%",
-                                display: "flex", 
-                                flexDirection: msg.role === "user" ? "row-reverse" : "row",
-                                alignItems: "flex-start",
-                                gap: 0
-                            }}>
-                                {editingIndex === i ? (
-                                    <div style={{
-                                        position: "relative",
-                                        padding: "16px 40px",
-                                        borderRadius: "var(--radius)",
-                                        background: msg.role === "user" ? "var(--primary)" : "var(--card)",
-                                        border: msg.role === "model" ? "1px solid var(--border)" : "none",
-                                        color: msg.role === "user" ? "white" : "var(--text-primary)",
-                                        fontSize: 14,
-                                        lineHeight: 1.6,
-                                        width: "100%",
-                                        height: editBubbleHeight,
-                                    }}>
-                                        <textarea 
-                                            value={editContent} 
-                                            onChange={e => setEditContent(e.target.value)} 
-                                            style={{
-                                                width: "100%",
-                                                height: "100%",
-                                                resize: "none",
-                                                background: "transparent",
-                                                border: msg.role === "user" ? "1px solid rgba(255,255,255,0.35)" : "1px solid var(--border)",
-                                                padding: "8px 10px 46px 10px",
-                                                color: msg.role === "user" ? "white" : "var(--text-primary)",
-                                                borderRadius: 4,
-                                                fontFamily: "inherit",
-                                                lineHeight: 1.6,
-                                            }}
-                                        />
-                                        <div style={{ position: "absolute", right: 48, bottom: 10, display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                                            <button onClick={() => setEditingIndex(null)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-subtle)", cursor: "pointer", fontSize: 12 }}>
-                                                <X size={12} /> Cancel
-                                            </button>
-                                            <button onClick={() => saveEdit(i)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", background: "var(--primary)", border: "none", borderRadius: 4, color: "var(--primary-contrast)", cursor: "pointer", fontSize: 12 }}>
-                                                <Check size={12} /> Save
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div style={{
-                                        position: "relative",
-                                        padding: "16px 40px",
-                                        borderRadius: "var(--radius)",
-                                        background: msg.role === "user" ? "var(--primary)" : "var(--card)",
-                                        border: msg.role === "model" ? "1px solid var(--border)" : "none",
-                                        color: msg.role === "user" ? "white" : "var(--text-primary)",
-                                        fontSize: 14,
-                                        lineHeight: 1.6,
-                                        width: "100%"
-                                    }}
-                                    ref={(el) => {
-                                        messageBubbleRefs.current[i] = el;
-                                    }}>
-                                        {/* Message Actions Menu Node */}
-                                        {(hoveredMsgIndex === i || menuOpenIndex === i) && editingIndex !== i && (
-                                            <div style={{ 
-                                                position: "absolute",
-                                                top: 12,
-                                                [msg.role === "user" ? "right" : "left"]: 12,
-                                                zIndex: menuOpenIndex === i ? 50 : 10
-                                            }}>
-                                                <button 
-                                                    onClick={() => setMenuOpenIndex(menuOpenIndex === i ? null : i)}
-                                                    style={{ 
-                                                        background: "transparent", border: "none", color: msg.role === "user" ? "rgba(255,255,255,0.7)" : "var(--text-muted)", 
-                                                        cursor: "pointer", padding: 4, borderRadius: 4,
-                                                        display: "flex", alignItems: "center", justifyContent: "center"
-                                                    }}
-                                                    title="Message options"
-                                                >
-                                                    <MoreVertical size={16} />
-                                                </button>
-
-                                                {menuOpenIndex === i && (
-                                                    <div style={{
-                                                        position: "absolute",
-                                                        top: 24,
-                                                        [msg.role === "user" ? "right" : "left"]: 0,
-                                                        background: "var(--card)",
-                                                        border: "1px solid var(--border)",
-                                                        borderRadius: 6,
-                                                        boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-                                                        zIndex: 50,
-                                                        padding: 4,
-                                                        minWidth: 120,
-                                                        display: "flex",
-                                                        flexDirection: "column",
-                                                        gap: 2,
-                                                        color: "var(--text-primary)"
-                                                    }}>
-                                                        <ActionMenuItem icon={<Edit2 size={13} />} label="Edit" onClick={() => startEditing(i)} />
-                                                        <ActionMenuItem icon={<RefreshCw size={13} />} label={msg.status === "incomplete" ? "Continue" : "Regenerate"} onClick={() => regenerateMessage(i)} />
-                                                        {msg.contextPayload && (
-                                                            <ActionMenuItem icon={<Info size={13} />} label="Context" onClick={() => { setContextModalData({ payload: msg.contextPayload, meta: msg.contextMeta }); setContextMetaOpen(false); setContextViewMode("rendered"); setMenuOpenIndex(null); }} />
-                                                        )}
-                                                        <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
-                                                        <ActionMenuItem icon={<Trash2 size={13} />} label="Delete" onClick={() => deleteMessage(i)} danger />
-                                                    </div>
-                                                )}
-                                            </div>
-                                        )}
-
-                                        <div
-                                            style={{ overflowWrap: "break-word" }}
-                                            className={`markdown-content ${msg.role === "user" ? "markdown-content-user" : "markdown-content-model"}`}
-                                        >
-                                            {msg.role === "user" && i === messages.length - 1 && !streaming ? (
-                                                <ChatMessageMarkdown content={msg.content} />
-                                            ) : msg.role === "model" || msg.role === "user" ? (
-                                                <ChatMessageMarkdown content={msg.content} />
-                                            ) : (
-                                                msg.content
-                                            )}
-                                        </div>
-
-                                        {msg.role === "model" && msg.status === "incomplete" && (
-                                            <div style={{ marginTop: 10, fontSize: 12, color: "var(--status-progress-fg)", display: "flex", alignItems: "center", gap: 6 }}>
-                                                <AlertTriangle size={12} /> Interrupted reply. Use Continue to retry from the last user turn.
-                                            </div>
-                                        )}
-                                         
-                                        {msg.role === "model" && (msg.status === "streaming" || (streaming && i === messages.length - 1)) && (
-                                            <span style={{ display: "inline-block", width: 6, height: 16, background: "var(--primary)", marginLeft: 2, animation: "pulse-glow 1s infinite" }} />
-                                        )}
-
-                                        {msg.nodesUsed && msg.nodesUsed.length > 0 && (
-                                            <details style={{ marginTop: 8, fontSize: 12, color: "var(--text-subtle)" }}>
-                                                <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                                                    <Info size={12} /> {msg.nodesUsed.length} nodes used
-                                                </summary>
-                                                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                                    {msg.nodesUsed.map((n, j) => (
-                                                        <span key={j} style={{
-                                                            padding: "2px 8px", borderRadius: 9999, background: "var(--background)",
-                                                            border: "1px solid var(--border)", fontSize: 11,
-                                                            color: "var(--text-primary)"
-                                                        }}>
-                                                            {n.display_name}
-                                                        </span>
-                                                    ))}
-                                                </div>
-                                            </details>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    ))}
-                    <div ref={messagesEndRef} />
+                    <ChatMessageList
+                        messages={messages}
+                        hoveredMsgIndex={hoveredMsgIndex}
+                        menuOpenIndex={menuOpenIndex}
+                        editingIndex={editingIndex}
+                        editContent={editContent}
+                        editBubbleHeight={editBubbleHeight}
+                        streaming={streaming}
+                        messagesEndRef={messagesEndRef}
+                        onHoverChange={setHoveredMsgIndex}
+                        onToggleMenu={(index) => setMenuOpenIndex((current) => (current === index ? null : index))}
+                        onStartEditing={startEditing}
+                        onEditContentChange={setEditContent}
+                        onCancelEditing={() => setEditingIndex(null)}
+                        onSaveEdit={saveEdit}
+                        onRegenerate={(index) => { void regenerateMessage(index); }}
+                        onDelete={(index) => { void deleteMessage(index); }}
+                        onOpenContext={(payload, meta) => {
+                            setContextModalData({ payload, meta });
+                            setContextMetaOpen(false);
+                            setContextViewMode("rendered");
+                            setMenuOpenIndex(null);
+                        }}
+                        onMessageBubbleRef={(index, element) => {
+                            messageBubbleRefs.current[index] = element;
+                        }}
+                    />
                 </div>
 
                 {/* Input */}
-                <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", background: "var(--card)" }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end", maxWidth: 900, margin: "0 auto" }}>
-                        <textarea
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            placeholder="Ask about your world... (Ctrl+Enter to send)"
-                            rows={1}
-                            style={{
-                                flex: 1, resize: "none", maxHeight: 150,
-                                padding: "10px 14px", minHeight: 44,
-                            }}
-                            onInput={(e) => {
-                                const el = e.target as HTMLTextAreaElement;
-                                el.style.height = "auto";
-                                el.style.height = Math.min(el.scrollHeight, 150) + "px";
-                            }}
-                        />
-                        <button
-                            onClick={() => handleSend()}
-                            disabled={streaming || !input.trim()}
-                            style={{
-                                background: "var(--primary)",
-                                color: "var(--primary-contrast)", border: "none",
-                                borderRadius: "var(--radius)", padding: "10px 14px", cursor: "pointer",
-                                opacity: streaming || !input.trim() ? 0.5 : 1,
-                                transition: "opacity 0.2s",
-                            }}
-                        >
-                            {streaming ? <Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} /> : <Send size={18} />}
-                        </button>
-                    </div>
-                </div>
+                <ChatComposer
+                    draftKey={activeChatId ?? "new-chat"}
+                    streaming={streaming}
+                    onSend={handleSend}
+                />
             </div>
 
             {/* Toggle right sidebar */}
@@ -1281,62 +1651,46 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
             {/* Retrieval Settings Sidebar */}
             {sidebarOpen && (
-                <div style={{
-                    width: 320, borderLeft: "1px solid var(--border)", background: "var(--card)",
-                    overflowY: "auto", padding: 20, flexShrink: 0,
-                }}>
-                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-subtle)" }}>
-                        Retrieval Settings
-                    </h3>
-
-                    <SliderField label="Top K Chunks" value={topK} min={1} max={20}
-                        onChange={(v) => { setTopK(v); saveRetrievalSettings({ retrieval_top_k_chunks: v }); }} />
-
-                    <SliderField label="Entry Nodes" value={entryTopK} min={1} max={20}
-                        onChange={(v) => { setEntryTopK(v); saveRetrievalSettings({ retrieval_entry_top_k_nodes: v }); }} />
-
-                    <SliderField label="Graph Hops" value={hops} min={0} max={5}
-                        onChange={(v) => { setHops(v); saveRetrievalSettings({ retrieval_graph_hops: v }); }} />
-
-                    <SliderField label="Max Graph Nodes" value={maxNodes} min={5} max={100}
-                        onChange={(v) => { setMaxNodes(v); saveRetrievalSettings({ retrieval_max_nodes: v }); }} />
-
-                    <SliderField label="Vector Query (Msgs)" value={searchContextMsgs} min={1} max={10}
-                        onChange={(v) => { setSearchContextMsgs(v); saveRetrievalSettings({ retrieval_context_messages: v }); }} />
-
-                    <SliderField label="Chat History Context (Msgs)" value={chatHistoryMsgs} min={1} max={20}
-                        onChange={(v) => { setChatHistoryMsgs(v); saveRetrievalSettings({ chat_history_messages: v }); }} />
-
-                    {/* Chat System Prompt */}
-                    <div style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                            <span style={{ fontSize: 13, fontWeight: 500 }}>Chat System Prompt</span>
-                            <span style={{
-                                fontSize: 11, padding: "2px 8px", borderRadius: 9999, fontWeight: 500,
-                                background: promptSource === "custom" ? "var(--primary-soft-strong)" : "var(--status-pending-bg)",
-                                color: promptSource === "custom" ? "var(--primary-light)" : "var(--status-pending-fg)",
-                            }}>
-                                {promptSource}
-                            </span>
-                        </div>
-                        <textarea
-                            value={chatPrompt}
-                            onChange={(e) => setChatPrompt(e.target.value)}
-                            rows={6}
-                            style={{ width: "100%", resize: "vertical", fontSize: 12, minHeight: 100 }}
-                        />
-                        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                            <button onClick={saveChatPrompt} style={{ flex: 1, padding: "6px 12px", background: "var(--primary)", color: "var(--primary-contrast)", border: "none", borderRadius: "var(--radius)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                                Save
-                            </button>
-                            <button onClick={resetChatPrompt} style={{ flex: 1, padding: "6px 12px", background: "var(--border)", color: "var(--text-subtle)", border: "none", borderRadius: "var(--radius)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                                Reset
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <ChatSettingsSidebar
+                    topK={topK}
+                    entryTopK={entryTopK}
+                    hops={hops}
+                    maxNodes={maxNodes}
+                    chatPrompt={chatPrompt}
+                    promptSource={promptSource}
+                    searchContextMsgs={searchContextMsgs}
+                    chatHistoryMsgs={chatHistoryMsgs}
+                    openSections={openSections}
+                    onOpenSectionsChange={setOpenSections}
+                    onTopKChange={(value) => {
+                        setTopK(value);
+                        saveRetrievalSettings({ retrieval_top_k_chunks: value });
+                    }}
+                    onEntryTopKChange={(value) => {
+                        setEntryTopK(value);
+                        saveRetrievalSettings({ retrieval_entry_top_k_nodes: value });
+                    }}
+                    onHopsChange={(value) => {
+                        setHops(value);
+                        saveRetrievalSettings({ retrieval_graph_hops: value });
+                    }}
+                    onMaxNodesChange={(value) => {
+                        setMaxNodes(value);
+                        saveRetrievalSettings({ retrieval_max_nodes: value });
+                    }}
+                    onSearchContextMsgsChange={(value) => {
+                        setSearchContextMsgs(value);
+                        saveRetrievalSettings({ retrieval_context_messages: value });
+                    }}
+                    onChatHistoryMsgsChange={(value) => {
+                        setChatHistoryMsgs(value);
+                        saveRetrievalSettings({ chat_history_messages: value });
+                    }}
+                    onChatPromptChange={setChatPrompt}
+                    onSaveChatPrompt={() => { void saveChatPrompt(); }}
+                    onResetChatPrompt={() => { void resetChatPrompt(); }}
+                />
             )}
-
             {/* Context Modal */}
             {contextModalData && (
                 <div style={{ position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "var(--overlay-strong)" }} onClick={() => { setContextModalData(null); setContextMetaOpen(false); setContextViewMode("rendered"); }}>

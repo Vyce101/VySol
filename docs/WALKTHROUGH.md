@@ -275,11 +275,25 @@ Important behavior:
 
 Open a world, create a new chat, and use the right-side retrieval settings to tune behavior.
 
-Chat settings:
+The retrieval sidebar is grouped into collapsible sections. All sections start collapsed, and you can open more than one at a time:
+
+`General Settings`
+
+`Vector Query (Msgs)`
+
+- How many recent messages are used to build the retrieval search vector
+
+`Chat History Context (Msgs)`
+
+- How many previous chat messages are sent as chat history context
+
+`Chunk Settings`
 
 `Top K Chunks`
 
 - How many standard chunk matches are sent into chat context
+
+`Graph Settings`
 
 `Entry Nodes`
 
@@ -295,13 +309,7 @@ Chat settings:
 - A hard cap on how many graph nodes can be included
 - Actual returned graph size can still be lower if the selected entry nodes simply do not reach that many unique nodes
 
-`Vector Query (Msgs)`
-
-- How many recent messages are used to build the retrieval search vector
-
-`Chat History Context (Msgs)`
-
-- How many previous chat messages are sent as chat history context
+`Prompt`
 
 `Chat System Prompt`
 

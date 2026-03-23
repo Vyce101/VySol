@@ -15,6 +15,7 @@ flowchart TD
   D --> D1[Chunk Size / Overlap]
   D --> D2[World Embedding Model]
   D --> D3[Graph Architect Glean Amount]
+  D --> D4[World Prompt Overrides + Saved Snapshot]
 
   D --> E[Start Ingestion]
   E --> F[Chunking]
@@ -22,41 +23,46 @@ flowchart TD
   F --> H[Embedding Pipeline]
   G --> G1[Nodes + Edges + Provenance BN:CN]
   H --> H1[Chunk and Node Vectors]
-  G1 --> I[Ingestion Complete]
+  G1 --> I[Ingestion Complete + Saved World Snapshot]
   H1 --> I
 
   I --> J[Entity Resolution]
-  J --> J1[Exact Normalized-Name Pass]
-  J1 --> J2[Top-K Candidate Search]
+  J --> J0[Run Mode: Exact Only or Exact + AI]
+  J0 --> J1[Exact Normalized-Name Pass]
+  J1 --> J2[Optional Top-K Candidate Search]
   J2 --> J3[Chooser Model]
   J3 --> J4[Combiner Model]
-  J4 --> J5[Canonical Entities + Rewired Links]
+  J1 --> J5[Canonical Entities + Rewired Links]
+  J4 --> J5
 
   J5 --> K[Chat]
 
   K --> KR[Retrieval Settings]
+  KR --> KR0[General / Chunk / Graph / Prompt Groups]
   KR --> KR1[Top K Chunks]
   KR --> KR2[Entry Nodes / Graph Hops / Max Graph Nodes]
-  KR --> KR3[Vector Query Msgs]
+  KR --> KR3[Vector Query Msgs / Chat History]
 
   K --> PS[System Prompt]
-  K --> CH[Chat History Context]
 
   KR1 --> L[Prompt Context Assembly]
   KR2 --> L
   KR3 --> L
   PS --> L
-  CH --> L
 
   L --> M[Model Response]
-  M --> N[Context X-Ray Saved Per Message]
+  M --> N[Context X-Ray + Context Graph Saved Per Message]
 
   I --> R[Recovery Actions]
-  R --> R1[Retry Extraction Failures]
-  R --> R2[Retry Embedding Failures]
-  R --> R3[Retry All Failures]
-  R --> R4[Re-embed All]
-  R --> R5[Rechunk and Re-ingest]
+  R --> R0[Safety Review Queue]
+  R0 --> R1[Edit / Test / Apply Repaired Chunk]
+  R --> R2[Retry Extraction Failures]
+  R --> R3[Retry Embedding Failures]
+  R --> R4[Retry All Failures]
+  R --> R5[Re-embed All]
+  R5 --> R6[Checks Locked Source Snapshot + Repair Overrides]
+  R --> R7[Re-ingest Popup]
+  R7 --> R8[Saved World Settings + Prompt Overrides]
 
   classDef launch fill:#e2e8f0,stroke:#475569,color:#0f172a
   classDef settings fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
@@ -67,8 +73,8 @@ flowchart TD
 
   class A launch
   class B,B1,B2,B3 settings
-  class C,C1,D,D1,D2,D3,E,F,G,H,G1,H1,I ingestion
-  class J,J1,J2,J3,J4,J5 resolution
-  class K,KR,KR1,KR2,KR3,PS,CH,L,M,N chat
-  class R,R1,R2,R3,R4,R5 recovery
+  class C,C1,D,D1,D2,D3,D4,E,F,G,H,G1,H1,I ingestion
+  class J,J0,J1,J2,J3,J4,J5 resolution
+  class K,KR,KR0,KR1,KR2,KR3,PS,L,M,N chat
+  class R,R0,R1,R2,R3,R4,R5,R6,R7,R8 recovery
 ```
