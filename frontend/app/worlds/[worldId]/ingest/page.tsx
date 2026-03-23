@@ -234,6 +234,43 @@ interface RuntimeSnapshot {
     checkpoint: Checkpoint;
 }
 
+type RuntimeSnapshotLoadResult =
+    | { ok: true; snapshot: RuntimeSnapshot }
+    | { ok: false; error: Error };
+
+const RUNTIME_SYNC_STALE_MESSAGE = "Live status refresh failed; showing last known state.";
+
+function normalizeRuntimeSyncError(error: unknown): Error {
+    if (error instanceof Error) {
+        return error;
+    }
+    return new Error(RUNTIME_SYNC_STALE_MESSAGE);
+}
+
+function buildRuntimeSyncMessage(error: unknown): string {
+    const normalized = normalizeRuntimeSyncError(error);
+    const detail = normalized.message.trim();
+    if (!detail || detail === RUNTIME_SYNC_STALE_MESSAGE) {
+        return RUNTIME_SYNC_STALE_MESSAGE;
+    }
+    return `${RUNTIME_SYNC_STALE_MESSAGE} ${detail}`;
+}
+
+function isTerminalIngestStreamPayload(data: Record<string, unknown>): boolean {
+    const event = typeof data.event === "string" ? data.event : undefined;
+    if (event === "complete" || event === "aborted") {
+        return true;
+    }
+
+    const ingestionStatus = typeof data.ingestion_status === "string" ? data.ingestion_status : undefined;
+    if (ingestionStatus && ingestionStatus !== "in_progress") {
+        return true;
+    }
+
+    const status = typeof data.status === "string" ? data.status : undefined;
+    return Boolean(status && ["complete", "aborted", "error", "partial_failure"].includes(status));
+}
+
 function formatAgentLabel(agent?: string | null): string | null {
     const normalized = String(agent ?? "").trim();
     if (!normalized) return null;
@@ -316,9 +353,24 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [retryNotice, setRetryNotice] = useState<string | null>(null);
     const [pendingFocusReviewId, setPendingFocusReviewId] = useState<string | null>(null);
     const [isRescuingCollapsedFailures, setIsRescuingCollapsedFailures] = useState(false);
+    const [statusSyncError, setStatusSyncError] = useState<string | null>(null);
+    const [statusIsStale, setStatusIsStale] = useState(false);
+    const [lastSuccessfulRuntimeSyncAt, setLastSuccessfulRuntimeSyncAt] = useState<string | null>(null);
 
     const resetProgress = () => setProgress(initialProgress);
     const isTerminalIngestionStatus = (status?: string | null) => Boolean(status && status !== "in_progress");
+    const clearRuntimeSyncWarning = () => {
+        setStatusIsStale(false);
+        setStatusSyncError(null);
+    };
+    const markRuntimeSnapshotSuccess = () => {
+        clearRuntimeSyncWarning();
+        setLastSuccessfulRuntimeSyncAt(new Date().toISOString());
+    };
+    const markRuntimeSnapshotFailure = (error: unknown) => {
+        setStatusIsStale(true);
+        setStatusSyncError(buildRuntimeSyncMessage(error));
+    };
     const mergeStageCounters = (previous: StageCounters, incoming?: StageCounters): StageCounters => {
         if (!incoming) return previous;
         return {
@@ -445,13 +497,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         return { world, checkpoint };
     }
 
-    async function loadRuntimeSnapshot(reconnectStream = false) {
+    async function loadRuntimeSnapshot(reconnectStream = false): Promise<RuntimeSnapshotLoadResult> {
         try {
             const snapshot = await fetchRuntimeSnapshot();
             applyRuntimeSnapshot(snapshot, { reconnectStream });
-            return snapshot;
-        } catch {
-            return null;
+            markRuntimeSnapshotSuccess();
+            return { ok: true, snapshot };
+        } catch (error) {
+            const normalized = normalizeRuntimeSyncError(error);
+            markRuntimeSnapshotFailure(normalized);
+            return { ok: false, error: normalized };
         }
     }
 
@@ -460,9 +515,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         refreshSources?: boolean;
         refreshSafetyReviews?: boolean;
     }) {
-        const tasks: Array<Promise<unknown>> = [
-            loadRuntimeSnapshot(Boolean(options?.reconnectStream)),
-        ];
+        const runtimeResult = await loadRuntimeSnapshot(Boolean(options?.reconnectStream));
+        const tasks: Array<Promise<unknown>> = [];
         if (options?.refreshSources) {
             tasks.push(loadSources());
         }
@@ -470,6 +524,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             tasks.push(loadSafetyReviews());
         }
         await Promise.all(tasks);
+        return runtimeResult;
     }
 
     const applyIngestConfigData = (data: WorldIngestConfigResponse) => {
@@ -516,17 +571,23 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }
 
     async function refreshIngestActionState() {
-        const [worldData, sourcesData, checkpointData, ingestConfigData] = await Promise.all([
-            apiFetch<WorldResponse>(`/worlds/${worldId}`),
-            apiFetch<Source[]>(`/worlds/${worldId}/sources`),
-            apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
-            apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
-        ]);
-        applyRuntimeSnapshot({ world: worldData, checkpoint: checkpointData }, {
-            reconnectStream: worldData.ingestion_status === "in_progress" && worldData.active_ingestion_run === true,
-        });
-        applySourcesData(sourcesData);
-        applyIngestConfigData(ingestConfigData);
+        try {
+            const [worldData, sourcesData, checkpointData, ingestConfigData] = await Promise.all([
+                apiFetch<WorldResponse>(`/worlds/${worldId}`),
+                apiFetch<Source[]>(`/worlds/${worldId}/sources`),
+                apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
+                apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
+            ]);
+            applyRuntimeSnapshot({ world: worldData, checkpoint: checkpointData }, {
+                reconnectStream: worldData.ingestion_status === "in_progress" && worldData.active_ingestion_run === true,
+            });
+            markRuntimeSnapshotSuccess();
+            applySourcesData(sourcesData);
+            applyIngestConfigData(ingestConfigData);
+        } catch (error) {
+            markRuntimeSnapshotFailure(error);
+            throw error;
+        }
     }
 
     async function loadSafetyReviews() {
@@ -595,25 +656,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     void loadSafetyReviews();
                     void loadCheckpoint();
                 }
-                const terminalStatus = entry.ingestion_status || entry.status;
-                const isTerminalEvent = (
-                    entry.event === "complete"
-                    || entry.event === "aborted"
-                    || (entry.event === "status" && isTerminalIngestionStatus(entry.ingestion_status))
-                );
-                if (isTerminalEvent || (entry.active_ingestion_run === false && isTerminalIngestionStatus(terminalStatus))) {
-                    esRef.current?.close();
-                    void refreshRuntimeView({
-                        reconnectStream: false,
-                        refreshSources: true,
-                        refreshSafetyReviews: true,
-                    });
-                }
             },
             () => {
                 esRef.current?.close();
                 void refreshRuntimeView({
-                    reconnectStream: true,
+                    reconnectStream: false,
                     refreshSources: true,
                     refreshSafetyReviews: true,
                 });
@@ -626,7 +673,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     refreshSafetyReviews: true,
                 });
                 setLogEntries((prev) => [...prev, { event: "error", message: err.message }]);
-            }
+            },
+            { isTerminal: isTerminalIngestStreamPayload }
         );
     };
 
@@ -673,6 +721,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setAbortRequestPending(false);
         setIngesting(true);
         setLogEntries([]);
+        clearRuntimeSyncWarning();
         try {
             await apiFetch(`/worlds/${worldId}/ingest/start`, {
                 method: "POST",
@@ -701,6 +750,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setIngesting(true);
         setLogEntries([]);
         setActiveRightPanel("progress");
+        clearRuntimeSyncWarning();
         try {
             const data = await apiFetch<RetryResponse>(`/worlds/${worldId}/ingest/retry`, {
                 method: "POST",
@@ -1015,6 +1065,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             ? "View resolved items"
             : "Open panel";
     const showProgressHeaderCard = showProgressSummary || showReembedAction || failedRecordCount > 0 || blockingIssueCount > 0;
+    const runtimeSyncSummary = lastSuccessfulRuntimeSyncAt
+        ? `Last successful sync ${new Date(lastSuccessfulRuntimeSyncAt).toLocaleTimeString()}.`
+        : "No successful live status sync yet.";
     const handleReingestModalSubmit = async (submission: ReingestSetupSubmission) => {
         await startIngestion(false, "rechunk_reingest", submission.ingest_settings, {
             useActiveChunkOverrides: submission.use_active_chunk_overrides,
@@ -1358,6 +1411,46 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
             {/* Right Panel — Progress */}
             <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+                {statusSyncError && (
+                    <div style={{
+                        marginBottom: 24,
+                        padding: "12px 14px",
+                        borderRadius: 10,
+                        border: "1px solid var(--status-warning-soft-border)",
+                        background: statusIsStale ? "var(--status-warning-soft-bg)" : "var(--background)",
+                        color: "var(--status-warning-soft-fg)",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "flex-start",
+                        gap: 16,
+                        flexWrap: "wrap",
+                    }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13, fontWeight: 700 }}>Runtime status sync is stale</div>
+                            <div style={{ fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
+                                {statusSyncError}
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--text-subtle)", marginTop: 6 }}>
+                                {runtimeSyncSummary}
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => void refreshRuntimeView({
+                                reconnectStream: true,
+                                refreshSources: true,
+                                refreshSafetyReviews: true,
+                            })}
+                            style={{
+                                ...btnStyle,
+                                background: "var(--background)",
+                                color: "var(--text-primary)",
+                                border: "1px solid var(--status-warning-soft-border)",
+                            }}
+                        >
+                            Retry Status Sync
+                        </button>
+                    </div>
+                )}
                 {activeRightPanel === "safety_queue" ? (
                     <>
                         <div style={{

@@ -126,6 +126,35 @@ function isCompletedStatus(value?: string) {
     return normalized === "complete" || normalized === "completed";
 }
 
+function normalizeResolutionText(value: unknown): string | null {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    return normalized ? normalized : null;
+}
+
+function getResolutionFailureMessage(payload: {
+    event?: unknown;
+    status?: unknown;
+    message?: unknown;
+    reason?: unknown;
+}): string | null {
+    const event = typeof payload.event === "string" ? payload.event.trim().toLowerCase() : undefined;
+    const status = typeof payload.status === "string" ? payload.status.trim().toLowerCase() : undefined;
+    if (event !== "error" && status !== "error" && status !== "failed") {
+        return null;
+    }
+    return normalizeResolutionText(payload.message)
+        ?? normalizeResolutionText(payload.reason)
+        ?? "Entity resolution failed.";
+}
+
+function getResolutionStatusDetail(payload: {
+    message?: unknown;
+    reason?: unknown;
+}, failureMessage?: string | null): string | null {
+    if (failureMessage) return null;
+    return normalizeResolutionText(payload.message) ?? normalizeResolutionText(payload.reason);
+}
+
 export default function EntityResolutionPanel({
     worldId,
     canResolve,
@@ -143,9 +172,11 @@ export default function EntityResolutionPanel({
     const [running, setRunning] = useState(false);
     const [streamState, setStreamState] = useState<"idle" | "connecting" | "streaming">("idle");
     const [busy, setBusy] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [failureMessage, setFailureMessage] = useState<string | null>(null);
+    const [statusDetail, setStatusDetail] = useState<string | null>(null);
     const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
     const eventSourceRef = useRef<EventSource | null>(null);
+    const statusRef = useRef<(EntityResolutionStatus & Partial<EntityResolutionEvent>) | null>(null);
     const logIdRef = useRef(0);
 
     function closeStream() {
@@ -154,22 +185,18 @@ export default function EntityResolutionPanel({
         setStreamState("idle");
     }
 
+    function syncStatusMessages(next: Partial<EntityResolutionStatus & EntityResolutionEvent>) {
+        const nextFailureMessage = getResolutionFailureMessage(next);
+        setFailureMessage(nextFailureMessage);
+        setStatusDetail(getResolutionStatusDetail(next, nextFailureMessage));
+    }
+
     function applyStatus(next: EntityResolutionStatus) {
+        statusRef.current = next;
         setStatus(next);
         setRunning(isActiveStatus(next.status));
         setLastSyncedAt(new Date().toISOString());
-        setError((previous) => {
-            if (typeof next.reason === "string" && next.reason.trim()) {
-                return next.reason.trim();
-            }
-            if (typeof next.message === "string" && next.status === "error" && next.message.trim()) {
-                return next.message.trim();
-            }
-            if (isActiveStatus(next.status) || isTerminalStatus(next.status)) {
-                return null;
-            }
-            return previous;
-        });
+        syncStatusMessages(next);
         if (typeof next.top_k === "number") {
             setTopK(next.top_k);
         }
@@ -186,13 +213,11 @@ export default function EntityResolutionPanel({
 
     function pushEvent(event: EntityResolutionEvent) {
         setStreamState("streaming");
-        setStatus((prev) => ({ ...(prev || {}), ...event }));
+        const nextStatus = { ...(statusRef.current || {}), ...event };
+        statusRef.current = nextStatus;
+        setStatus(nextStatus);
         setRunning(!isTerminalStatus(event.status) && !isTerminalStatus(event.event));
-        if (typeof event.reason === "string" && event.reason.trim()) {
-            setError(event.reason.trim());
-        } else if (typeof event.message === "string" && event.event === "error" && event.message.trim()) {
-            setError(event.message.trim());
-        }
+        syncStatusMessages(nextStatus);
         setLogs((prev) => {
             logIdRef.current += 1;
             const nextRow: ResolutionLogRow = {
@@ -208,7 +233,7 @@ export default function EntityResolutionPanel({
     function openStream() {
         closeStream();
         setStreamState("connecting");
-        setError(null);
+        setFailureMessage(null);
         eventSourceRef.current = streamEntityResolutionEvents(
             worldId,
             pushEvent,
@@ -218,14 +243,17 @@ export default function EntityResolutionPanel({
             },
             (streamError) => {
                 closeStream();
-                void loadSnapshot(false).then(() => {
-                    setError((previous) => previous ?? streamError.message);
+                void loadSnapshot(false).then((synced) => {
+                    if (!synced) {
+                        setFailureMessage((previous) => previous ?? streamError.message);
+                        setStatusDetail(null);
+                    }
                 });
             }
         );
     }
 
-    async function loadSnapshot(allowReconnect = true) {
+    async function loadSnapshot(allowReconnect = true): Promise<boolean> {
         try {
             const live = await getEntityResolutionStatus(worldId);
             applyStatus(live);
@@ -234,7 +262,7 @@ export default function EntityResolutionPanel({
             } else {
                 closeStream();
             }
-            return;
+            return true;
         } catch {
             try {
                 const snapshot = await getEntityResolutionCurrent(worldId);
@@ -244,12 +272,16 @@ export default function EntityResolutionPanel({
                 } else {
                     closeStream();
                 }
+                return true;
             } catch (snapshotError) {
                 closeStream();
+                statusRef.current = null;
                 setStatus(null);
                 setRunning(false);
                 setLastSyncedAt(new Date().toISOString());
-                setError(snapshotError instanceof Error ? snapshotError.message : "Entity-resolution status is not available yet.");
+                setFailureMessage(snapshotError instanceof Error ? snapshotError.message : "Entity-resolution status is not available yet.");
+                setStatusDetail(null);
+                return false;
             }
         }
     }
@@ -353,7 +385,7 @@ export default function EntityResolutionPanel({
 
     const handleStart = async () => {
         setBusy(true);
-        setError(null);
+        setFailureMessage(null);
         setLogs([]);
         try {
             await startEntityResolution(worldId, {
@@ -365,7 +397,8 @@ export default function EntityResolutionPanel({
             setOpen(true);
             await loadSnapshot(true);
         } catch (startError) {
-            setError(startError instanceof Error ? startError.message : "Unable to start entity resolution.");
+            setFailureMessage(startError instanceof Error ? startError.message : "Unable to start entity resolution.");
+            setStatusDetail(null);
             setRunning(false);
         } finally {
             setBusy(false);
@@ -374,12 +407,13 @@ export default function EntityResolutionPanel({
 
     const handleAbort = async () => {
         setBusy(true);
-        setError(null);
+        setFailureMessage(null);
         try {
             await abortEntityResolution(worldId);
             await loadSnapshot(true);
         } catch (abortError) {
-            setError(abortError instanceof Error ? abortError.message : "Unable to abort entity resolution.");
+            setFailureMessage(abortError instanceof Error ? abortError.message : "Unable to abort entity resolution.");
+            setStatusDetail(null);
         } finally {
             setBusy(false);
         }
@@ -655,7 +689,24 @@ export default function EntityResolutionPanel({
                                                 </button>
                                             </div>
 
-                                            {error && (
+                                            {statusDetail && (
+                                                <div
+                                                    style={{
+                                                        marginTop: 14,
+                                                        padding: "10px 12px",
+                                                        borderRadius: 10,
+                                                        border: "1px solid var(--border)",
+                                                        background: "var(--background)",
+                                                        color: "var(--text-primary)",
+                                                        fontSize: 13,
+                                                        lineHeight: 1.5,
+                                                    }}
+                                                >
+                                                    {statusDetail}
+                                                </div>
+                                            )}
+
+                                            {failureMessage && (
                                                 <div
                                                     style={{
                                                         marginTop: 14,
@@ -668,7 +719,7 @@ export default function EntityResolutionPanel({
                                                         lineHeight: 1.5,
                                                     }}
                                                 >
-                                                    {error}
+                                                    {failureMessage}
                                                 </div>
                                             )}
                                         </div>

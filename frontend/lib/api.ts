@@ -67,6 +67,10 @@ export interface EntityResolutionEvent extends Record<string, unknown> {
     reason?: string;
 }
 
+interface ApiStreamGetOptions {
+    isTerminal?: (data: Record<string, unknown>) => boolean;
+}
+
 export function entityResolutionPaths(worldId: string) {
     const base = `/worlds/${worldId}/entity-resolution`;
     return {
@@ -264,7 +268,8 @@ export function apiStreamGet(
     path: string,
     onEvent: (data: Record<string, unknown>) => void,
     onDone?: () => void,
-    onError?: (err: Error) => void
+    onError?: (err: Error) => void,
+    options: ApiStreamGetOptions = {}
 ): EventSource {
     const url = `${API_BASE}${path}`;
     const es = new EventSource(url);
@@ -274,18 +279,8 @@ export function apiStreamGet(
         try {
             const data = JSON.parse(ev.data);
             onEvent(data);
-            const ingestionStatus = typeof data.ingestion_status === "string" ? data.ingestion_status : undefined;
-            const status = typeof data.status === "string" ? data.status : undefined;
-            const isTerminalStatus = (
-                (ingestionStatus && ingestionStatus !== "in_progress")
-                || (status && ["complete", "aborted", "error", "partial_failure"].includes(status))
-            );
-            if (
-                data.event === "complete"
-                || data.event === "aborted"
-                || data.event === "error"
-                || (data.event === "status" && isTerminalStatus)
-            ) {
+            const isTerminal = options.isTerminal ?? defaultIsTerminalStreamEvent;
+            if (isTerminal(data)) {
                 terminal = true;
                 es.close();
                 onDone?.();
@@ -303,4 +298,19 @@ export function apiStreamGet(
     };
 
     return es;
+}
+
+function defaultIsTerminalStreamEvent(data: Record<string, unknown>): boolean {
+    const ingestionStatus = typeof data.ingestion_status === "string" ? data.ingestion_status : undefined;
+    const status = typeof data.status === "string" ? data.status : undefined;
+    const isTerminalStatus = (
+        (ingestionStatus && ingestionStatus !== "in_progress")
+        || (status && ["complete", "aborted", "error", "partial_failure"].includes(status))
+    );
+    return (
+        data.event === "complete"
+        || data.event === "aborted"
+        || data.event === "error"
+        || (data.event === "status" && isTerminalStatus)
+    );
 }

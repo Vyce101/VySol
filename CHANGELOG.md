@@ -45,6 +45,7 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed ingest and entity-resolution UI honesty so non-terminal ingest chunk errors no longer close the live progress stream, stale runtime refreshes now surface a visible warning with retry, and normal entity-resolution `reason` updates no longer render as false failure banners.
 - Fixed entity resolution commit recovery so interrupted final meta writes now preserve a truthful `commit_pending` state, staged vector snapshot failures no longer mutate the live graph first, and stale-run recovery can finish a pending committed result instead of pretending it rolled back.
 - Fixed ingest audit/progress truthfulness so unreadable vector collections now surface as explicit world blockers instead of fake missing coverage, `Re-embed All` keeps progressing through world-level unique-node rebuild and audit phases after chunk work finishes, and world-scope blockers are visible in the main progress UI instead of hiding only in the agent log.
 - Fixed entity resolution so runs stage graph and unique-node-index changes until the full run succeeds, failed chooser/combiner/provider paths surface real backend errors instead of silent degradation, and stale unique-node vectors are now treated as repairable missing coverage instead of silently counting as healthy.
