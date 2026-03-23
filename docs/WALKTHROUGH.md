@@ -247,8 +247,11 @@ If extraction hits a safety block:
 - Use the `Safety Queue` button in the left control column to open the blocked-chunk workspace on the same page
 - Each review item keeps a read-only `[B#:C#]` prefix, a separate read-only overlap box when overlap exists, and one editable `Chunk Body` field
 - `Test` retries that exact chunk with your edited chunk body while keeping the original source chunk untouched
+- If you intentionally clear the editable `Chunk Body`, that blank body is now tested as-is instead of silently snapping back to the old chunk text
+- If overlap exists and the body is blank, the test uses that overlap-only context instead of secretly retesting the original chunk body
 - `Reset to Original` always restores the true original source chunk, even after multiple edits or a prior successful repair
 - `Reset to Live` restores the currently live repaired chunk text when that item already has a passed live repair
+- A passed blank repair still counts as a real live repaired chunk, so `Reset to Live` and later rebuild/reuse flows continue to treat it as the active repaired version
 - If a retest fails after a previous repair already passed, the world keeps using that last live repaired chunk until a newer test fully passes
 - `Discard` removes that repair item and its override state
 

@@ -37,6 +37,7 @@ backend/pytest-cache-files-*/
 backend/tmp*/
 backend/tests/_manual*/
 backend/tests/_mr/
+backend/tests/_ingestion_safety_review_tmp/
 
 # Node / Next
 frontend/node_modules/

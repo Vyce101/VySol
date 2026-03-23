@@ -929,7 +929,7 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
             draft_reviews += 1
         elif status == "testing":
             testing_reviews += 1
-        has_active_override = bool(str(review.get("active_override_raw_text") or "").strip())
+        has_active_override = _review_has_active_override(review)
         if has_active_override:
             active_override_reviews += 1
         if status != "resolved":
@@ -1145,9 +1145,30 @@ def _normalize_review_text(value: Any) -> str:
     return str(value or "").replace("\r\n", "\n")
 
 
+def _review_has_active_override(review: dict) -> bool:
+    raw_flag = review.get("has_active_override")
+    if raw_flag is None:
+        return bool(_normalize_review_text(review.get("active_override_raw_text")).strip())
+    if isinstance(raw_flag, bool):
+        return raw_flag
+    if isinstance(raw_flag, (int, float)):
+        return bool(raw_flag)
+    if isinstance(raw_flag, str):
+        normalized = raw_flag.strip().lower()
+        if normalized in {"", "0", "false", "no", "off"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(raw_flag)
+
+
+def _review_has_explicit_draft(review: dict) -> bool:
+    return "draft_raw_text" in review
+
+
 def _review_baseline_raw_text(review: dict) -> str:
     active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
-    if active_override_raw_text.strip():
+    if _review_has_active_override(review):
         return active_override_raw_text
     return _normalize_review_text(review.get("original_raw_text"))
 
@@ -1157,9 +1178,8 @@ def _review_overlap_raw_text(review: dict) -> str:
 
 
 def _review_editor_raw_text(review: dict) -> str:
-    draft_raw_text = _normalize_review_text(review.get("draft_raw_text"))
-    if draft_raw_text.strip():
-        return draft_raw_text
+    if _review_has_explicit_draft(review):
+        return _normalize_review_text(review.get("draft_raw_text"))
     return _review_baseline_raw_text(review)
 
 
@@ -1185,6 +1205,11 @@ def _set_review_pending_status(review: dict) -> bool:
         review["active_override_raw_text"] = active_override_raw_text
         changed = True
 
+    has_active_override = _review_has_active_override(review)
+    if review.get("has_active_override") != has_active_override:
+        review["has_active_override"] = has_active_override
+        changed = True
+
     draft_raw_text = _review_editor_raw_text(review)
     if review.get("draft_raw_text") != draft_raw_text:
         review["draft_raw_text"] = draft_raw_text
@@ -1198,7 +1223,7 @@ def _set_review_pending_status(review: dict) -> bool:
     next_status: SafetyReviewStatus
     if test_in_progress:
         next_status = "testing"
-    elif active_override_raw_text.strip() and draft_raw_text == active_override_raw_text:
+    elif has_active_override and draft_raw_text == active_override_raw_text:
         next_status = "resolved"
     elif draft_raw_text != _review_baseline_raw_text(review):
         next_status = "draft"
@@ -1483,7 +1508,7 @@ def _get_active_override_map(world_id: str) -> dict[str, str]:
     for review in cache.get("reviews", []):
         chunk_id = str(review.get("chunk_id") or "")
         override_text = _normalize_review_text(review.get("active_override_raw_text"))
-        if chunk_id and override_text.strip():
+        if chunk_id and _review_has_active_override(review):
             output[chunk_id] = override_text
     return output
 
@@ -1532,6 +1557,7 @@ def _upsert_safety_review(
             "last_tested_at": None,
             "test_attempt_count": 0,
             "test_in_progress": False,
+            "has_active_override": False,
             "active_override_raw_text": "",
             "created_at": now,
             "updated_at": now,
@@ -1594,10 +1620,10 @@ def _apply_active_chunk_overrides(
     updated_chunks: list[TemporalChunk] = []
     for chunk in temporal_chunks:
         chunk_id = _chunk_id(world_id, chunk.source_id, chunk.chunk_index)
-        override_text = override_map.get(chunk_id)
-        if not override_text:
+        if chunk_id not in override_map:
             updated_chunks.append(chunk)
             continue
+        override_text = override_map[chunk_id]
         updated_chunks.append(_replace_temporal_chunk_body(chunk, override_text))
     return updated_chunks
 
@@ -4392,8 +4418,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     )
     ga = GraphArchitectAgent(world_id=world_id)
 
-    active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
-    if active_override_raw_text.strip():
+    if _review_has_active_override(review):
         live_snapshot = await _snapshot_chunk_live_artifacts(
             graph_store=graph_store,
             vector_store=vector_store,
@@ -4567,6 +4592,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         review["last_test_error_kind"] = None
         review["last_test_error_message"] = None
         review["last_tested_at"] = _now_iso()
+        review["has_active_override"] = True
         review["active_override_raw_text"] = candidate_raw_text
         _set_review_pending_status(review)
         review["updated_at"] = _now_iso()

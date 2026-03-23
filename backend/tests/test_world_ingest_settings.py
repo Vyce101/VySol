@@ -153,6 +153,36 @@ def test_ingest_config_endpoint_returns_world_prompt_states_and_override_availab
     assert payload["active_chunk_override_count"] == 1
 
 
+def test_ingest_safety_reviews_endpoint_returns_reviews_and_summary(monkeypatch):
+    meta = {"world_id": "world-1"}
+    reviews = [
+        {
+            "review_id": "review-1",
+            "chunk_id": "chunk-1",
+            "status": "draft",
+            "display_name": "Book 1",
+            "prefix_label": "[B1:C0]",
+        }
+    ]
+    summary = {
+        "total_reviews": 1,
+        "unresolved_reviews": 1,
+        "resolved_reviews": 0,
+        "active_override_reviews": 0,
+    }
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_router, "list_safety_reviews", lambda world_id: reviews)
+    monkeypatch.setattr(ingestion_router, "get_safety_review_summary", lambda world_id: summary)
+
+    payload = asyncio.run(ingestion_router.ingest_safety_reviews("world-1"))
+
+    assert payload == {
+        "reviews": reviews,
+        "summary": summary,
+    }
+
+
 def test_prepare_source_for_reembed_keeps_extraction_and_clears_embedding_state():
     source = {
         "status": "partial_failure",

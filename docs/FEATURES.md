@@ -160,7 +160,10 @@ Important behavior:
 - The `Safety Queue` opens as a dedicated panel from the main ingest page instead of sending you to a separate screen
 - `Reset to Original` always restores the original source chunk
 - `Reset to Live` restores the currently live repaired chunk when one exists, and stays unavailable when no live repaired chunk exists yet
+- A completely blank `Chunk Body` is treated as a real edit, so `Test` no longer silently falls back to the old chunk text when you intentionally clear the body
+- If overlap exists and the chunk body is blank, the test uses overlap-only context for extraction instead of reusing the original chunk body behind the scenes
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
+- A passed blank repair still counts as a real live repaired chunk override, so `Reset to Live`, `Re-ingest` reuse, `Re-embed All`, and rebuild guards continue to respect it
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved and the previously live repaired chunk remains live instead of being torn down first
 - Retry and resume actions skip unresolved Safety Queue chunks so they do not silently fall back to original source text
 - The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items

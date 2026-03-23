@@ -208,6 +208,7 @@ interface SafetyReviewItem {
     last_test_error_message?: string | null;
     last_tested_at?: string | null;
     test_attempt_count?: number;
+    has_active_override: boolean;
     active_override_raw_text: string;
     review_origin?: string;
     display_name: string;
@@ -359,6 +360,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [blockedChunkData, setBlockedChunkData] = useState<{ text: string; reason: string } | null>(null);
     const [safetyReviews, setSafetyReviews] = useState<SafetyReviewItem[]>([]);
     const [safetyReviewSummary, setSafetyReviewSummary] = useState<SafetyReviewSummary | null>(null);
+    const [safetyReviewLoadError, setSafetyReviewLoadError] = useState<string | null>(null);
     const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
     const [savingReviewIds, setSavingReviewIds] = useState<Record<string, boolean>>({});
     const [testingReviewIds, setTestingReviewIds] = useState<Record<string, boolean>>({});
@@ -411,11 +413,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setInitialIngestDraftDirty(false);
         initialIngestDraftWorldIdRef.current = null;
         initialIngestDraftDirtyRef.current = false;
+        setSafetyReviews([]);
+        setSafetyReviewSummary(null);
+        setSafetyReviewLoadError(null);
+        setReviewDrafts({});
     }, [worldId]);
 
     const syncSafetyReviewState = (reviews: SafetyReviewItem[], summary?: SafetyReviewSummary | null) => {
         setSafetyReviews(reviews);
         setSafetyReviewSummary(summary ?? null);
+        setSafetyReviewLoadError(null);
         setReviewDrafts((prev) => {
             const next: Record<string, string> = {};
             for (const review of reviews) {
@@ -547,7 +554,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             tasks.push(loadSources());
         }
         if (options?.refreshSafetyReviews) {
-            tasks.push(loadSafetyReviews());
+            tasks.push(loadSafetyReviews({ markStaleOnError: true }));
         }
         await Promise.all(tasks);
         return runtimeResult;
@@ -653,6 +660,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             syncSafetyReviewState(data.reviews, data.summary);
             return data;
         } catch (error) {
+            setSafetyReviewLoadError(buildRuntimeSyncMessage(error));
             if (options?.markStaleOnError) {
                 markRuntimeSnapshotFailure(error);
             }
@@ -719,7 +727,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                     setIngesting(true);
                 }
                 if (entry.error_type === "safety_block") {
-                    void loadSafetyReviews();
+                    void loadSafetyReviews({ markStaleOnError: true });
                     void loadCheckpoint();
                 }
             },
@@ -751,7 +759,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             await Promise.all([
                 loadRuntimeSnapshot(true),
                 loadSources(),
-                loadSafetyReviews(),
+                loadSafetyReviews({ markStaleOnError: true }),
                 loadIngestConfig(),
             ]);
         };
@@ -865,7 +873,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 loadWorld(),
                 loadSources(),
                 loadCheckpoint(),
-                loadSafetyReviews(),
+                loadSafetyReviews({ markStaleOnError: true }),
             ]);
             if (firstReviewId) {
                 setActiveRightPanel("safety_queue");
@@ -987,8 +995,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const resetReviewDraftToLive = async (review: SafetyReviewItem) => {
-        const liveText = review.active_override_raw_text?.trim() ? review.active_override_raw_text : "";
-        if (!liveText) return;
+        if (!review.has_active_override) return;
+        const liveText = review.active_override_raw_text ?? "";
         setReviewDrafts((prev) => ({ ...prev, [review.review_id]: liveText }));
         await saveReviewDraft(review, liveText);
     };
@@ -1016,7 +1024,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const discardReview = async (review: SafetyReviewItem) => {
-        const hasActiveOverride = Boolean(review.active_override_raw_text?.trim());
+        const hasActiveOverride = review.has_active_override;
         const confirmMessage = hasActiveOverride
             ? "This will remove the saved override for this repaired chunk so rebuild actions can use the original source again. Continue?"
             : "This will remove this safety review item from the queue. The underlying ingest failure record will still remain until you retry or rebuild. Continue?";
@@ -1121,6 +1129,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         ?? safetyReviews.filter((review) => review.status !== "resolved").length;
     const hasAnySafetyQueueHistory = totalReviewCount > 0;
     const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
+    const showSafetyQueueUnavailableState = safetyReviews.length === 0 && Boolean(safetyReviewLoadError);
     const canResolveEntities = canResolveEntitiesBase && failedRecordCount === 0 && blockingIssueCount === 0 && !hasUnresolvedSafetyQueue;
     const resolveEntitiesDisabledReason = ingesting
         ? "Wait for ingestion to finish before starting entity resolution."
@@ -1716,6 +1725,44 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 onTest={testReviewDraft}
                                 onDiscard={discardReview}
                             />
+                        ) : showSafetyQueueUnavailableState ? (
+                            <div style={{
+                                border: "1px solid var(--status-warning-soft-border)",
+                                borderRadius: 14,
+                                background: "var(--status-warning-soft-bg)",
+                                minHeight: 280,
+                                display: "grid",
+                                placeItems: "center",
+                                padding: 24,
+                                textAlign: "center",
+                            }}>
+                                <div style={{ maxWidth: 480 }}>
+                                    <div style={{ fontSize: 18, fontWeight: 700, color: "var(--status-warning-soft-fg)" }}>
+                                        Safety review items could not be loaded right now.
+                                    </div>
+                                    <div style={{ fontSize: 13, color: "var(--status-warning-soft-fg)", marginTop: 8, lineHeight: 1.5 }}>
+                                        {safetyReviewLoadError}
+                                    </div>
+                                    <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 10, lineHeight: 1.5 }}>
+                                        The counts above come from the saved world summary, but the detailed queue list is currently unavailable.
+                                    </div>
+                                    <button
+                                        onClick={() => void refreshRuntimeView({
+                                            reconnectStream: true,
+                                            refreshSafetyReviews: true,
+                                        })}
+                                        style={{
+                                            ...btnStyle,
+                                            marginTop: 16,
+                                            background: "var(--background)",
+                                            color: "var(--text-primary)",
+                                            border: "1px solid var(--status-warning-soft-border)",
+                                        }}
+                                    >
+                                        Retry Queue Load
+                                    </button>
+                                </div>
+                            </div>
                         ) : (
                             <div style={{
                                 border: "1px solid var(--border)",
@@ -2408,7 +2455,7 @@ function SafetyReviewPanel({
                                     ?? review.original_raw_text;
                                 const statusChip = safetyReviewStatusPresentation(review);
                                 const lastOutcome = safetyReviewOutcomePresentation(review);
-                                const hasActiveOverride = Boolean(review.active_override_raw_text?.trim());
+                                const hasActiveOverride = review.has_active_override;
                                 const isEditingAwayFromLiveOverride = hasActiveOverride && draftValue !== review.active_override_raw_text;
                                 const isSaving = Boolean(savingReviewIds[review.review_id]);
                                 const isTesting = Boolean(testingReviewIds[review.review_id]) || review.status === "testing";

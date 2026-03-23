@@ -76,12 +76,12 @@ def _prepare_world(monkeypatch, world_id: str) -> dict:
     }
 
 
-def _make_temporal_chunk(world_id: str, source_id: str, body: str) -> TemporalChunk:
+def _make_temporal_chunk(world_id: str, source_id: str, body: str, *, overlap_text: str = "") -> TemporalChunk:
     return TemporalChunk(
         prefixed_text=f"[B1:C0] {body}",
         raw_text=body,
         primary_text=body,
-        overlap_text="",
+        overlap_text=overlap_text,
         book_number=1,
         chunk_index=0,
         source_id=source_id,
@@ -92,7 +92,14 @@ def _make_temporal_chunk(world_id: str, source_id: str, body: str) -> TemporalCh
     )
 
 
-def _seed_review_state(world_id: str, *, active_override_raw_text: str, draft_raw_text: str) -> str:
+def _seed_review_state(
+    world_id: str,
+    *,
+    active_override_raw_text: str,
+    draft_raw_text: str,
+    has_active_override: bool | None = None,
+    overlap_raw_text: str = "",
+) -> str:
     source_id = "source-a"
     chunk_id = f"chunk_{world_id}_{source_id}_0"
     meta = {
@@ -129,7 +136,7 @@ def _seed_review_state(world_id: str, *, active_override_raw_text: str, draft_ra
                     "original_safety_reason": "Unsafe original chunk.",
                     "original_raw_text": "unsafe original text",
                     "original_prefixed_text": "[B1:C0] unsafe original text",
-                    "overlap_raw_text": "",
+                    "overlap_raw_text": overlap_raw_text,
                     "review_origin": "safety_block",
                     "manual_rescue_fingerprint": None,
                     "draft_raw_text": draft_raw_text,
@@ -139,6 +146,9 @@ def _seed_review_state(world_id: str, *, active_override_raw_text: str, draft_ra
                     "last_tested_at": "2026-03-23T00:00:00+00:00",
                     "test_attempt_count": 1,
                     "test_in_progress": False,
+                    "has_active_override": (
+                        bool(active_override_raw_text.strip()) if has_active_override is None else has_active_override
+                    ),
                     "active_override_raw_text": active_override_raw_text,
                     "created_at": "2026-03-23T00:00:00+00:00",
                     "updated_at": "2026-03-23T00:00:00+00:00",
@@ -269,6 +279,14 @@ class _PassingGraphArchitect:
         return GraphArchitectOutput(nodes=[], edges=[]), {}
 
 
+class _CapturingGraphArchitect(_PassingGraphArchitect):
+    last_payload: str | None = None
+
+    async def run(self, extraction_chunk_text: str):
+        type(self).last_payload = extraction_chunk_text
+        return await super().run(extraction_chunk_text)
+
+
 class _DummyKeyManager:
     async def await_active_key(self):
         return ("test-key", 0)
@@ -391,6 +409,162 @@ def test_successful_retest_replaces_live_override_and_vectors(monkeypatch):
     assert reloaded_graph.get_node_count() == 2
     live_display_names = sorted(node["display_name"] for node in (reloaded_graph.get_node(node_id) for node_id in reloaded_graph.graph.nodes()) if node)
     assert live_display_names == ["Candidate A", "Candidate B"]
+
+
+def test_blank_draft_is_preserved_when_saved(monkeypatch):
+    world_id = "world-safety-review-blank-draft-save"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="old repaired text",
+    )
+
+    review = asyncio.run(ingestion_engine.update_safety_review_draft(world_id, chunk_id, ""))
+
+    assert review["draft_raw_text"] == ""
+    assert review["has_active_override"] is True
+    assert review["status"] == "draft"
+
+
+def test_blank_draft_failed_retest_keeps_blank_draft_and_live_override(monkeypatch):
+    world_id = "world-safety-review-blank-draft-fail"
+    _prepare_world(monkeypatch, world_id)
+    old_live_text = "old repaired text"
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text=old_live_text,
+        draft_raw_text="",
+        has_active_override=True,
+        overlap_raw_text="reference overlap only",
+    )
+    _seed_live_chunk_artifacts(world_id, chunk_id, old_live_text)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_load_source_temporal_chunks",
+        lambda *args, **kwargs: [_make_temporal_chunk(world_id, "source-a", "unsafe original text", overlap_text="reference overlap only")],
+    )
+    monkeypatch.setattr(ingestion_engine, "GraphArchitectAgent", _SafetyBlockGraphArchitect)
+
+    result = asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    assert review["draft_raw_text"] == ""
+    assert review["active_override_raw_text"] == old_live_text
+    assert review["has_active_override"] is True
+    assert review["last_test_outcome"] == "still_safety_blocked"
+    assert review["status"] == "draft"
+
+
+def test_blank_draft_success_uses_overlap_only_and_persists_blank_override(monkeypatch):
+    world_id = "world-safety-review-blank-draft-success"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="",
+        has_active_override=True,
+        overlap_raw_text="notice, I thought. Should I get something for you?",
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_load_source_temporal_chunks",
+        lambda *args, **kwargs: [
+            _make_temporal_chunk(
+                world_id,
+                "source-a",
+                "unsafe original text that should not be sent",
+                overlap_text="notice, I thought. Should I get something for you?",
+            )
+        ],
+    )
+    _CapturingGraphArchitect.last_payload = None
+    monkeypatch.setattr(ingestion_engine, "GraphArchitectAgent", _CapturingGraphArchitect)
+    monkeypatch.setattr(ingestion_engine, "get_key_manager", lambda: _DummyKeyManager())
+    monkeypatch.setattr(vector_store.VectorStore, "embed_texts", _embed_texts_with_collection_dims)
+
+    result = asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    chunk_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL)
+    payload = _CapturingGraphArchitect.last_payload
+    assert payload is not None
+    assert "unsafe original text that should not be sent" not in payload
+    assert "notice, I thought. Should I get something for you?" in payload
+    assert "Chunk body to extract from:\n\n\nReference-only overlap context" in payload
+    assert review["draft_raw_text"] == ""
+    assert review["active_override_raw_text"] == ""
+    assert review["has_active_override"] is True
+    assert review["last_test_outcome"] == "passed"
+    assert review["status"] == "resolved"
+    assert ingestion_engine._get_active_override_map(world_id)[chunk_id] == ""
+    assert chunk_store.get_records_by_ids([chunk_id], include_documents=True)[0]["document"] == "[B1:C0] notice, I thought. Should I get something for you?"
+
+
+def test_legacy_reviews_infer_active_override_flag_from_text(monkeypatch):
+    world_id = "world-safety-review-legacy-flag"
+    _prepare_world(monkeypatch, world_id)
+    source_id = "source-a"
+    chunk_id = f"chunk_{world_id}_{source_id}_0"
+    ingestion_engine._save_meta(
+        world_id,
+        {
+            "world_id": world_id,
+            "ingestion_status": "complete",
+            "sources": [
+                {
+                    "source_id": source_id,
+                    "display_name": "Book 1",
+                    "status": "complete",
+                    "book_number": 1,
+                    "chunk_count": 1,
+                    "failed_chunks": [],
+                    "stage_failures": [],
+                    "extracted_chunks": [0],
+                    "embedded_chunks": [0],
+                }
+            ],
+        },
+    )
+    ingestion_engine._save_safety_review_cache(
+        world_id,
+        {
+            "reviews": [
+                {
+                    "review_id": chunk_id,
+                    "world_id": world_id,
+                    "source_id": source_id,
+                    "book_number": 1,
+                    "chunk_index": 0,
+                    "chunk_id": chunk_id,
+                    "status": "resolved",
+                    "original_error_kind": "safety_block",
+                    "original_safety_reason": "Unsafe original chunk.",
+                    "original_raw_text": "unsafe original text",
+                    "original_prefixed_text": "[B1:C0] unsafe original text",
+                    "overlap_raw_text": "",
+                    "review_origin": "safety_block",
+                    "manual_rescue_fingerprint": None,
+                    "draft_raw_text": "legacy repaired text",
+                    "last_test_outcome": "passed",
+                    "last_test_error_kind": None,
+                    "last_test_error_message": None,
+                    "last_tested_at": "2026-03-23T00:00:00+00:00",
+                    "test_attempt_count": 1,
+                    "test_in_progress": False,
+                    "active_override_raw_text": "legacy repaired text",
+                    "created_at": "2026-03-23T00:00:00+00:00",
+                    "updated_at": "2026-03-23T00:00:00+00:00",
+                }
+            ]
+        },
+    )
+
+    reviews = ingestion_engine.list_safety_reviews(world_id)
+    summary = ingestion_engine.get_safety_review_summary(world_id)
+
+    assert reviews[0]["has_active_override"] is True
+    assert summary["active_override_reviews"] == 1
 
 
 def teardown_module(module):

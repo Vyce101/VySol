@@ -30,6 +30,7 @@ from core.ingestion_engine import (
     get_safety_review_summary,
     get_unresolved_safety_review_chunk_ids,
     has_active_ingestion_run,
+    list_safety_reviews,
     manual_rescue_safety_reviews,
     recover_stale_ingestion,
     start_ingestion,
