@@ -1664,6 +1664,91 @@ async def _cleanup_chunk_retry_artifacts(
     }
 
 
+async def _snapshot_chunk_live_artifacts(
+    *,
+    graph_store: GraphStore,
+    vector_store: VectorStore,
+    unique_node_vector_store: VectorStore,
+    chunk_id: str,
+    source_book: int,
+    source_chunk: int,
+    graph_lock: asyncio.Lock,
+    vector_lock: asyncio.Lock,
+) -> dict | None:
+    async with graph_lock:
+        graph_snapshot = graph_store.snapshot_chunk_artifacts(
+            chunk_id=chunk_id,
+            source_book=source_book,
+            source_chunk=source_chunk,
+        )
+
+    node_ids = [str(node.get("id") or "").strip() for node in graph_snapshot.get("nodes", [])]
+    node_ids = [node_id for node_id in node_ids if node_id]
+
+    async with vector_lock:
+        chunk_vector_records = await asyncio.to_thread(
+            vector_store.get_records_by_ids,
+            [chunk_id],
+            include_documents=True,
+            include_embeddings=True,
+        )
+        unique_node_vector_records = await asyncio.to_thread(
+            unique_node_vector_store.get_records_by_ids,
+            node_ids,
+            include_documents=True,
+            include_embeddings=True,
+        )
+
+    if not graph_snapshot.get("nodes") and not graph_snapshot.get("edges") and not chunk_vector_records and not unique_node_vector_records:
+        return None
+
+    return {
+        "graph": graph_snapshot,
+        "chunk_vector_records": chunk_vector_records,
+        "unique_node_vector_records": unique_node_vector_records,
+    }
+
+
+async def _restore_chunk_live_artifacts(
+    *,
+    graph_store: GraphStore,
+    vector_store: VectorStore,
+    unique_node_vector_store: VectorStore,
+    snapshot: dict | None,
+    graph_lock: asyncio.Lock,
+    vector_lock: asyncio.Lock,
+) -> dict:
+    if not snapshot:
+        return {
+            "restored_nodes": 0,
+            "restored_edges": 0,
+            "restored_chunk_vectors": 0,
+            "restored_unique_node_vectors": 0,
+        }
+
+    graph_snapshot = snapshot.get("graph") or {}
+    restored_nodes = len(graph_snapshot.get("nodes") or [])
+    restored_edges = len(graph_snapshot.get("edges") or [])
+    chunk_vector_records = list(snapshot.get("chunk_vector_records") or [])
+    unique_node_vector_records = list(snapshot.get("unique_node_vector_records") or [])
+
+    async with graph_lock:
+        graph_store.restore_chunk_artifacts(graph_snapshot)
+
+    async with vector_lock:
+        if chunk_vector_records:
+            await asyncio.to_thread(vector_store.upsert_records, chunk_vector_records)
+        if unique_node_vector_records:
+            await asyncio.to_thread(unique_node_vector_store.upsert_records, unique_node_vector_records)
+
+    return {
+        "restored_nodes": restored_nodes,
+        "restored_edges": restored_edges,
+        "restored_chunk_vectors": len(chunk_vector_records),
+        "restored_unique_node_vectors": len(unique_node_vector_records),
+    }
+
+
 def _normalize_chunk_local_ref(value: str | None) -> str:
     return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
 
@@ -4201,6 +4286,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     meta_lock = _get_async_lock(world_id, _meta_locks)
     graph_lock = _get_async_lock(world_id, _graph_locks)
     vector_lock = _get_async_lock(world_id, _vector_locks)
+    live_snapshot: dict | None = None
 
     async def mark_review_failure(error_kind: str, error_message: str) -> dict:
         async with meta_lock:
@@ -4225,6 +4311,32 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
             "safety_review_summary": get_safety_review_summary(world_id),
             "checkpoint": get_checkpoint_info(world_id),
         }
+
+    async def restore_live_snapshot() -> None:
+        nonlocal live_snapshot
+        if live_snapshot is None:
+            return
+
+        restore_report = await _restore_chunk_live_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            snapshot=live_snapshot,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+        if any(restore_report.values()):
+            _append_log(
+                world_id,
+                {
+                    "event": "safety_review_restore",
+                    "review_id": review_id,
+                    "source_id": source_id,
+                    "book_number": book_number,
+                    "chunk_index": chunk_index,
+                    **restore_report,
+                },
+            )
 
     async with meta_lock:
         meta = _load_meta(world_id)
@@ -4257,8 +4369,10 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     except Exception as exc:
         return await mark_review_failure("provider_error", f"Could not load the saved source for this review item: {exc}")
 
-    chunk_index = int(review.get("chunk_index", -1) or -1)
-    book_number = int(review.get("book_number", 0) or 0)
+    raw_chunk_index = review.get("chunk_index", -1)
+    chunk_index = int(raw_chunk_index if raw_chunk_index is not None else -1)
+    raw_book_number = review.get("book_number", 0)
+    book_number = int(raw_book_number if raw_book_number is not None else 0)
     chunk_id = str(review.get("chunk_id") or "")
     if chunk_index < 0 or chunk_index >= len(temporal_chunks):
         return await mark_review_failure(
@@ -4278,16 +4392,35 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     )
     ga = GraphArchitectAgent(world_id=world_id)
 
-    cleanup_before_test = await _cleanup_chunk_retry_artifacts(
-        graph_store=graph_store,
-        vector_store=vector_store,
-        unique_node_vector_store=unique_node_vector_store,
-        chunk_id=chunk_id,
-        source_book=book_number,
-        source_chunk=chunk_index,
-        graph_lock=graph_lock,
-        vector_lock=vector_lock,
-    )
+    active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
+    if active_override_raw_text.strip():
+        live_snapshot = await _snapshot_chunk_live_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            chunk_id=chunk_id,
+            source_book=book_number,
+            source_chunk=chunk_index,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+
+    try:
+        cleanup_before_test = await _cleanup_chunk_retry_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            chunk_id=chunk_id,
+            source_book=book_number,
+            source_chunk=chunk_index,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+    except Exception as exc:
+        if live_snapshot is not None:
+            await restore_live_snapshot()
+        error_kind = _classify_exception_kind(exc)
+        return await mark_review_failure(error_kind, f"Could not prepare the chunk for retest: {exc}")
     cleanup_log = {key: value for key, value in cleanup_before_test.items() if key != "removed_node_ids"}
     if any(value for value in cleanup_log.values()):
         _append_log(
@@ -4322,6 +4455,8 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     except Exception as exc:
         error_kind = _classify_exception_kind(exc)
         error_message = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
+        if live_snapshot is not None:
+            await restore_live_snapshot()
         return await mark_review_failure(error_kind, error_message)
     finally:
         if extraction_slot is not None:
@@ -4348,6 +4483,8 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
             graph_lock=graph_lock,
             vector_lock=vector_lock,
         )
+        if live_snapshot is not None:
+            await restore_live_snapshot()
         return await mark_review_failure(
             "no_extraction_coverage",
             "Chunk produced no extraction coverage in graph store.",
@@ -4399,6 +4536,8 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
             vector_lock=vector_lock,
         )
         error_kind = _classify_exception_kind(exc)
+        if live_snapshot is not None:
+            await restore_live_snapshot()
         return await mark_review_failure(error_kind, str(exc))
     finally:
         if embedding_slot is not None:

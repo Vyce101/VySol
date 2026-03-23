@@ -369,6 +369,87 @@ class VectorStore:
         """Return all chunk ids with metadata for ingestion audits/retries."""
         return self.get_all_records(include_documents=False, raise_on_error=raise_on_error)
 
+    def get_records_by_ids(
+        self,
+        document_ids: list[str],
+        *,
+        include_documents: bool = False,
+        include_embeddings: bool = False,
+        raise_on_error: bool = False,
+    ) -> list[dict]:
+        """Return specific stored ids with optional documents and embeddings."""
+        normalized_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
+        if not normalized_ids:
+            return []
+
+        include: list[str] = ["metadatas"]
+        if include_documents:
+            include.append("documents")
+        if include_embeddings:
+            include.append("embeddings")
+
+        try:
+            data = self.collection.get(ids=normalized_ids, include=include)
+        except Exception as exc:
+            if raise_on_error:
+                raise VectorStoreReadError(
+                    f"Unable to read collection '{self.collection_name}'."
+                ) from exc
+            return []
+
+        ids = data.get("ids")
+        metas = data.get("metadatas")
+        docs = data.get("documents")
+        embeddings = data.get("embeddings")
+        if ids is None:
+            ids = []
+        if metas is None:
+            metas = []
+        if docs is None:
+            docs = []
+        if embeddings is None:
+            embeddings = []
+        output: list[dict] = []
+        for i, record_id in enumerate(ids):
+            meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+            row = {"id": str(record_id), "metadata": meta}
+            if include_documents:
+                row["document"] = docs[i] if i < len(docs) else ""
+            if include_embeddings:
+                raw_embedding = embeddings[i] if i < len(embeddings) else []
+                row["embedding"] = list(raw_embedding) if raw_embedding is not None else []
+            output.append(row)
+        return output
+
+    def upsert_records(self, records: list[dict]) -> None:
+        """Upsert precomputed document records including embeddings."""
+        document_ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+        embeddings: list[list[float]] = []
+
+        for record in records:
+            document_id = str(record.get("id") or "").strip()
+            if not document_id:
+                continue
+            document_ids.append(document_id)
+            documents.append(str(record.get("document") or ""))
+            metadata = record.get("metadata")
+            metadatas.append(metadata if isinstance(metadata, dict) else {})
+            raw_embedding = record.get("embedding") or []
+            embeddings.append(list(raw_embedding))
+
+        if not document_ids:
+            return
+
+        self.collection.upsert(
+            ids=document_ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas,
+        )
+        self._set_recorded_embedding_model(self.embedding_model)
+
     def has_chunk(self, chunk_id: str) -> bool:
         """Check whether a specific chunk id exists in the vector collection."""
         return self.has_document(chunk_id)

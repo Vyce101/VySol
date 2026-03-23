@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 import os
@@ -332,6 +333,113 @@ class GraphStore:
     def clear(self) -> None:
         """Clear the graph and save an empty GEXF."""
         self.graph.clear()
+        self._save()
+
+    def snapshot_chunk_artifacts(self, chunk_id: str, source_book: int, source_chunk: int) -> dict:
+        """Capture the current graph artifacts tied to a specific chunk."""
+        snapshot_node_ids: set[str] = set()
+        edges: list[dict] = []
+
+        if isinstance(self.graph, nx.MultiDiGraph):
+            for source, target, _key, attrs in self.graph.edges(keys=True, data=True):
+                if int(attrs.get("source_book", -1)) != int(source_book) or int(attrs.get("source_chunk", -1)) != int(source_chunk):
+                    continue
+                snapshot_node_ids.add(str(source))
+                snapshot_node_ids.add(str(target))
+                edges.append(
+                    {
+                        "source": str(source),
+                        "target": str(target),
+                        "attrs": deepcopy(_cast_edge(dict(attrs))),
+                    }
+                )
+        else:
+            for source, target, attrs in self.graph.edges(data=True):
+                if int(attrs.get("source_book", -1)) != int(source_book) or int(attrs.get("source_chunk", -1)) != int(source_chunk):
+                    continue
+                snapshot_node_ids.add(str(source))
+                snapshot_node_ids.add(str(target))
+                edges.append(
+                    {
+                        "source": str(source),
+                        "target": str(target),
+                        "attrs": deepcopy(_cast_edge(dict(attrs))),
+                    }
+                )
+
+        nodes: list[dict] = []
+        for node_id, attrs in self.graph.nodes(data=True):
+            claims = attrs.get("claims", [])
+            if isinstance(claims, str):
+                try:
+                    claims = json.loads(claims)
+                except (json.JSONDecodeError, TypeError):
+                    claims = []
+
+            source_chunks = attrs.get("source_chunks", [])
+            if isinstance(source_chunks, str):
+                try:
+                    source_chunks = json.loads(source_chunks)
+                except (json.JSONDecodeError, TypeError):
+                    source_chunks = []
+
+            has_chunk_ref = chunk_id in {str(raw_chunk_id) for raw_chunk_id in (source_chunks or [])}
+            has_chunk_claim = False
+            for claim in claims:
+                try:
+                    if int(claim.get("source_book", -1)) == int(source_book) and int(claim.get("source_chunk", -1)) == int(source_chunk):
+                        has_chunk_claim = True
+                        break
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+            node_id_str = str(node_id)
+            if not has_chunk_ref and not has_chunk_claim and node_id_str not in snapshot_node_ids:
+                continue
+
+            nodes.append(
+                {
+                    "id": node_id_str,
+                    "attrs": deepcopy(_cast_node(dict(attrs))),
+                }
+            )
+
+        return {
+            "nodes": sorted(nodes, key=lambda node: node["id"]),
+            "edges": edges,
+        }
+
+    def restore_chunk_artifacts(self, snapshot: dict) -> None:
+        """Restore a previously captured chunk artifact snapshot."""
+        nodes = list(snapshot.get("nodes") or [])
+        edges = list(snapshot.get("edges") or [])
+        if not nodes and not edges:
+            return
+
+        for node in nodes:
+            node_id = str(node.get("id") or "").strip()
+            if not node_id:
+                continue
+            attrs = deepcopy(_cast_node(dict(node.get("attrs") or {})))
+            if node_id in self.graph.nodes:
+                live_attrs = self.graph.nodes[node_id]
+                live_attrs.clear()
+                live_attrs.update(attrs)
+            else:
+                self.graph.add_node(node_id, **attrs)
+
+        for edge in edges:
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+            if not source or not target or source not in self.graph.nodes or target not in self.graph.nodes:
+                continue
+            attrs = deepcopy(_cast_edge(dict(edge.get("attrs") or {})))
+            edge_id = str(attrs.get("edge_id") or "").strip()
+            if isinstance(self.graph, nx.MultiDiGraph) and edge_id:
+                self.graph.add_edge(source, target, key=edge_id, **attrs)
+            else:
+                self.graph.add_edge(source, target, **attrs)
+
         self._save()
 
     def remove_chunk_artifacts(self, chunk_id: str, source_book: int, source_chunk: int) -> dict:

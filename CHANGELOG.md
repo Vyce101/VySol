@@ -46,6 +46,7 @@ All notable user-visible changes to this project will be documented in this file
 - Changed the ingest page to use one `Re-ingest` rebuild action with a read-only world snapshot on the main page and world-local saved prompt precedence (`world -> global -> default`) for ingest/entity-resolution prompts.
 - Changed full `Re-ingest` to optionally reuse repaired chunk overrides when the chunk map stays the same instead of forcing users through separate rebuild buttons and warning cards.
 - Changed the ingest UI so `Re-ingest` settings open in an in-page popup, `Books in This World` collapses inside the left control column, `Safety Queue` opens as an on-page workspace, and `Retry All Failures` appears only when failures exist.
+- Changed the Safety Queue editor to split `Reset` into `Reset to Live` and `Reset to Original`, so repaired chunks can jump back to the currently live chunk version without losing the true original reset path.
 
 ### Fixed
 
@@ -67,6 +68,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed Context Graph role visibility by explicitly labeling entry nodes versus expanded nodes in the graph legend, tooltips, and inspector.
 - Fixed chunk extraction edge binding so newly extracted edges attach to the exact node UUIDs created for that chunk instead of an older same-name node elsewhere in the graph.
 - Fixed safety-block retry handling so blocked chunks stay in the safety-review flow, retries do not collapse them into fake extraction success, and stale review popups/testing states recover cleanly.
+- Fixed Safety Queue retests so a failed retest restores the previously live repaired chunk graph and vectors instead of deleting the live repair first and leaving the UI/state misleading.
 - Fixed chat thread switching so in-flight replies and history versions stay isolated to the correct chat tab instead of leaking across chats.
 - Fixed chat auto-scroll so any upward scroll disables snapping until the user reaches the bottom again.
 - Fixed chat markdown rendering so saved replies can display real headings, GFM tables, code blocks, and block spacing correctly instead of flattening or mis-spacing markdown content.

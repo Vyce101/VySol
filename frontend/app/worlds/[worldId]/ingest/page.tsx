@@ -569,12 +569,19 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
     };
 
-    async function loadWorld() {
+    async function loadWorld(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
             applyWorldData(data);
             return data;
-        } catch { /* ignore */ }
+        } catch (error) {
+            if (options?.markStaleOnError) {
+                markRuntimeSnapshotFailure(error);
+            }
+            if (options?.throwOnError) {
+                throw error;
+            }
+        }
         return null;
     }
 
@@ -585,7 +592,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         } catch { /* ignore */ }
     }
 
-    async function loadCheckpoint() {
+    async function loadCheckpoint(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
             const data = await apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`);
             applyCheckpointData(data);
@@ -593,15 +600,31 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 setAbortRequestPending(false);
             }
             return data;
-        } catch { /* ignore */ }
+        } catch (error) {
+            if (options?.markStaleOnError) {
+                markRuntimeSnapshotFailure(error);
+            }
+            if (options?.throwOnError) {
+                throw error;
+            }
+        }
         return null;
     }
 
-    async function loadIngestConfig() {
+    async function loadIngestConfig(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
             const data = await apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`);
             applyIngestConfigData(data);
-        } catch { /* ignore */ }
+            return data;
+        } catch (error) {
+            if (options?.markStaleOnError) {
+                markRuntimeSnapshotFailure(error);
+            }
+            if (options?.throwOnError) {
+                throw error;
+            }
+        }
+        return null;
     }
 
     async function refreshIngestActionState() {
@@ -624,11 +647,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
     }
 
-    async function loadSafetyReviews() {
+    async function loadSafetyReviews(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
             const data = await apiFetch<SafetyReviewResponse>(`/worlds/${worldId}/ingest/safety-reviews`);
             syncSafetyReviewState(data.reviews, data.summary);
-        } catch { /* ignore */ }
+            return data;
+        } catch (error) {
+            if (options?.markStaleOnError) {
+                markRuntimeSnapshotFailure(error);
+            }
+            if (options?.throwOnError) {
+                throw error;
+            }
+        }
+        return null;
     }
 
     const handleUpload = async (files: FileList | File[]) => {
@@ -891,12 +923,25 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 return next;
             });
         }
-        await Promise.all([
-            loadWorld(),
-            loadSources(),
-            loadCheckpoint(),
-            loadSafetyReviews(),
-        ]);
+        try {
+            await Promise.all([
+                refreshIngestActionState(),
+                loadSafetyReviews({ throwOnError: true, markStaleOnError: true }),
+            ]);
+        } catch {
+            // The stale runtime banner already reflects the failed refresh.
+        }
+    };
+
+    const refreshAfterSafetyReviewMutation = async () => {
+        try {
+            await Promise.all([
+                refreshIngestActionState(),
+                loadSafetyReviews({ throwOnError: true, markStaleOnError: true }),
+            ]);
+        } catch {
+            // The stale runtime banner already reflects the failed refresh.
+        }
     };
 
     const reviewDraftValue = (review: SafetyReviewItem) => (
@@ -935,10 +980,17 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
     };
 
-    const resetReviewDraft = async (review: SafetyReviewItem) => {
+    const resetReviewDraftToOriginal = async (review: SafetyReviewItem) => {
         const resetText = review.original_raw_text;
         setReviewDrafts((prev) => ({ ...prev, [review.review_id]: resetText }));
         await saveReviewDraft(review, resetText);
+    };
+
+    const resetReviewDraftToLive = async (review: SafetyReviewItem) => {
+        const liveText = review.active_override_raw_text?.trim() ? review.active_override_raw_text : "";
+        if (!liveText) return;
+        setReviewDrafts((prev) => ({ ...prev, [review.review_id]: liveText }));
+        await saveReviewDraft(review, liveText);
     };
 
     const testReviewDraft = async (review: SafetyReviewItem) => {
@@ -950,19 +1002,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             await apiFetch(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/test`, {
                 method: "POST",
             });
-            await Promise.all([
-                loadWorld(),
-                loadSources(),
-                loadCheckpoint(),
-                loadSafetyReviews(),
-            ]);
+            await refreshAfterSafetyReviewMutation();
         } catch (err: unknown) {
             if (isMissingSafetyReviewError(err)) {
                 await refreshAfterMissingSafetyReview(review.review_id);
                 return;
             }
             alert((err as Error).message);
-            await Promise.all([loadCheckpoint(), loadSafetyReviews()]);
+            await refreshAfterSafetyReviewMutation();
         } finally {
             setReviewBusy(setTestingReviewIds, review.review_id, false);
         }
@@ -980,17 +1027,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             await apiFetch(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/discard`, {
                 method: "POST",
             });
-            await Promise.all([
-                loadWorld(),
-                loadCheckpoint(),
-                loadSafetyReviews(),
-            ]);
+            await refreshAfterSafetyReviewMutation();
         } catch (err: unknown) {
             if (isMissingSafetyReviewError(err)) {
                 await refreshAfterMissingSafetyReview(review.review_id);
                 return;
             }
             alert((err as Error).message);
+            await refreshAfterSafetyReviewMutation();
         } finally {
             setReviewBusy(setDiscardingReviewIds, review.review_id, false);
         }
@@ -1667,7 +1711,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 discardingReviewIds={discardingReviewIds}
                                 onDraftChange={(reviewId, value) => setReviewDrafts((prev) => ({ ...prev, [reviewId]: value }))}
                                 onDraftBlur={saveReviewDraft}
-                                onReset={resetReviewDraft}
+                                onResetToOriginal={resetReviewDraftToOriginal}
+                                onResetToLive={resetReviewDraftToLive}
                                 onTest={testReviewDraft}
                                 onDiscard={discardReview}
                             />
@@ -2303,7 +2348,8 @@ function SafetyReviewPanel({
     discardingReviewIds,
     onDraftChange,
     onDraftBlur,
-    onReset,
+    onResetToOriginal,
+    onResetToLive,
     onTest,
     onDiscard,
 }: {
@@ -2315,7 +2361,8 @@ function SafetyReviewPanel({
     discardingReviewIds: Record<string, boolean>;
     onDraftChange: (reviewId: string, value: string) => void;
     onDraftBlur: (review: SafetyReviewItem, draftRawText?: string) => Promise<boolean> | boolean | void;
-    onReset: (review: SafetyReviewItem) => Promise<void> | void;
+    onResetToOriginal: (review: SafetyReviewItem) => Promise<void> | void;
+    onResetToLive: (review: SafetyReviewItem) => Promise<void> | void;
     onTest: (review: SafetyReviewItem) => Promise<void> | void;
     onDiscard: (review: SafetyReviewItem) => Promise<void> | void;
 }) {
@@ -2367,6 +2414,9 @@ function SafetyReviewPanel({
                                 const isTesting = Boolean(testingReviewIds[review.review_id]) || review.status === "testing";
                                 const isDiscarding = Boolean(discardingReviewIds[review.review_id]);
                                 const isBusy = isSaving || isTesting || isDiscarding;
+                                const liveResetTitle = hasActiveOverride
+                                    ? "Reset the editor to the current live repaired chunk."
+                                    : "No live chunk available";
 
                                 return (
                                     <div id={`safety-review-${review.review_id}`} key={review.review_id} style={{
@@ -2503,8 +2553,24 @@ function SafetyReviewPanel({
                                             >
                                                 {isTesting ? "Testing..." : "Test"}
                                             </button>
+                                            <span title={liveResetTitle} style={{ display: "inline-flex" }}>
+                                                <button
+                                                    onClick={() => void onResetToLive(review)}
+                                                    disabled={isBusy || !hasActiveOverride}
+                                                    style={{
+                                                        ...btnStyle,
+                                                        background: hasActiveOverride ? "var(--background-tertiary)" : "var(--background-secondary)",
+                                                        color: hasActiveOverride ? "var(--text-primary)" : "var(--text-muted)",
+                                                        border: `1px solid ${hasActiveOverride ? "var(--border)" : "var(--background-tertiary)"}`,
+                                                        opacity: isBusy || !hasActiveOverride ? 0.55 : 1,
+                                                        cursor: isBusy || !hasActiveOverride ? "not-allowed" : "pointer",
+                                                    }}
+                                                >
+                                                    Reset to Live
+                                                </button>
+                                            </span>
                                             <button
-                                                onClick={() => void onReset(review)}
+                                                onClick={() => void onResetToOriginal(review)}
                                                 disabled={isBusy}
                                                 style={{
                                                     ...btnStyle,
@@ -2514,7 +2580,7 @@ function SafetyReviewPanel({
                                                     cursor: isBusy ? "not-allowed" : "pointer",
                                                 }}
                                             >
-                                                {isSaving ? "Saving..." : "Reset"}
+                                                Reset to Original
                                             </button>
                                             <button
                                                 onClick={() => void onDiscard(review)}

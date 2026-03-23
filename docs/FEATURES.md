@@ -158,9 +158,10 @@ Important behavior:
 - The queue groups blocked chunks by source and keeps the original source text separate from your editable repair draft
 - Each item shows a read-only provenance prefix, a read-only overlap box when present, and one editable chunk-body field
 - The `Safety Queue` opens as a dedicated panel from the main ingest page instead of sending you to a separate screen
-- `Reset` always restores the original source chunk, not your last attempted edit
+- `Reset to Original` always restores the original source chunk
+- `Reset to Live` restores the currently live repaired chunk when one exists, and stays unavailable when no live repaired chunk exists yet
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
-- If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
+- If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved and the previously live repaired chunk remains live instead of being torn down first
 - Retry and resume actions skip unresolved Safety Queue chunks so they do not silently fall back to original source text
 - The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items
 - If the only remaining failed chunks already belong to the Safety Queue, the main ingest page stops showing `Resume` and `Retry All Failures` and points you back to the queue instead
