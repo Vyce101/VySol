@@ -36,6 +36,8 @@ export interface EntityResolutionStatus {
     total_entities?: number;
     resolved_entities?: number;
     unresolved_entities?: number;
+    embedding_completed_entities?: number;
+    embedding_total_entities?: number;
     auto_resolved_pairs?: number;
     top_k?: number;
     embedding_batch_size?: number;
@@ -303,7 +305,7 @@ export function apiStreamGet(
 function defaultIsTerminalStreamEvent(data: Record<string, unknown>): boolean {
     const ingestionStatus = typeof data.ingestion_status === "string" ? data.ingestion_status : undefined;
     const status = typeof data.status === "string" ? data.status : undefined;
-    const isTerminalStatus = (
+    const isTerminalStatus = Boolean(
         (ingestionStatus && ingestionStatus !== "in_progress")
         || (status && ["complete", "aborted", "error", "partial_failure"].includes(status))
     );

@@ -51,6 +51,10 @@ function formatCount(value: number | undefined | null) {
     return value === undefined || value === null ? "-" : value.toLocaleString();
 }
 
+function formatEmbeddedProgress(completed: number | undefined | null, total: number | undefined | null) {
+    return `${formatCount(completed)}/${formatCount(total)}`;
+}
+
 function formatTitle(value?: string) {
     if (!value) return "Update";
     return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -119,11 +123,6 @@ function formatResolutionMode(mode?: string) {
         return "Chooser/Combiner Only (Legacy)";
     }
     return "Exact + Chooser/Combiner";
-}
-
-function isCompletedStatus(value?: string) {
-    const normalized = value?.trim().toLowerCase();
-    return normalized === "complete" || normalized === "completed";
 }
 
 function normalizeResolutionText(value: unknown): string | null {
@@ -314,7 +313,7 @@ export default function EntityResolutionPanel({
     const currentAnchorLabel = typeof status?.current_anchor_label === "string" && status.current_anchor_label.trim()
         ? status.current_anchor_label.trim()
         : "Current Anchor";
-    const showExactOnlyOutcomeLabels = isCompletedStatus(status?.status) && lastUsedResolutionMode === "exact_only";
+    const showExactOnlyOutcomeLabels = !running && lastUsedResolutionMode === "exact_only";
     const unresolvedMetricTooltip = showExactOnlyOutcomeLabels
         ? "These entities were checked during exact normalization, but no exact normalized match was found."
         : undefined;
@@ -339,6 +338,15 @@ export default function EntityResolutionPanel({
             label: "New Nodes",
             value: newNodesValue,
             tooltip: undefined,
+        },
+        {
+            key: "embedded",
+            label: "Embedded",
+            value: formatEmbeddedProgress(
+                status?.embedding_completed_entities as number | undefined,
+                status?.embedding_total_entities as number | undefined,
+            ),
+            tooltip: "Shows how many staged entities have finished embedding for the current or last entity-resolution run.",
         },
     ];
     const lastTopKValue = lastUsedResolutionMode === undefined

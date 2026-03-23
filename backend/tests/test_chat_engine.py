@@ -182,7 +182,11 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
 
     history = [
         {"role": "user", "content": "older user"},
-        {"role": "model", "content": "older model"},
+        {
+            "role": "model",
+            "content": "older model",
+            "gemini_parts": [{"text": "hidden thought", "thought": True}],
+        },
     ]
     chunks = list(chat_engine.stream_chat("world-123", "latest user", history=history))
     events = _parse_sse_events(chunks)
@@ -195,6 +199,7 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
         {"role": "assistant", "content": "older model"},
         {"role": "user", "content": "latest user"},
     ]
+    assert all("gemini_parts" not in message for message in captured["messages_payload"])
     assert done["context_meta"]["schema_version"] == "model_context.v1"
     assert done["context_meta"]["provider"] == "intenserp"
     assert done["context_meta"]["model"] == "glm-chat-test"
@@ -203,6 +208,20 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
     assert "context_meta" not in done["context_payload"]
     assert "visualization" not in done["context_payload"]
     assert "captured_at" in done["context_meta"]
+
+
+def test_gemini_part_roundtrip_preserves_structured_function_call():
+    part = types.Part(function_call=types.FunctionCall(name="lookup", args={"q": "x"}))
+
+    serialized = chat_engine._serialize_gemini_part(part)
+
+    assert serialized == {"function_call": {"name": "lookup", "args": {"q": "x"}}}
+
+    rebuilt = chat_engine._build_gemini_sdk_parts("", [serialized])[0]
+
+    assert rebuilt.function_call is not None
+    assert rebuilt.function_call.name == "lookup"
+    assert rebuilt.function_call.args == {"q": "x"}
 
 
 def test_stream_chat_gemini_retries_transient_failure_before_first_token(monkeypatch):
@@ -349,3 +368,92 @@ def test_stream_chat_gemini_does_not_retry_after_first_token(monkeypatch):
     assert events[-1]["event"] == "error"
     assert dummy_km.calls == 1
     assert dummy_km.reported == []
+
+
+def test_stream_chat_gemini_emits_thought_tokens_and_applies_thinking_config(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "",
+                "graph_nodes": [],
+                "retrieval_meta": {},
+                "context_graph": None,
+            }
+
+    class DummyKM:
+        def wait_for_available_key(self, *, jitter_seconds: float = 0.25):
+            return ("test-key", 0)
+
+    captured = {}
+
+    class DummyContent:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class DummyCandidate:
+        def __init__(self, parts):
+            self.content = DummyContent(parts)
+
+    class DummyChunk:
+        def __init__(self, parts):
+            self.candidates = [DummyCandidate(parts)]
+            self.text = None
+
+    class DummyModels:
+        def generate_content_stream(self, *, model, contents, config):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["thinking_config"] = config.thinking_config
+            return [
+                DummyChunk([
+                    types.Part(text="Thought 1", thought=True, thought_signature=b"sig"),
+                    types.Part(text="Answer 1", thought=False),
+                ]),
+            ]
+
+    class DummyClient:
+        def __init__(self, api_key: str):
+            self.models = DummyModels()
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "chat_provider": "gemini",
+            "default_model_chat": "gemini-3-flash",
+            "default_model_chat_thinking_level": "minimal",
+            "gemini_chat_send_thinking": True,
+            "chat_history_messages": 10,
+        },
+    )
+    monkeypatch.setattr(chat_engine, "get_key_manager", lambda: DummyKM())
+    monkeypatch.setattr(chat_engine.genai, "Client", DummyClient)
+
+    history = [{
+        "role": "model",
+        "content": "older model",
+        "gemini_parts": [{"text": "prior thought", "thought": True}, {"text": "prior answer", "thought": False}],
+    }]
+    events = _parse_sse_events(list(chat_engine.stream_chat("world-123", "hello", history=history)))
+
+    assert [event.get("thought_token") for event in events if "thought_token" in event] == ["Thought 1"]
+    assert [event.get("token") for event in events if "token" in event] == ["Answer 1"]
+    done = [event for event in events if event.get("event") == "done"][0]
+    assert done["thought_text"] == "Thought 1"
+    assert done["gemini_parts"] == [
+        {"text": "Thought 1", "thought": True, "thought_signature": {"__kind__": "bytes", "base64": "c2ln"}},
+        {"text": "Answer 1", "thought": False},
+    ]
+    assert isinstance(captured["contents"][0], types.ModelContent)
+    assert len(captured["contents"][0].parts) == 2
+    assert captured["contents"][0].parts[0].text == "prior thought"
+    assert captured["contents"][0].parts[0].thought is True
+    assert captured["contents"][0].parts[1].text == "prior answer"
+    thinking_level = getattr(captured["thinking_config"].thinking_level, "value", captured["thinking_config"].thinking_level)
+    assert thinking_level == "MINIMAL"
+    assert captured["thinking_config"].include_thoughts is True

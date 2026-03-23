@@ -43,6 +43,9 @@ All notable user-visible changes to this project will be documented in this file
 - Changed entity resolution to expose per-run unique-node embedding batch and delay controls in the UI.
 - Changed the entity-resolution modal to replace the old top stat-card strip with a split controls/last-run summary layout, rename exact-only result counters to `Exact Matches` and `Left Unchanged`, and move per-setting helper copy into tooltips.
 - Changed entity resolution so `Exact only` is now the true default for fresh and idle worlds, while older worlds without a saved run-mode field still preserve their inferred historical mode in status views.
+- Changed the Safety Queue so the old misleading `Discard` action is now `Reset Chunk`, which deletes that chunk's live ingest artifacts while keeping the item restartable in the queue and warning when completed entity resolution already merged its information into entity descriptions.
+- Changed Settings to expose per-model Gemini thinking controls with supported Gemini 3 dropdowns, unsupported-model manual entry via the pencil editor, and clearer manual `thinkingLevel` versus numeric `thinkingBudget` behavior.
+- Changed Gemini chat to expose a `Send Thinking` toggle that stores returned thought content and renders it in a collapsible `Model Thinking` block above the normal reply.
 - Changed the ingest page to use one `Re-ingest` rebuild action with a read-only world snapshot on the main page and world-local saved prompt precedence (`world -> global -> default`) for ingest/entity-resolution prompts.
 - Changed full `Re-ingest` to optionally reuse repaired chunk overrides when the chunk map stays the same instead of forcing users through separate rebuild buttons and warning cards.
 - Changed the ingest UI so `Re-ingest` settings open in an in-page popup, `Books in This World` collapses inside the left control column, `Safety Queue` opens as an on-page workspace, and `Retry All Failures` appears only when failures exist.
@@ -74,11 +77,13 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed chat thread switching so in-flight replies and history versions stay isolated to the correct chat tab instead of leaking across chats.
 - Fixed chat auto-scroll so any upward scroll disables snapping until the user reaches the bottom again.
 - Fixed chat markdown rendering so saved replies can display real headings, GFM tables, code blocks, and block spacing correctly instead of flattening or mis-spacing markdown content.
+- Fixed Gemini chat history replay so saved Gemini thought parts persist cleanly, no longer leak into IntenseRP/OpenAI-style payloads after a provider switch, and keep richer structured Gemini part data available for later replay.
 - Fixed long-chat typing lag by isolating the composer draft from expensive history rerenders, and grouped chat retrieval controls into collapsed `General`, `Chunk`, `Graph`, and `Prompt` sections.
 - Fixed Gemini key rotation so extraction, embeddings, retrieval, and Gemini chat wait through shared cooldown windows, fail over on transient timeout/connect failures, and stop skipping extra keys after some retries.
 - Fixed ingest progress so long pauses now surface as queued slot or API-key cooldown waits instead of looking like the run silently froze.
 - Fixed the ingest page so adding or deleting pending books refreshes the action controls immediately instead of showing stale `Start Ingestion` / completion state until a page reload.
 - Fixed ingest progress UI flicker by switching the main ingest page and floating global status panel to stable world-level extraction/embedding summaries instead of last-agent phase swapping.
+- Fixed ingest progress and source summaries so resumed worlds now keep a stable world-level percentage and each source row shows truthful `Embedded X / Y` progress instead of phase-flipping counts.
 - Fixed the main ingest progress header to show stable `Unique Graph Nodes` and `Embedded Unique Nodes` counters with lightweight hover explanations tied to entity-resolution behavior.
 - Fixed the ingest action panel by removing redundant sidebar progress boxes and duplicate repaired-chunk warnings, capitalizing `Input Progress`, and moving disabled-action explanations into tooltip/info affordances.
 - Fixed ingest abort-state handling so the main progress area keeps `Aborting...` state stable across refreshes and SSE reconnects, and abort requests against missing worlds now fail correctly instead of silently succeeding.

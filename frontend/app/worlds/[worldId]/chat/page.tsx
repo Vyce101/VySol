@@ -18,6 +18,9 @@ import InteractiveGraphViewer, {
 interface Message {
     role: "user" | "model";
     content: string;
+    localKey: string;
+    thoughtText?: string;
+    geminiParts?: Array<Record<string, unknown>>;
     messageId?: string;
     status?: "streaming" | "complete" | "incomplete";
     nodesUsed?: Array<{ id: string; display_name: string; entity_type: string }>;
@@ -54,6 +57,17 @@ interface ChatThreadState {
     streaming: boolean;
     loadRequestId: number;
     streamRequestId: number;
+}
+
+function parseBooleanSetting(value: unknown): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(normalized)) return true;
+        if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+    }
+    if (typeof value === "number") return value !== 0;
+    return Boolean(value);
 }
 
 function getContextCopyText(payload: any): string {
@@ -258,6 +272,7 @@ const ChatMessageMarkdown = memo(function ChatMessageMarkdown({ content }: { con
 interface ChatMessageBubbleProps {
     msg: Message;
     index: number;
+    thoughtExpanded: boolean;
     isHovered: boolean;
     isMenuOpen: boolean;
     isEditing: boolean;
@@ -272,6 +287,7 @@ interface ChatMessageBubbleProps {
     onSaveEdit: (index: number) => void;
     onRegenerate: (index: number) => void;
     onDelete: (index: number) => void;
+    onThoughtExpandedChange: (messageKey: string, expanded: boolean) => void;
     onOpenContext: (payload: any, meta?: any) => void;
     onMessageBubbleRef: (index: number, element: HTMLDivElement | null) => void;
 }
@@ -279,6 +295,7 @@ interface ChatMessageBubbleProps {
 const ChatMessageBubble = memo(function ChatMessageBubble({
     msg,
     index,
+    thoughtExpanded,
     isHovered,
     isMenuOpen,
     isEditing,
@@ -293,6 +310,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
     onSaveEdit,
     onRegenerate,
     onDelete,
+    onThoughtExpandedChange,
     onOpenContext,
     onMessageBubbleRef,
 }: ChatMessageBubbleProps) {
@@ -435,6 +453,41 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                             style={{ overflowWrap: "break-word" }}
                             className={`markdown-content ${msg.role === "user" ? "markdown-content-user" : "markdown-content-model"}`}
                         >
+                            {msg.role === "model" && msg.thoughtText && (
+                                <div
+                                    style={{
+                                        marginBottom: 12,
+                                        paddingLeft: 12,
+                                        borderLeft: "2px solid var(--border)",
+                                        color: "var(--text-muted)",
+                                    }}
+                                >
+                                    <button
+                                        type="button"
+                                        onClick={() => onThoughtExpandedChange(msg.localKey, !thoughtExpanded)}
+                                        style={{
+                                            display: "inline-flex",
+                                            alignItems: "center",
+                                            gap: 6,
+                                            padding: 0,
+                                            background: "transparent",
+                                            border: "none",
+                                            cursor: "pointer",
+                                            fontSize: 12,
+                                            fontWeight: 600,
+                                            color: "var(--text-subtle)",
+                                        }}
+                                    >
+                                        <ChevronRight size={14} style={{ transform: thoughtExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s ease" }} />
+                                        <span>Model Thinking</span>
+                                    </button>
+                                    {thoughtExpanded && (
+                                        <div style={{ marginTop: 10 }}>
+                                        <ChatMessageMarkdown content={msg.thoughtText} />
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                             {(msg.role === "model" || msg.role === "user") ? (
                                 <ChatMessageMarkdown content={msg.content} />
                             ) : (
@@ -484,6 +537,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
 }, (prev, next) => (
     prev.msg === next.msg
     && prev.index === next.index
+    && prev.thoughtExpanded === next.thoughtExpanded
     && prev.isHovered === next.isHovered
     && prev.isMenuOpen === next.isMenuOpen
     && prev.isEditing === next.isEditing
@@ -501,6 +555,7 @@ interface ChatMessageListProps {
     editBubbleHeight: number;
     streaming: boolean;
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
+    expandedThoughtBlocks: Record<string, boolean>;
     onHoverChange: (index: number | null) => void;
     onToggleMenu: (index: number) => void;
     onStartEditing: (index: number, content: string) => void;
@@ -509,6 +564,7 @@ interface ChatMessageListProps {
     onSaveEdit: (index: number) => void;
     onRegenerate: (index: number) => void;
     onDelete: (index: number) => void;
+    onThoughtExpandedChange: (messageKey: string, expanded: boolean) => void;
     onOpenContext: (payload: any, meta?: any) => void;
     onMessageBubbleRef: (index: number, element: HTMLDivElement | null) => void;
 }
@@ -522,6 +578,7 @@ const ChatMessageList = memo(function ChatMessageList({
     editBubbleHeight,
     streaming,
     messagesEndRef,
+    expandedThoughtBlocks,
     onHoverChange,
     onToggleMenu,
     onStartEditing,
@@ -530,6 +587,7 @@ const ChatMessageList = memo(function ChatMessageList({
     onSaveEdit,
     onRegenerate,
     onDelete,
+    onThoughtExpandedChange,
     onOpenContext,
     onMessageBubbleRef,
 }: ChatMessageListProps) {
@@ -552,9 +610,10 @@ const ChatMessageList = memo(function ChatMessageList({
                 const isEditing = editingIndex === index;
                 return (
                     <ChatMessageBubble
-                        key={msg.messageId || index}
+                        key={msg.localKey}
                         msg={msg}
                         index={index}
+                        thoughtExpanded={Boolean(expandedThoughtBlocks[msg.localKey])}
                         isHovered={hoveredMsgIndex === index}
                         isMenuOpen={menuOpenIndex === index}
                         isEditing={isEditing}
@@ -569,6 +628,7 @@ const ChatMessageList = memo(function ChatMessageList({
                         onSaveEdit={onSaveEdit}
                         onRegenerate={onRegenerate}
                         onDelete={onDelete}
+                        onThoughtExpandedChange={onThoughtExpandedChange}
                         onOpenContext={onOpenContext}
                         onMessageBubbleRef={onMessageBubbleRef}
                     />
@@ -585,6 +645,7 @@ const ChatMessageList = memo(function ChatMessageList({
     && prev.editContent === next.editContent
     && prev.editBubbleHeight === next.editBubbleHeight
     && prev.streaming === next.streaming
+    && prev.expandedThoughtBlocks === next.expandedThoughtBlocks
 ));
 
 interface ChatComposerProps {
@@ -670,6 +731,8 @@ interface ChatSettingsSidebarProps {
     entryTopK: number;
     hops: number;
     maxNodes: number;
+    chatProvider: string;
+    sendThinking: boolean;
     chatPrompt: string;
     promptSource: string;
     searchContextMsgs: number;
@@ -680,6 +743,7 @@ interface ChatSettingsSidebarProps {
     onEntryTopKChange: (value: number) => void;
     onHopsChange: (value: number) => void;
     onMaxNodesChange: (value: number) => void;
+    onSendThinkingChange: (value: boolean) => void;
     onSearchContextMsgsChange: (value: number) => void;
     onChatHistoryMsgsChange: (value: number) => void;
     onChatPromptChange: (value: string) => void;
@@ -692,6 +756,8 @@ function ChatSettingsSidebar({
     entryTopK,
     hops,
     maxNodes,
+    chatProvider,
+    sendThinking,
     chatPrompt,
     promptSource,
     searchContextMsgs,
@@ -702,6 +768,7 @@ function ChatSettingsSidebar({
     onEntryTopKChange,
     onHopsChange,
     onMaxNodesChange,
+    onSendThinkingChange,
     onSearchContextMsgsChange,
     onChatHistoryMsgsChange,
     onChatPromptChange,
@@ -719,6 +786,24 @@ function ChatSettingsSidebar({
 
             <Accordion.Root type="multiple" value={openSections} onValueChange={(value) => onOpenSectionsChange(value as SettingsSectionId[])} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <SettingsAccordionSection value="general" title="General Settings" isOpen={openSections.includes("general")}>
+                    {chatProvider === "gemini" && (
+                        <div style={{ marginBottom: 14 }}>
+                            <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                                <div>
+                                    <div style={{ fontSize: 13, fontWeight: 500 }}>Send Thinking</div>
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                                        Show Gemini thought blocks in the reply when the model returns them.
+                                    </div>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={sendThinking}
+                                    onChange={(e) => onSendThinkingChange(e.target.checked)}
+                                    style={{ width: 18, height: 18, cursor: "pointer" }}
+                                />
+                            </label>
+                        </div>
+                    )}
                     <SliderField label="Vector Query (Msgs)" value={searchContextMsgs} min={1} max={10} onChange={onSearchContextMsgsChange} />
                     <SliderField label="Chat History Context (Msgs)" value={chatHistoryMsgs} min={1} max={20} onChange={onChatHistoryMsgsChange} />
                 </SettingsAccordionSection>
@@ -827,6 +912,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const chatStatesRef = useRef<Record<string, ChatThreadState>>({});
     const loadRequestCounterRef = useRef(0);
     const streamRequestCounterRef = useRef(0);
+    const localMessageKeyCounterRef = useRef(0);
     const streamAbortControllersRef = useRef<Record<string, AbortController>>({});
 
     // Retrieval settings
@@ -834,6 +920,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [entryTopK, setEntryTopK] = useState(5);
     const [hops, setHops] = useState(2);
     const [maxNodes, setMaxNodes] = useState(50);
+    const [chatProvider, setChatProvider] = useState("gemini");
+    const [sendThinking, setSendThinking] = useState(true);
     const [chatPrompt, setChatPrompt] = useState("");
     const [promptSource, setPromptSource] = useState("default");
     const [searchContextMsgs, setSearchContextMsgs] = useState(3);
@@ -846,6 +934,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [editContent, setEditContent] = useState("");
     const [editBubbleHeight, setEditBubbleHeight] = useState(140);
+    const [expandedThoughtBlocks, setExpandedThoughtBlocks] = useState<Record<string, boolean>>({});
     const [contextModalData, setContextModalData] = useState<ContextModalData | null>(null);
     const [contextMetaOpen, setContextMetaOpen] = useState(false);
     const [contextViewMode, setContextViewMode] = useState<"rendered" | "graph" | "json">("rendered");
@@ -871,8 +960,22 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const messages = activeThreadState.messages;
     const streaming = activeThreadState.streaming;
 
-    const mapMessage = (m: any): Message => ({
+    const createLocalMessageKey = () => {
+        localMessageKeyCounterRef.current += 1;
+        return `msg-${localMessageKeyCounterRef.current}`;
+    };
+
+    const mapMessage = (m: any, fallbackKey?: string): Message => ({
         ...m,
+        localKey:
+            (typeof m.localKey === "string" && m.localKey)
+            || (typeof m.local_key === "string" && m.local_key)
+            || (typeof m.messageId === "string" && m.messageId)
+            || (typeof m.message_id === "string" && m.message_id)
+            || fallbackKey
+            || createLocalMessageKey(),
+        thoughtText: m.thoughtText || m.thought_text || "",
+        geminiParts: m.geminiParts || m.gemini_parts,
         messageId: m.messageId || m.message_id,
         status: m.status || "complete",
         nodesUsed: m.nodesUsed || m.nodes_used,
@@ -902,6 +1005,24 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         });
     };
 
+    const setThoughtExpandedState = (messageKey: string, expanded: boolean) => {
+        setExpandedThoughtBlocks((prev) => {
+            if (expanded) {
+                if (prev[messageKey]) {
+                    return prev;
+                }
+                return { ...prev, [messageKey]: true };
+            }
+
+            if (!prev[messageKey]) {
+                return prev;
+            }
+            const next = { ...prev };
+            delete next[messageKey];
+            return next;
+        });
+    };
+
     const abortChatStream = (chatId: string) => {
         const controller = streamAbortControllersRef.current[chatId];
         if (controller) {
@@ -927,6 +1048,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             }
             if (data.retrieval_graph_hops !== undefined) setHops(data.retrieval_graph_hops);
             if (data.retrieval_max_nodes !== undefined) setMaxNodes(data.retrieval_max_nodes);
+            if (data.chat_provider !== undefined) setChatProvider(data.chat_provider || "gemini");
+            if (data.gemini_chat_send_thinking !== undefined) setSendThinking(parseBooleanSetting(data.gemini_chat_send_thinking));
             if (data.retrieval_context_messages !== undefined) setSearchContextMsgs(data.retrieval_context_messages);
             if (data.chat_history_messages !== undefined) setChatHistoryMsgs(data.chat_history_messages);
         } catch { /* ignore */ }
@@ -1028,7 +1151,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         }));
         try {
             const data = await apiFetch<ChatDetailResponse>(`/worlds/${worldId}/chats/${chatId}`);
-            const mapped = (data.messages || []).map(mapMessage);
+            const mapped = (data.messages || []).map((message, index) => mapMessage(message, `loaded-${chatId}-${index}`));
             setThreadState(chatId, (current) => {
                 if (current.loadRequestId !== requestId || current.streaming) {
                     return current;
@@ -1042,7 +1165,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             if (typeof data.version === "number") {
                 setThreads((prev) => prev.map((thread) => (
                     thread.id === chatId
-                        ? { ...thread, version: data.version }
+                        ? { ...thread, version: data.version ?? thread.version }
                         : thread
                 )));
             }
@@ -1188,6 +1311,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     messages: newMessages.map((message) => ({
                         role: message.role,
                         content: message.content,
+                        thought_text: message.thoughtText,
+                        gemini_parts: message.geminiParts,
                         message_id: message.messageId,
                         status: message.status || "complete",
                         nodes_used: message.nodesUsed,
@@ -1200,13 +1325,13 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             setThreadState(chatId, (current) => ({
                 ...current,
                 version: data.version ?? current.version,
-                messages: data.messages ? data.messages.map(mapMessage) : newMessages,
+                messages: data.messages ? data.messages.map((message, index) => mapMessage(message, newMessages[index]?.localKey)) : newMessages,
                 streaming: false,
             }));
             if (typeof data.version === "number") {
                 setThreads((prev) => prev.map((thread) => (
                     thread.id === chatId
-                        ? { ...thread, version: data.version }
+                        ? { ...thread, version: data.version ?? thread.version }
                         : thread
                 )));
             }
@@ -1240,10 +1365,10 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         const currentState = chatStatesRef.current[currentChatId] ?? createEmptyThreadState();
         if (currentState.streaming) return false;
 
-        const userMsg: Message = { role: "user", content: textToSend, status: "complete" };
+        const userMsg: Message = { localKey: createLocalMessageKey(), role: "user", content: textToSend, status: "complete" };
         const historyToUse = customHistory ?? currentState.messages;
         const newHistory = [...historyToUse, userMsg];
-        const optimisticReply: Message = { role: "model", content: "", status: "streaming" };
+        const optimisticReply: Message = { localKey: createLocalMessageKey(), role: "model", content: "", thoughtText: "", geminiParts: [], status: "streaming" };
         const streamRequestId = ++streamRequestCounterRef.current;
 
         setThreadState(currentChatId, (current) => ({
@@ -1254,6 +1379,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         }));
 
         let accum = "";
+        let thoughtAccum = "";
+        let geminiParts: Message["geminiParts"] = [];
         let nodesUsed: Message["nodesUsed"] = [];
         let contextPayload: any = null;
         let contextMeta: any = null;
@@ -1273,6 +1400,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     retrieval_entry_top_k_nodes: entryTopK,
                     retrieval_graph_hops: hops,
                     retrieval_max_nodes: maxNodes,
+                    gemini_chat_send_thinking: sendThinking,
                     retrieval_context_messages: searchContextMsgs,
                     chat_history_messages: chatHistoryMsgs,
                 },
@@ -1289,6 +1417,27 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                             ...updated[updated.length - 1],
                             role: "model",
                             content: accum,
+                            thoughtText: thoughtAccum,
+                            status: "streaming",
+                        };
+                        return {
+                            ...current,
+                            messages: updated,
+                        };
+                    });
+                }
+                if (data.thought_token) {
+                    thoughtAccum += data.thought_token as string;
+                    setThreadState(currentChatId, (current) => {
+                        if (current.streamRequestId !== streamRequestId || current.messages.length === 0) {
+                            return current;
+                        }
+                        const updated = [...current.messages];
+                        updated[updated.length - 1] = {
+                            ...updated[updated.length - 1],
+                            role: "model",
+                            content: accum,
+                            thoughtText: thoughtAccum,
                             status: "streaming",
                         };
                         return {
@@ -1303,6 +1452,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     if (data.nodes_used) nodesUsed = data.nodes_used as Message["nodesUsed"];
                     if (data.context_payload) contextPayload = data.context_payload;
                     if (data.context_meta) contextMeta = data.context_meta;
+                    if (typeof data.thought_text === "string") thoughtAccum = data.thought_text;
+                    if (Array.isArray(data.gemini_parts)) geminiParts = data.gemini_parts as Message["geminiParts"];
                     if (typeof data.chat_version === "number") {
                         setThreadState(currentChatId, (current) => (
                             current.streamRequestId !== streamRequestId
@@ -1324,6 +1475,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                             ...updated[updated.length - 1],
                             role: "model",
                             content: accum,
+                            thoughtText: thoughtAccum,
+                            geminiParts,
                             messageId: persistedMessageId,
                             status: "complete",
                             nodesUsed,
@@ -1385,6 +1538,10 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         if (!activeChatId) return;
         const newMessages = [...messages];
         newMessages[index].content = editContent;
+        if (newMessages[index].role === "model") {
+            newMessages[index].thoughtText = "";
+            newMessages[index].geminiParts = [];
+        }
         setThreadState(activeChatId, (current) => ({
             ...current,
             messages: newMessages,
@@ -1607,6 +1764,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                         editBubbleHeight={editBubbleHeight}
                         streaming={streaming}
                         messagesEndRef={messagesEndRef}
+                        expandedThoughtBlocks={expandedThoughtBlocks}
                         onHoverChange={setHoveredMsgIndex}
                         onToggleMenu={(index) => setMenuOpenIndex((current) => (current === index ? null : index))}
                         onStartEditing={startEditing}
@@ -1615,6 +1773,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                         onSaveEdit={saveEdit}
                         onRegenerate={(index) => { void regenerateMessage(index); }}
                         onDelete={(index) => { void deleteMessage(index); }}
+                        onThoughtExpandedChange={setThoughtExpandedState}
                         onOpenContext={(payload, meta) => {
                             setContextModalData({ payload, meta });
                             setContextMetaOpen(false);
@@ -1656,6 +1815,8 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     entryTopK={entryTopK}
                     hops={hops}
                     maxNodes={maxNodes}
+                    chatProvider={chatProvider}
+                    sendThinking={sendThinking}
                     chatPrompt={chatPrompt}
                     promptSource={promptSource}
                     searchContextMsgs={searchContextMsgs}
@@ -1677,6 +1838,10 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     onMaxNodesChange={(value) => {
                         setMaxNodes(value);
                         saveRetrievalSettings({ retrieval_max_nodes: value });
+                    }}
+                    onSendThinkingChange={(value) => {
+                        setSendThinking(value);
+                        saveRetrievalSettings({ gemini_chat_send_thinking: value });
                     }}
                     onSearchContextMsgsChange={(value) => {
                         setSearchContextMsgs(value);

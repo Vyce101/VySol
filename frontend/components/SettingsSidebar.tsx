@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, Plus, Trash2, KeyRound } from "lucide-react";
+import { X, Plus, Trash2, KeyRound, Pencil, Info } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { applyTheme, normalizeTheme, type UITheme } from "@/lib/theme";
 
@@ -16,9 +16,17 @@ interface SettingsData {
     api_key_active_count: number;
     key_rotation_mode: string;
     default_model_flash: string;
+    default_model_flash_thinking_level: string;
+    default_model_flash_thinking_manual: string;
     default_model_chat: string;
+    default_model_chat_thinking_level: string;
+    default_model_chat_thinking_manual: string;
     default_model_entity_chooser: string;
+    default_model_entity_chooser_thinking_level: string;
+    default_model_entity_chooser_thinking_manual: string;
     default_model_entity_combiner: string;
+    default_model_entity_combiner_thinking_level: string;
+    default_model_entity_combiner_thinking_manual: string;
     embedding_model: string;
     chunk_size_chars: number;
     chunk_overlap_chars: number;
@@ -36,15 +44,38 @@ interface SettingsData {
     intenserp_model_id: string;
 }
 
+const GEMINI_3_THINKING_LEVELS: Array<{ prefix: string; levels: string[] }> = [
+    { prefix: "gemini-3.1-pro", levels: ["low", "medium", "high"] },
+    { prefix: "gemini-3.1-flash-lite", levels: ["minimal", "low", "medium", "high"] },
+    { prefix: "gemini-3-flash", levels: ["minimal", "low", "medium", "high"] },
+];
+
+const THINKING_TOOLTIP_TEXT = "Use one raw value only. Supported Gemini 3 models use the dropdown. In manual mode enter digits like 1024 for budget, or plain text like high or minimal for level. Do not type code such as thinkingLevel=high.";
+
+function getSupportedGeminiThinkingLevels(modelName: string): string[] {
+    const normalized = modelName.trim().toLowerCase();
+    if (!normalized) return [];
+    const match = GEMINI_3_THINKING_LEVELS.find((entry) => normalized.startsWith(entry.prefix));
+    return match ? [...match.levels] : [];
+}
+
 export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const [settings, setSettings] = useState<SettingsData | null>(null);
     const [keys, setKeys] = useState<KeyEntry[]>([]);
     const [newKey, setNewKey] = useState("");
     const [rotationMode, setRotationMode] = useState("FAIL_OVER");
     const [flashModel, setFlashModel] = useState("");
+    const [flashThinkingLevel, setFlashThinkingLevel] = useState("");
+    const [flashThinkingManual, setFlashThinkingManual] = useState("");
     const [chatModel, setChatModel] = useState("");
+    const [chatThinkingLevel, setChatThinkingLevel] = useState("");
+    const [chatThinkingManual, setChatThinkingManual] = useState("");
     const [chooserModel, setChooserModel] = useState("");
+    const [chooserThinkingLevel, setChooserThinkingLevel] = useState("");
+    const [chooserThinkingManual, setChooserThinkingManual] = useState("");
     const [combinerModel, setCombinerModel] = useState("");
+    const [combinerThinkingLevel, setCombinerThinkingLevel] = useState("");
+    const [combinerThinkingManual, setCombinerThinkingManual] = useState("");
     const [embedModel, setEmbedModel] = useState("");
     const [disableSafety, setDisableSafety] = useState(false);
     const [uiTheme, setUiTheme] = useState<UITheme>("dark");
@@ -64,9 +95,17 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
             setKeys(data.api_keys || []);
             setRotationMode(data.key_rotation_mode);
             setFlashModel(data.default_model_flash);
+            setFlashThinkingLevel(data.default_model_flash_thinking_level || "");
+            setFlashThinkingManual(data.default_model_flash_thinking_manual || "");
             setChatModel(data.default_model_chat);
+            setChatThinkingLevel(data.default_model_chat_thinking_level || "");
+            setChatThinkingManual(data.default_model_chat_thinking_manual || "");
             setChooserModel(data.default_model_entity_chooser);
+            setChooserThinkingLevel(data.default_model_entity_chooser_thinking_level || "");
+            setChooserThinkingManual(data.default_model_entity_chooser_thinking_manual || "");
             setCombinerModel(data.default_model_entity_combiner);
+            setCombinerThinkingLevel(data.default_model_entity_combiner_thinking_level || "");
+            setCombinerThinkingManual(data.default_model_entity_combiner_thinking_manual || "");
             setEmbedModel(data.embedding_model);
             setDisableSafety(data.disable_safety_filters);
             const nextTheme = normalizeTheme(data.ui_theme);
@@ -338,69 +377,154 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
                         Type the exact model name. Changes auto-save. Embedding model here is only the default for new worlds.
                     </p>
-                    <ModelInput label="Graph Architect Model" value={flashModel} onChange={setFlashModel}
-                        onBlur={() => saveField({ default_model_flash: flashModel })} />
-
-                    <div style={{ marginBottom: 12 }}>
-                        <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
-                            Chat Provider
-                        </label>
-                        <select
-                            value={chatProvider}
-                            onChange={(e) => {
-                                const val = e.target.value;
-                                setChatProvider(val);
-                                saveField({ chat_provider: val });
-                            }}
-                            style={{
-                                width: "100%", fontFamily: "monospace", fontSize: 13,
-                                padding: "6px 8px", borderRadius: "var(--radius)",
-                                border: "1px solid var(--border)", background: "var(--background-secondary)",
-                                color: "var(--text-primary)", cursor: "pointer",
-                            }}
+                    <div style={{ display: "grid", gap: 12 }}>
+                        <SettingsCard
+                            eyebrow="Ingest"
+                            title="Graph Architect"
+                            description="Used for chunk extraction. Faster Flash-class models are usually the best fit here."
                         >
-                            <option value="gemini">Google (Gemini)</option>
-                            <option value="intenserp">IntenseRP Next (GLM / others)</option>
-                        </select>
-                    </div>
+                            <ModelInput label="Model" value={flashModel} onChange={setFlashModel}
+                                onBlur={() => saveField({ default_model_flash: flashModel })} />
+                            <ThinkingControl
+                                modelName={flashModel}
+                                levelValue={flashThinkingLevel}
+                                manualValue={flashThinkingManual}
+                                onLevelChange={setFlashThinkingLevel}
+                                onManualChange={setFlashThinkingManual}
+                                onSave={(updates) => saveField(updates)}
+                                levelKey="default_model_flash_thinking_level"
+                                manualKey="default_model_flash_thinking_manual"
+                            />
+                        </SettingsCard>
 
-                    {chatProvider === "gemini" ? (
-                        <ModelInput label="Chat Model" value={chatModel} onChange={setChatModel}
-                            onBlur={() => saveField({ default_model_chat: chatModel })} />
-                    ) : (
-                        <div style={{ marginBottom: 12, padding: 12, borderRadius: "var(--radius)", border: "1px solid var(--border)", background: "var(--overlay)" }}>
-                            <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-                                IntenseRP Next must be running locally. Start it, log in to GLM, and leave it running.
-                            </p>
-                            <ModelInput label="IntenseRP URL" value={intenserpUrl} onChange={setIntenserpUrl}
-                                onBlur={() => saveField({ intenserp_base_url: intenserpUrl })} />
-                            <ModelInput label="Model ID" value={intenserpModelId} onChange={setIntenserpModelId}
-                                onBlur={() => saveField({ intenserp_model_id: intenserpModelId })} />
-                        </div>
-                    )}
+                        <SettingsCard
+                            eyebrow="Chat"
+                            title="Provider And Model"
+                            description="Choose whether chat uses Gemini directly or a local IntenseRP-compatible endpoint."
+                        >
+                            <div style={{ marginBottom: 12 }}>
+                                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
+                                    Chat Provider
+                                </label>
+                                <select
+                                    value={chatProvider}
+                                    onChange={(e) => {
+                                        const val = e.target.value;
+                                        setChatProvider(val);
+                                        saveField({ chat_provider: val });
+                                    }}
+                                    style={{
+                                        width: "100%", fontFamily: "monospace", fontSize: 13,
+                                        padding: "6px 8px", borderRadius: "var(--radius)",
+                                        border: "1px solid var(--border)", background: "var(--background-secondary)",
+                                        color: "var(--text-primary)", cursor: "pointer",
+                                    }}
+                                >
+                                    <option value="gemini">Google (Gemini)</option>
+                                    <option value="intenserp">IntenseRP Next (GLM / others)</option>
+                                </select>
+                            </div>
 
-                    <ModelInput label="Entity Chooser Model" value={chooserModel} onChange={setChooserModel}
-                        onBlur={() => saveField({ default_model_entity_chooser: chooserModel })} />
-                    <ModelInput label="Entity Combiner Model" value={combinerModel} onChange={setCombinerModel}
-                        onBlur={() => saveField({ default_model_entity_combiner: combinerModel })} />
-                    <ModelInput label="Default Embedding Model" value={embedModel} onChange={setEmbedModel}
-                        onBlur={() => saveField({ embedding_model: embedModel })} />
+                            {chatProvider === "gemini" ? (
+                                <>
+                                    <ModelInput label="Model" value={chatModel} onChange={setChatModel}
+                                        onBlur={() => saveField({ default_model_chat: chatModel })} />
+                                    <ThinkingControl
+                                        modelName={chatModel}
+                                        levelValue={chatThinkingLevel}
+                                        manualValue={chatThinkingManual}
+                                        onLevelChange={setChatThinkingLevel}
+                                        onManualChange={setChatThinkingManual}
+                                        onSave={(updates) => saveField(updates)}
+                                        levelKey="default_model_chat_thinking_level"
+                                        manualKey="default_model_chat_thinking_manual"
+                                    />
+                                </>
+                            ) : (
+                                <div style={{ padding: 12, borderRadius: "var(--radius)", border: "1px solid var(--border)", background: "var(--background)" }}>
+                                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+                                        IntenseRP Next must be running locally. Start it, log in to GLM, and leave it running.
+                                    </p>
+                                    <ModelInput label="Endpoint URL" value={intenserpUrl} onChange={setIntenserpUrl}
+                                        onBlur={() => saveField({ intenserp_base_url: intenserpUrl })} />
+                                    <ModelInput label="Model ID" value={intenserpModelId} onChange={setIntenserpModelId}
+                                        onBlur={() => saveField({ intenserp_model_id: intenserpModelId })} />
+                                </div>
+                            )}
+                        </SettingsCard>
 
-                    <div style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div>
-                            <label style={{ fontSize: 13, fontWeight: 500, color: "var(--text-subtle)", display: "block" }}>Disable Safety Filters</label>
-                            <p style={{ fontSize: 11, color: "var(--text-muted)" }}>Relax Gemini content moderation for creative writing.</p>
-                        </div>
-                        <input
-                            type="checkbox"
-                            checked={disableSafety}
-                            onChange={(e) => {
-                                const val = e.target.checked;
-                                setDisableSafety(val);
-                                saveField({ disable_safety_filters: val });
-                            }}
-                            style={{ width: 20, height: 20, cursor: "pointer" }}
-                        />
+                        <SettingsCard
+                            eyebrow="Entity Resolution"
+                            title="Entity Chooser"
+                            description="Used during candidate selection in Exact + chooser/combiner runs."
+                        >
+                            <ModelInput label="Model" value={chooserModel} onChange={setChooserModel}
+                                onBlur={() => saveField({ default_model_entity_chooser: chooserModel })} />
+                            <ThinkingControl
+                                modelName={chooserModel}
+                                levelValue={chooserThinkingLevel}
+                                manualValue={chooserThinkingManual}
+                                onLevelChange={setChooserThinkingLevel}
+                                onManualChange={setChooserThinkingManual}
+                                onSave={(updates) => saveField(updates)}
+                                levelKey="default_model_entity_chooser_thinking_level"
+                                manualKey="default_model_entity_chooser_thinking_manual"
+                            />
+                        </SettingsCard>
+
+                        <SettingsCard
+                            eyebrow="Entity Resolution"
+                            title="Entity Combiner"
+                            description="Used after the chooser to write the final merged entity description."
+                        >
+                            <ModelInput label="Model" value={combinerModel} onChange={setCombinerModel}
+                                onBlur={() => saveField({ default_model_entity_combiner: combinerModel })} />
+                            <ThinkingControl
+                                modelName={combinerModel}
+                                levelValue={combinerThinkingLevel}
+                                manualValue={combinerThinkingManual}
+                                onLevelChange={setCombinerThinkingLevel}
+                                onManualChange={setCombinerThinkingManual}
+                                onSave={(updates) => saveField(updates)}
+                                levelKey="default_model_entity_combiner_thinking_level"
+                                manualKey="default_model_entity_combiner_thinking_manual"
+                            />
+                        </SettingsCard>
+
+                        <SettingsCard
+                            eyebrow="Vectors"
+                            title="Default Embedding Model"
+                            description="Used as the default embedding model for new worlds only."
+                        >
+                            <ModelInput label="Model" value={embedModel} onChange={setEmbedModel}
+                                onBlur={() => saveField({ embedding_model: embedModel })} />
+                            <div style={{ marginTop: -4, marginBottom: 4, fontSize: 11, color: "var(--text-muted)" }}>
+                                Thinking is not available for embedding models.
+                            </div>
+                        </SettingsCard>
+
+                        <SettingsCard
+                            eyebrow="Safety"
+                            title="Safety Filters"
+                            description="Relax Gemini content moderation for creative or edge-case writing workflows."
+                        >
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+                                <div>
+                                    <label style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", display: "block" }}>Disable Safety Filters</label>
+                                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>Affects Gemini provider calls that respect the app-level safety configuration.</p>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={disableSafety}
+                                    onChange={(e) => {
+                                        const val = e.target.checked;
+                                        setDisableSafety(val);
+                                        saveField({ disable_safety_filters: val });
+                                    }}
+                                    style={{ width: 20, height: 20, cursor: "pointer", flexShrink: 0 }}
+                                />
+                            </div>
+                        </SettingsCard>
                     </div>
                 </Section>
 
@@ -423,6 +547,69 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     );
 }
 
+function SettingsCard({
+    eyebrow,
+    title,
+    description,
+    children,
+}: {
+    eyebrow: string;
+    title: string;
+    description: string;
+    children: React.ReactNode;
+}) {
+    return (
+        <div
+            style={{
+                padding: 16,
+                borderRadius: 14,
+                border: "1px solid var(--border)",
+                background: "linear-gradient(180deg, var(--overlay) 0%, var(--card) 100%)",
+                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+            }}
+        >
+            <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--primary)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>
+                    {eyebrow}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
+                    {title}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                    {description}
+                </div>
+            </div>
+            {children}
+        </div>
+    );
+}
+
+function LabelWithTooltip({ label, tooltip }: { label: string; tooltip?: string }) {
+    return (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span>{label}</span>
+            {tooltip ? (
+                <span
+                    title={tooltip}
+                    aria-label={tooltip}
+                    style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 16,
+                        height: 16,
+                        borderRadius: "999px",
+                        color: "var(--text-muted)",
+                        cursor: "help",
+                    }}
+                >
+                    <Info size={12} />
+                </span>
+            ) : null}
+        </span>
+    );
+}
+
 function ModelInput({ label, value, onChange, onBlur }: { label: string; value: string; onChange: (v: string) => void; onBlur: () => void }) {
     return (
         <div style={{ marginBottom: 12 }}>
@@ -433,6 +620,131 @@ function ModelInput({ label, value, onChange, onBlur }: { label: string; value: 
                 onBlur={onBlur}
                 style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }}
             />
+        </div>
+    );
+}
+
+function ThinkingControl({
+    modelName,
+    levelValue,
+    manualValue,
+    onLevelChange,
+    onManualChange,
+    onSave,
+    levelKey,
+    manualKey,
+}: {
+    modelName: string;
+    levelValue: string;
+    manualValue: string;
+    onLevelChange: (value: string) => void;
+    onManualChange: (value: string) => void;
+    onSave: (updates: Record<string, unknown>) => void;
+    levelKey: string;
+    manualKey: string;
+}) {
+    const supportedLevels = getSupportedGeminiThinkingLevels(modelName);
+    const [manualMode, setManualMode] = useState(false);
+    const hasManualValue = Boolean(manualValue.trim());
+    const showManualInput = supportedLevels.length === 0 && (manualMode || hasManualValue);
+
+    if (supportedLevels.length > 0) {
+        return (
+            <div style={{ marginTop: -4, marginBottom: 12 }}>
+                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
+                    <LabelWithTooltip label="Thinking" tooltip={THINKING_TOOLTIP_TEXT} />
+                </label>
+                <select
+                    value={levelValue}
+                    onChange={(e) => {
+                        const nextValue = e.target.value;
+                        onLevelChange(nextValue);
+                        onSave({
+                            [levelKey]: nextValue,
+                            [manualKey]: "",
+                        });
+                    }}
+                    style={{
+                        width: "100%",
+                        fontFamily: "monospace",
+                        fontSize: 13,
+                        padding: "6px 8px",
+                        borderRadius: "var(--radius)",
+                        border: "1px solid var(--border)",
+                        background: "var(--background-secondary)",
+                        color: "var(--text-primary)",
+                    }}
+                >
+                    <option value="">Use model default</option>
+                    {supportedLevels.map((level) => (
+                        <option key={level} value={level}>
+                            {level}
+                        </option>
+                    ))}
+                </select>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ marginTop: -4, marginBottom: 12 }}>
+                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
+                    <LabelWithTooltip label="Thinking" tooltip={THINKING_TOOLTIP_TEXT} />
+                </label>
+            <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+                {showManualInput ? (
+                    <input
+                        value={manualValue}
+                        onChange={(e) => onManualChange(e.target.value)}
+                        onBlur={() => onSave({
+                            [levelKey]: "",
+                            [manualKey]: manualValue.trim(),
+                        })}
+                        placeholder="Enter a level name or numeric budget"
+                        style={{ flex: 1, fontFamily: "monospace", fontSize: 13 }}
+                    />
+                ) : (
+                    <div
+                        style={{
+                            flex: 1,
+                            minHeight: 34,
+                            padding: "6px 8px",
+                            borderRadius: "var(--radius)",
+                            border: "1px solid var(--border)",
+                            background: "var(--overlay)",
+                            color: "var(--text-muted)",
+                            fontSize: 12,
+                            display: "flex",
+                            alignItems: "center",
+                        }}
+                    >
+                        Built-in thinking dropdown not supported. Use the pencil to enter a manual level or numeric budget.
+                    </div>
+                )}
+                <button
+                    type="button"
+                    onClick={() => setManualMode(true)}
+                    title="Edit manual thinking value"
+                    style={{
+                        width: 36,
+                        borderRadius: "var(--radius)",
+                        border: "1px solid var(--border)",
+                        background: "var(--background)",
+                        color: "var(--text-primary)",
+                        cursor: "pointer",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                    }}
+                >
+                    <Pencil size={14} />
+                </button>
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
+                {showManualInput || hasManualValue
+                    ? "Manual Gemini thinking accepts either a named level or a numeric budget. Leave it blank to omit thinking config."
+                    : "Manual Gemini thinking accepts either a named level or a numeric budget."}
+            </div>
         </div>
     );
 }

@@ -44,10 +44,14 @@ def _build_generation_history(messages: list[dict]) -> list[dict]:
         if role == "model" and status != "complete":
             continue
 
-        history.append({
+        history_entry = {
             "role": role,
             "content": content,
-        })
+        }
+        gemini_parts = message.get("gemini_parts")
+        if isinstance(gemini_parts, list):
+            history_entry["gemini_parts"] = gemini_parts
+        history.append(history_entry)
     return history
 
 
@@ -63,6 +67,8 @@ def _update_message_state(
     *,
     status: str,
     content: str,
+    thought_text: str = "",
+    gemini_parts: list | None = None,
     nodes_used: list | None = None,
     context_payload: dict | None = None,
     context_meta: dict | None = None,
@@ -77,6 +83,9 @@ def _update_message_state(
         updated = dict(message)
         updated["status"] = status
         updated["content"] = content
+        updated["thought_text"] = thought_text
+        if gemini_parts is not None:
+            updated["gemini_parts"] = gemini_parts
         if nodes_used is not None:
             updated["nodes_used"] = nodes_used
         if context_payload is not None:
@@ -91,6 +100,8 @@ def _update_message_state(
             "role": "model",
             "status": status,
             "content": content,
+            "thought_text": thought_text,
+            "gemini_parts": gemini_parts or [],
             "nodes_used": nodes_used or [],
             "context_payload": context_payload or {},
             "context_meta": context_meta or {},
@@ -190,6 +201,8 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
         "message_id": str(uuid.uuid4()),
         "role": "model",
         "content": "",
+        "thought_text": "",
+        "gemini_parts": [],
         "status": "streaming",
         "nodes_used": [],
         "context_payload": {},
@@ -210,6 +223,8 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
 
     def event_stream():
         full_text = ""
+        thought_text = ""
+        gemini_parts = []
         nodes_used = []
         context_payload = {}
         context_meta = {}
@@ -247,10 +262,21 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
                     yield chunk
                     continue
 
+                if "thought_token" in data:
+                    thought_token = data["thought_token"]
+                    if isinstance(thought_token, str):
+                        thought_text += thought_token
+                    yield chunk
+                    continue
+
                 if data.get("event") == "done":
                     nodes_used = data.get("nodes_used", [])
                     context_payload = data.get("context_payload", {})
                     context_meta = data.get("context_meta", {})
+                    if isinstance(data.get("thought_text"), str) and not thought_text:
+                        thought_text = data["thought_text"]
+                    if isinstance(data.get("gemini_parts"), list):
+                        gemini_parts = data["gemini_parts"]
                     completed = True
                     break
 
@@ -269,6 +295,8 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
                     model_turn["message_id"],
                     status="complete",
                     content=full_text,
+                    thought_text=thought_text,
+                    gemini_parts=gemini_parts,
                     nodes_used=nodes_used,
                     context_payload=context_payload,
                     context_meta=context_meta,
@@ -282,29 +310,32 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
                         "nodes_used": nodes_used,
                         "context_payload": context_payload,
                         "context_meta": context_meta,
+                        "thought_text": thought_text,
+                        "gemini_parts": gemini_parts,
                     })
-                return
+            else:
+                saved = _update_message_state(
+                    store,
+                    chat_id,
+                    persisted_chat,
+                    model_turn["message_id"],
+                    status="incomplete",
+                    content=full_text,
+                    thought_text=thought_text,
+                    gemini_parts=gemini_parts,
+                    nodes_used=nodes_used,
+                    context_payload=context_payload,
+                    context_meta=context_meta,
+                )
 
-            saved = _update_message_state(
-                store,
-                chat_id,
-                persisted_chat,
-                model_turn["message_id"],
-                status="incomplete",
-                content=full_text,
-                nodes_used=nodes_used,
-                context_payload=context_payload,
-                context_meta=context_meta,
-            )
-
-            if not disconnected:
-                yield _serialize_sse({
-                    "event": "error",
-                    "message": error_message or "The reply was interrupted before it finished saving.",
-                    "message_id": model_turn["message_id"],
-                    "chat_version": saved["version"],
-                    "status": "incomplete",
-                })
+                if not disconnected:
+                    yield _serialize_sse({
+                        "event": "error",
+                        "message": error_message or "The reply was interrupted before it finished saving.",
+                        "message_id": model_turn["message_id"],
+                        "chat_version": saved["version"],
+                        "status": "incomplete",
+                    })
 
     return StreamingResponse(
         event_stream(),

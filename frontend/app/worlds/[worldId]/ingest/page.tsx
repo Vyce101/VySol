@@ -236,6 +236,12 @@ interface ManualRescueResponse {
     checkpoint: Checkpoint;
 }
 
+interface ResetSafetyReviewResponse {
+    reset_details?: {
+        warning?: string | null;
+    };
+}
+
 type RightPanelView = "progress" | "safety_queue";
 
 interface RuntimeSnapshot {
@@ -364,7 +370,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
     const [savingReviewIds, setSavingReviewIds] = useState<Record<string, boolean>>({});
     const [testingReviewIds, setTestingReviewIds] = useState<Record<string, boolean>>({});
-    const [discardingReviewIds, setDiscardingReviewIds] = useState<Record<string, boolean>>({});
+    const [resettingReviewIds, setResettingReviewIds] = useState<Record<string, boolean>>({});
     const [retryNotice, setRetryNotice] = useState<string | null>(null);
     const [pendingFocusReviewId, setPendingFocusReviewId] = useState<string | null>(null);
     const [isRescuingCollapsedFailures, setIsRescuingCollapsedFailures] = useState(false);
@@ -1023,19 +1029,23 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
     };
 
-    const discardReview = async (review: SafetyReviewItem) => {
+    const resetReview = async (review: SafetyReviewItem) => {
         const hasActiveOverride = review.has_active_override;
         const confirmMessage = hasActiveOverride
-            ? "This will remove the saved override for this repaired chunk so rebuild actions can use the original source again. Continue?"
-            : "This will remove this safety review item from the queue. The underlying ingest failure record will still remain until you retry or rebuild. Continue?";
+            ? "This will delete this chunk's live chunk data, embeddings, nodes, and edges, then keep the chunk in the Safety Queue so it can be retried cleanly. If entity resolution already merged this chunk into a surviving entity description, that merged description will stay and cannot be discarded here. Re-ingest if you need those entity descriptions rebuilt cleanly. Continue?"
+            : "This will delete any live chunk data for this chunk and keep it in the Safety Queue so it can be restarted cleanly. Continue?";
         if (!confirm(confirmMessage)) return;
 
-        setReviewBusy(setDiscardingReviewIds, review.review_id, true);
+        setReviewBusy(setResettingReviewIds, review.review_id, true);
         try {
-            await apiFetch(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/discard`, {
+            const response = await apiFetch<ResetSafetyReviewResponse>(`/worlds/${worldId}/ingest/safety-reviews/${review.review_id}/reset`, {
                 method: "POST",
             });
             await refreshAfterSafetyReviewMutation();
+            const warning = response?.reset_details?.warning;
+            if (typeof warning === "string" && warning.trim()) {
+                alert(warning);
+            }
         } catch (err: unknown) {
             if (isMissingSafetyReviewError(err)) {
                 await refreshAfterMissingSafetyReview(review.review_id);
@@ -1044,7 +1054,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             alert((err as Error).message);
             await refreshAfterSafetyReviewMutation();
         } finally {
-            setReviewBusy(setDiscardingReviewIds, review.review_id, false);
+            setReviewBusy(setResettingReviewIds, review.review_id, false);
         }
     };
 
@@ -1099,6 +1109,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }, {});
     const progressSummary = resolveStableIngestProgress({
         active_operation: progress.operation,
+        active_ingestion_run: ingesting,
         progress_phase: progress.phase,
         progress_scope: progress.progressScope,
         stage_counters: progress.stageCounters,
@@ -1136,14 +1147,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         : blockingIssueCount > 0
             ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running entity resolution.")
             : hasUnresolvedSafetyQueue
-                ? "Resolve or discard pending safety review items before running entity resolution."
+                ? "Resolve or reset pending safety review items before running entity resolution."
                 : !allComplete || failedRecordCount > 0
                     ? "Finish ingestion or retry failed chunks before resolving entities."
                     : canResolveEntities
                         ? null
                         : "Entity resolution is currently unavailable for this world.";
     const rebuildBlockedReason = unresolvedReviewCount > 0
-        ? "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
+        ? "This world has unresolved safety review items. Resolve or reset them before running Re-ingest."
         : null;
     const hasProgress = progressSummary.totalWorkUnits > 0;
     const showProgressSummary = ingesting || hasProgress;
@@ -1357,53 +1368,71 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 </div>
                             ) : (
                                 <div style={{ display: "grid", gap: 6, paddingTop: 12, minWidth: 0 }}>
-                                    {sources.map((s) => (
-                                        <div key={s.source_id} style={{
-                                            display: "flex",
-                                            alignItems: "flex-start",
-                                            flexWrap: "wrap",
-                                            padding: "10px 12px",
-                                            background: "var(--background)",
-                                            borderRadius: 8,
-                                            border: "1px solid var(--border)",
-                                            gap: 10,
-                                            minWidth: 0,
-                                            overflow: "hidden",
-                                        }}>
-                                            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 180px", minWidth: 0 }}>
-                                                <FileText size={16} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-                                                <div style={{ minWidth: 0 }}>
-                                                    <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                        {s.display_name}
-                                                    </div>
-                                                    <div style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                                        {s.original_filename}
+                                    {sources.map((s) => {
+                                        const totalChunks = Math.max(0, Number(s.chunk_count ?? 0));
+                                        const embeddedChunkCount = Math.min(
+                                            totalChunks,
+                                            Array.isArray(s.embedded_chunks) ? s.embedded_chunks.length : 0,
+                                        );
+                                        return (
+                                            <div key={s.source_id} style={{
+                                                display: "flex",
+                                                alignItems: "flex-start",
+                                                flexWrap: "wrap",
+                                                padding: "10px 12px",
+                                                background: "var(--background)",
+                                                borderRadius: 8,
+                                                border: "1px solid var(--border)",
+                                                gap: 10,
+                                                minWidth: 0,
+                                                overflow: "hidden",
+                                            }}>
+                                                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 180px", minWidth: 0 }}>
+                                                    <FileText size={16} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                                                    <div style={{ minWidth: 0 }}>
+                                                        <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                            {s.display_name}
+                                                        </div>
+                                                        <div style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                                            {s.original_filename}
+                                                        </div>
                                                     </div>
                                                 </div>
+                                                <div style={{
+                                                    display: "flex",
+                                                    alignItems: "center",
+                                                    gap: 6,
+                                                    flexShrink: 0,
+                                                    flexWrap: "wrap",
+                                                    justifyContent: "flex-end",
+                                                    marginLeft: "auto",
+                                                    maxWidth: "100%",
+                                                }}>
+                                                    <span style={{
+                                                        padding: "2px 8px", borderRadius: 9999, fontSize: 11, fontWeight: 500,
+                                                        background: "var(--primary)", color: "var(--primary-contrast)",
+                                                    }}>Book {s.book_number}</span>
+                                                    <span style={{
+                                                        padding: "2px 8px",
+                                                        borderRadius: 9999,
+                                                        fontSize: 11,
+                                                        fontWeight: 500,
+                                                        background: "var(--background-secondary)",
+                                                        color: "var(--text-primary)",
+                                                        border: "1px solid var(--border)",
+                                                    }}>
+                                                        Embedded {embeddedChunkCount}/{totalChunks}
+                                                    </span>
+                                                    <StatusChip status={s.status} />
+                                                    {s.status === "pending" && (
+                                                        <button onClick={() => deleteSource(s.source_id)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2 }}>
+                                                            <Trash2 size={13} />
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
-                                            <div style={{
-                                                display: "flex",
-                                                alignItems: "center",
-                                                gap: 6,
-                                                flexShrink: 0,
-                                                flexWrap: "wrap",
-                                                justifyContent: "flex-end",
-                                                marginLeft: "auto",
-                                                maxWidth: "100%",
-                                            }}>
-                                                <span style={{
-                                                    padding: "2px 8px", borderRadius: 9999, fontSize: 11, fontWeight: 500,
-                                                    background: "var(--primary)", color: "var(--primary-contrast)",
-                                                }}>Book {s.book_number}</span>
-                                                <StatusChip status={s.status} />
-                                                {s.status === "pending" && (
-                                                    <button onClick={() => deleteSource(s.source_id)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2 }}>
-                                                        <Trash2 size={13} />
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -1717,13 +1746,13 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 drafts={reviewDrafts}
                                 savingReviewIds={savingReviewIds}
                                 testingReviewIds={testingReviewIds}
-                                discardingReviewIds={discardingReviewIds}
+                                resettingReviewIds={resettingReviewIds}
                                 onDraftChange={(reviewId, value) => setReviewDrafts((prev) => ({ ...prev, [reviewId]: value }))}
                                 onDraftBlur={saveReviewDraft}
                                 onResetToOriginal={resetReviewDraftToOriginal}
                                 onResetToLive={resetReviewDraftToLive}
                                 onTest={testReviewDraft}
-                                onDiscard={discardReview}
+                                onResetChunk={resetReview}
                             />
                         ) : showSafetyQueueUnavailableState ? (
                             <div style={{
@@ -2392,26 +2421,26 @@ function SafetyReviewPanel({
     drafts,
     savingReviewIds,
     testingReviewIds,
-    discardingReviewIds,
+    resettingReviewIds,
     onDraftChange,
     onDraftBlur,
     onResetToOriginal,
     onResetToLive,
     onTest,
-    onDiscard,
+    onResetChunk,
 }: {
     groupedReviews: Record<string, SafetyReviewItem[]>;
     summary: SafetyReviewSummary | null;
     drafts: Record<string, string>;
     savingReviewIds: Record<string, boolean>;
     testingReviewIds: Record<string, boolean>;
-    discardingReviewIds: Record<string, boolean>;
+    resettingReviewIds: Record<string, boolean>;
     onDraftChange: (reviewId: string, value: string) => void;
     onDraftBlur: (review: SafetyReviewItem, draftRawText?: string) => Promise<boolean> | boolean | void;
     onResetToOriginal: (review: SafetyReviewItem) => Promise<void> | void;
     onResetToLive: (review: SafetyReviewItem) => Promise<void> | void;
     onTest: (review: SafetyReviewItem) => Promise<void> | void;
-    onDiscard: (review: SafetyReviewItem) => Promise<void> | void;
+    onResetChunk: (review: SafetyReviewItem) => Promise<void> | void;
 }) {
     const groups = Object.entries(groupedReviews);
 
@@ -2459,8 +2488,8 @@ function SafetyReviewPanel({
                                 const isEditingAwayFromLiveOverride = hasActiveOverride && draftValue !== review.active_override_raw_text;
                                 const isSaving = Boolean(savingReviewIds[review.review_id]);
                                 const isTesting = Boolean(testingReviewIds[review.review_id]) || review.status === "testing";
-                                const isDiscarding = Boolean(discardingReviewIds[review.review_id]);
-                                const isBusy = isSaving || isTesting || isDiscarding;
+                                const isResetting = Boolean(resettingReviewIds[review.review_id]);
+                                const isBusy = isSaving || isTesting || isResetting;
                                 const liveResetTitle = hasActiveOverride
                                     ? "Reset the editor to the current live repaired chunk."
                                     : "No live chunk available";
@@ -2630,7 +2659,7 @@ function SafetyReviewPanel({
                                                 Reset to Original
                                             </button>
                                             <button
-                                                onClick={() => void onDiscard(review)}
+                                                onClick={() => void onResetChunk(review)}
                                                 disabled={isBusy}
                                                 style={{
                                                     ...btnStyle,
@@ -2640,7 +2669,7 @@ function SafetyReviewPanel({
                                                     cursor: isBusy ? "not-allowed" : "pointer",
                                                 }}
                                             >
-                                                {isDiscarding ? "Discarding..." : "Discard"}
+                                                {isResetting ? "Resetting..." : "Reset Chunk"}
                                             </button>
                                             {review.test_attempt_count !== undefined && review.test_attempt_count > 0 && (
                                                 <span style={{ fontSize: 12, color: "var(--text-muted)" }}>

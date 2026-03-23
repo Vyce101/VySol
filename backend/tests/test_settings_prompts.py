@@ -14,8 +14,15 @@ def test_load_settings_includes_entity_resolution_defaults(tmp_path, monkeypatch
     loaded = config.load_settings()
 
     assert loaded["entity_resolution_top_k"] == 50
-    assert loaded["default_model_entity_chooser"] == "gemini-flash-latest"
-    assert loaded["default_model_entity_combiner"] == "gemini-flash-lite-latest"
+    assert loaded["default_model_flash"] == "gemini-3.1-flash-lite-preview"
+    assert loaded["default_model_flash_thinking_level"] == "minimal"
+    assert loaded["default_model_chat"] == "gemini-3-flash-preview"
+    assert loaded["default_model_chat_thinking_level"] == "high"
+    assert loaded["default_model_entity_chooser"] == "gemini-3.1-flash-lite-preview"
+    assert loaded["default_model_entity_chooser_thinking_level"] == "high"
+    assert loaded["default_model_entity_combiner"] == "gemini-3.1-flash-lite-preview"
+    assert loaded["default_model_entity_combiner_thinking_level"] == "high"
+    assert loaded["gemini_chat_send_thinking"] is True
     assert loaded["entity_resolution_chooser_prompt"] is None
     assert loaded["entity_resolution_combiner_prompt"] is None
     assert loaded["graph_architect_prompt"] is None
@@ -205,6 +212,42 @@ def test_load_settings_migrates_legacy_api_key_strings_to_enabled_entries(tmp_pa
         {"value": "k1", "enabled": True},
         {"value": "k2", "enabled": True},
     ]
+
+
+def test_sanitize_settings_coerces_gemini_thinking_toggle_from_string_values():
+    enabled = config.sanitize_settings({"gemini_chat_send_thinking": "true"})
+    disabled = config.sanitize_settings({"gemini_chat_send_thinking": "false"})
+
+    assert enabled["gemini_chat_send_thinking"] is True
+    assert disabled["gemini_chat_send_thinking"] is False
+
+
+def test_resolve_gemini_thinking_settings_supports_level_and_manual_budget():
+    supported = config.resolve_gemini_thinking_settings(
+        {
+            "default_model_chat_thinking_level": "medium",
+            "default_model_chat_thinking_manual": "200",
+        },
+        slot_key="default_model_chat",
+        model_name="gemini-3.1-pro",
+        include_thoughts=True,
+    )
+    manual = config.resolve_gemini_thinking_settings(
+        {
+            "default_model_chat_thinking_level": "",
+            "default_model_chat_thinking_manual": "200",
+        },
+        slot_key="default_model_chat",
+        model_name="gemini-2.5-pro",
+    )
+
+    assert supported == {
+        "thinking_level": "MEDIUM",
+        "include_thoughts": True,
+    }
+    assert manual == {
+        "thinking_budget": 200,
+    }
 
 
 def test_save_settings_persists_api_key_enabled_state(tmp_path, monkeypatch):

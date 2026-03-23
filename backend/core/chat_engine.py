@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Generator
+from typing import Any, Generator
 
 from google import genai
 from google.genai import types
 
-from .config import load_prompt, load_settings
+from .config import load_prompt, load_settings, resolve_gemini_thinking_settings
 from .intenserp_provider import stream_intenserp_chat
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
 from .retrieval_engine import RetrievalEngine
@@ -19,15 +20,128 @@ from .retrieval_engine import RetrievalEngine
 logger = logging.getLogger(__name__)
 
 
-def _build_gemini_sdk_content(role: str, text: str) -> types.Content:
-    part = types.Part.from_text(text=text)
+def _serialize_gemini_payload_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return {
+            "__kind__": "bytes",
+            "base64": base64.b64encode(bytes(value)).decode("ascii"),
+        }
+    if isinstance(value, (list, tuple)):
+        return [_serialize_gemini_payload_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _serialize_gemini_payload_value(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if hasattr(value, "model_dump"):
+        try:
+            return _serialize_gemini_payload_value(value.model_dump(exclude_none=True))
+        except Exception:
+            return None
+    return value
+
+
+def _deserialize_gemini_payload_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_deserialize_gemini_payload_value(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("__kind__") == "bytes" and isinstance(value.get("base64"), str):
+            try:
+                return base64.b64decode(value["base64"])
+            except Exception:
+                return None
+        return {
+            str(key): _deserialize_gemini_payload_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _serialize_gemini_part(part: Any) -> dict[str, Any] | None:
+    serialized = _serialize_gemini_payload_value(part)
+    if isinstance(serialized, dict) and serialized:
+        return serialized
+
+    text = getattr(part, "text", None)
+    thought = getattr(part, "thought", None)
+    thought_signature = getattr(part, "thought_signature", None)
+
+    payload: dict[str, Any] = {}
+    if isinstance(text, str) and text:
+        payload["text"] = text
+    if isinstance(thought, bool):
+        payload["thought"] = thought
+    if isinstance(thought_signature, (bytes, bytearray)) and thought_signature:
+        payload["thought_signature"] = {
+            "__kind__": "bytes",
+            "base64": base64.b64encode(bytes(thought_signature)).decode("ascii"),
+        }
+    return payload or None
+
+
+def _extract_gemini_chunk_parts(chunk: Any) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for candidate in list(getattr(chunk, "candidates", None) or []):
+        content = getattr(candidate, "content", None)
+        for part in list(getattr(content, "parts", None) or []):
+            serialized_part = _serialize_gemini_part(part)
+            if serialized_part:
+                serialized.append(serialized_part)
+    return serialized
+
+
+def _build_gemini_sdk_parts(text: str, parts_payload: list[dict[str, Any]] | None = None) -> list[types.Part]:
+    built_parts: list[types.Part] = []
+    for raw_part in list(parts_payload or []):
+        if not isinstance(raw_part, dict):
+            continue
+
+        try:
+            restored_part = _deserialize_gemini_payload_value(raw_part)
+            if isinstance(restored_part, dict):
+                built_parts.append(types.Part.model_validate(restored_part))
+                continue
+        except Exception:
+            pass
+
+        part_kwargs: dict[str, Any] = {}
+        raw_text = raw_part.get("text")
+        if isinstance(raw_text, str) and raw_text:
+            part_kwargs["text"] = raw_text
+
+        raw_thought = raw_part.get("thought")
+        if isinstance(raw_thought, bool):
+            part_kwargs["thought"] = raw_thought
+
+        raw_signature = raw_part.get("thought_signature")
+        if isinstance(raw_signature, str) and raw_signature:
+            try:
+                part_kwargs["thought_signature"] = base64.b64decode(raw_signature)
+            except Exception:
+                pass
+
+        if part_kwargs:
+            built_parts.append(types.Part(**part_kwargs))
+
+    if built_parts:
+        return built_parts
+    return [types.Part.from_text(text=text)]
+
+
+def _build_gemini_sdk_content(role: str, text: str, parts_payload: list[dict[str, Any]] | None = None) -> types.Content:
+    parts = _build_gemini_sdk_parts(text, parts_payload)
     if role == "assistant":
-        return types.ModelContent(parts=[part])
-    return types.UserContent(parts=[part])
+        return types.ModelContent(parts=parts)
+    return types.UserContent(parts=parts)
 
 
-def _build_gemini_debug_content(role: str, text: str) -> dict:
+def _build_gemini_debug_content(role: str, text: str, parts_payload: list[dict[str, Any]] | None = None) -> dict:
     gemini_role = "model" if role == "assistant" else "user"
+    if parts_payload:
+        return {"role": gemini_role, "parts": parts_payload}
     return {"role": gemini_role, "parts": [text]}
 
 
@@ -85,24 +199,37 @@ def stream_chat(
         # Build canonical turn ordering: system context, prior turns, current user turn.
         if sliced_history:
             full_system = f"{full_system}\n\n# Chat History"
-        messages_payload = [{"role": "system", "content": full_system}]
+        gemini_messages_payload = [{"role": "system", "content": full_system}]
+        intenserp_messages_payload = [{"role": "system", "content": full_system}]
         if sliced_history:
             for turn in sliced_history:
                 role = "assistant" if turn.get("role") == "model" else turn.get("role", "user")
-                messages_payload.append({"role": role, "content": turn.get("content", "")})
-        messages_payload.append({"role": "user", "content": message})
+                history_message = {
+                    "role": role,
+                    "content": turn.get("content", ""),
+                }
+                if isinstance(turn.get("gemini_parts"), list):
+                    history_message["gemini_parts"] = turn.get("gemini_parts")
+                gemini_messages_payload.append(history_message)
+                intenserp_messages_payload.append({
+                    "role": role,
+                    "content": turn.get("content", ""),
+                })
+        gemini_messages_payload.append({"role": "user", "content": message})
+        intenserp_messages_payload.append({"role": "user", "content": message})
 
-        model_name = settings.get("default_model_chat", "gemini-flash-latest")
+    model_name = settings.get("default_model_chat", "gemini-3-flash-preview")
         intenserp_model_id = settings.get("intenserp_model_id", "glm-chat")
         captured_at = datetime.now(timezone.utc).isoformat()
 
         gemini_sdk_contents = []
         gemini_debug_contents = []
-        for msg in messages_payload:
+        for msg in gemini_messages_payload:
             if msg["role"] == "system":
                 continue
-            gemini_sdk_contents.append(_build_gemini_sdk_content(msg["role"], msg["content"]))
-            gemini_debug_contents.append(_build_gemini_debug_content(msg["role"], msg["content"]))
+            parts_payload = msg.get("gemini_parts") if isinstance(msg.get("gemini_parts"), list) else None
+            gemini_sdk_contents.append(_build_gemini_sdk_content(msg["role"], msg["content"], parts_payload))
+            gemini_debug_contents.append(_build_gemini_debug_content(msg["role"], msg["content"], parts_payload))
 
         # context_payload stays model-context only. Metadata goes to context_meta.
         gemini_context_payload = {
@@ -123,7 +250,7 @@ def stream_chat(
                 "context_graph": context_graph,
             }
         intenserp_context_payload = {
-            "messages": messages_payload,
+            "messages": intenserp_messages_payload,
         }
         intenserp_context_meta = {
             "schema_version": "model_context.v1",
@@ -141,7 +268,7 @@ def stream_chat(
 
         if chat_provider == "intenserp":
             for chunk in stream_intenserp_chat(
-                messages_payload=messages_payload,
+                messages_payload=intenserp_messages_payload,
                 nodes_used=nodes_used,
                 settings=settings,
             ):
@@ -170,11 +297,20 @@ def stream_chat(
                 types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
             ]
 
-        config = types.GenerateContentConfig(
-            system_instruction=full_system,
-            temperature=1.0,
-            safety_settings=safety_settings,
+        config_kwargs: dict[str, Any] = {
+            "system_instruction": full_system,
+            "temperature": 1.0,
+            "safety_settings": safety_settings,
+        }
+        thinking_config = resolve_gemini_thinking_settings(
+            settings,
+            slot_key="default_model_chat",
+            model_name=model_name,
+            include_thoughts=bool(settings.get("gemini_chat_send_thinking")),
         )
+        if thinking_config:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_config)
+        config = types.GenerateContentConfig(**config_kwargs)
 
         km = get_key_manager()
         backoff = [2, 4, 8]
@@ -192,9 +328,27 @@ def stream_chat(
                     config=config,
                 )
 
+                gemini_parts: list[dict[str, Any]] = []
+                thought_text = ""
                 for chunk in response:
+                    serialized_parts = _extract_gemini_chunk_parts(chunk)
+                    if serialized_parts:
+                        for part_payload in serialized_parts:
+                            gemini_parts.append(part_payload)
+                            text = part_payload.get("text")
+                            if not isinstance(text, str) or not text:
+                                continue
+                            emitted_token = True
+                            if part_payload.get("thought") is True:
+                                thought_text += text
+                                yield f"data: {json.dumps({'thought_token': text})}\n\n"
+                            else:
+                                yield f"data: {json.dumps({'token': text})}\n\n"
+                        continue
+
                     if chunk.text:
                         emitted_token = True
+                        gemini_parts.append({"text": chunk.text, "thought": False})
                         yield f"data: {json.dumps({'token': chunk.text})}\n\n"
 
                 done_payload = {
@@ -202,6 +356,8 @@ def stream_chat(
                     "nodes_used": nodes_used,
                     "context_payload": gemini_context_payload,
                     "context_meta": gemini_context_meta,
+                    "thought_text": thought_text,
+                    "gemini_parts": gemini_parts,
                 }
                 yield f"data: {json.dumps(done_payload)}\n\n"
                 return

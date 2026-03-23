@@ -95,7 +95,7 @@ async def entity_resolution_start(world_id: str, req: EntityResolutionStartReque
         raise HTTPException(status_code=409, detail="Resolve retryable ingest failures before running entity resolution.")
     safety_review_summary = get_safety_review_summary(world_id)
     if int(safety_review_summary.get("unresolved_reviews", 0) or 0) > 0:
-        raise HTTPException(status_code=409, detail="Resolve or discard pending safety review items before running entity resolution.")
+        raise HTTPException(status_code=409, detail="Resolve or reset pending safety review items before running entity resolution.")
 
     resolution_mode = resolve_entity_resolution_mode(
         req.resolution_mode,

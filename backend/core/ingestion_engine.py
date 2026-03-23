@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Literal
 
+import networkx as nx
+
 from .agents import AgentCallError, GraphArchitectAgent
 from .chunker import RecursiveChunker
 from .config import (
@@ -943,11 +945,11 @@ def _safety_review_summary_from_reviews(reviews: list[dict]) -> dict:
         if blocking_unresolved_reviews > 0 and blocking_active_override_reviews > 0:
             blocking_message = (
                 "Safety review work is still pending and this world also has active repaired-chunk overrides. "
-                "Resolve or discard the review queue before running Re-ingest."
+                "Resolve or reset the review queue before running Re-ingest."
             )
         elif blocking_unresolved_reviews > 0:
             blocking_message = (
-                "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
+                "This world has unresolved safety review items. Resolve or reset them before running Re-ingest."
             )
         else:
             blocking_message = (
@@ -1100,7 +1102,7 @@ def get_safety_review_rebuild_guard(world_id: str, *, allow_active_overrides: bo
     unresolved_reviews = int(summary.get("unresolved_reviews", 0) or 0)
     blocks_for_unresolved = unresolved_reviews > 0
     if blocks_for_unresolved:
-        message = "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
+        message = "This world has unresolved safety review items. Resolve or reset them before running Re-ingest."
     else:
         message = summary.get("blocking_message")
     return {
@@ -1609,6 +1611,28 @@ def _delete_safety_review(world_id: str, review_id: str) -> bool:
     return changed
 
 
+def _reset_safety_review_item(review: dict) -> None:
+    review["test_in_progress"] = False
+    review["last_test_outcome"] = "not_tested"
+    review["last_test_error_kind"] = None
+    review["last_test_error_message"] = None
+    review["last_tested_at"] = None
+    review["has_active_override"] = False
+    review["active_override_raw_text"] = ""
+    _set_review_pending_status(review)
+    review["updated_at"] = _now_iso()
+
+
+def _build_safety_review_reset_warning(*, had_live_artifacts: bool, had_active_override: bool) -> str | None:
+    if not had_live_artifacts or not had_active_override:
+        return None
+    return (
+        "This reset removed the live chunk data, but if entity resolution already merged this chunk into a surviving "
+        "entity description that merged description may remain. Run a full re-ingest if you need those entity "
+        "descriptions rebuilt cleanly."
+    )
+
+
 def _apply_active_chunk_overrides(
     world_id: str,
     temporal_chunks: list[TemporalChunk],
@@ -1643,6 +1667,46 @@ def _chunk_node_ids(graph_store: GraphStore, chunk_id: str) -> list[str]:
     return sorted(set(node_ids))
 
 
+def _chunk_provenance_node_ids(
+    graph_store: GraphStore,
+    *,
+    chunk_id: str,
+    source_book: int,
+    source_chunk: int,
+) -> list[str]:
+    node_ids: list[str] = []
+    for node_id, attrs in graph_store.graph.nodes(data=True):
+        source_chunks = attrs.get("source_chunks", [])
+        if isinstance(source_chunks, str):
+            try:
+                source_chunks = json.loads(source_chunks)
+            except (json.JSONDecodeError, TypeError):
+                source_chunks = []
+        normalized_chunks = {str(raw_chunk_id).strip() for raw_chunk_id in (source_chunks or []) if str(raw_chunk_id).strip()}
+        if chunk_id in normalized_chunks:
+            node_ids.append(str(node_id))
+            continue
+
+        claims = attrs.get("claims", [])
+        if isinstance(claims, str):
+            try:
+                claims = json.loads(claims)
+            except (json.JSONDecodeError, TypeError):
+                claims = []
+        for claim in claims or []:
+            if not isinstance(claim, dict):
+                continue
+            try:
+                claim_book = int(claim.get("source_book", -1))
+                claim_chunk = int(claim.get("source_chunk", -1))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if claim_book == int(source_book) and claim_chunk == int(source_chunk):
+                node_ids.append(str(node_id))
+                break
+    return sorted(set(node_ids))
+
+
 def _chunk_node_records(graph_store: GraphStore, chunk_id: str) -> list[dict]:
     output: list[dict] = []
     for node_id in _chunk_node_ids(graph_store, chunk_id):
@@ -1654,6 +1718,26 @@ def _chunk_node_records(graph_store: GraphStore, chunk_id: str) -> list[dict]:
 
 def _chunk_has_graph_coverage(graph_store: GraphStore, chunk_id: str) -> bool:
     return bool(_chunk_node_ids(graph_store, chunk_id))
+
+
+def _node_has_remaining_provenance(attrs: dict) -> bool:
+    source_chunks = attrs.get("source_chunks", [])
+    if isinstance(source_chunks, str):
+        try:
+            source_chunks = json.loads(source_chunks)
+        except (json.JSONDecodeError, TypeError):
+            source_chunks = []
+    normalized_source_chunks = [str(raw_chunk_id).strip() for raw_chunk_id in (source_chunks or []) if str(raw_chunk_id).strip()]
+    if normalized_source_chunks:
+        return True
+
+    claims = attrs.get("claims", [])
+    if isinstance(claims, str):
+        try:
+            claims = json.loads(claims)
+        except (json.JSONDecodeError, TypeError):
+            claims = []
+    return any(isinstance(claim, dict) for claim in (claims or []))
 
 
 async def _cleanup_chunk_retry_artifacts(
@@ -1668,13 +1752,96 @@ async def _cleanup_chunk_retry_artifacts(
     vector_lock: asyncio.Lock,
 ) -> dict:
     async with graph_lock:
-        pre_cleanup_node_ids = set(_chunk_node_ids(graph_store, chunk_id))
+        pre_cleanup_node_ids = set(
+            _chunk_provenance_node_ids(
+                graph_store,
+                chunk_id=chunk_id,
+                source_book=source_book,
+                source_chunk=source_chunk,
+            )
+        )
         cleanup = graph_store.remove_chunk_artifacts(
             chunk_id=chunk_id,
             source_book=source_book,
             source_chunk=source_chunk,
         )
-        remaining_node_ids = {node_id for node_id in pre_cleanup_node_ids if node_id in graph_store.graph.nodes}
+        extra_removed_edges = 0
+        extra_removed_claims = 0
+        if isinstance(graph_store.graph, nx.MultiDiGraph):
+            lingering_edge_keys = [
+                (u, v, key)
+                for u, v, key, attrs in graph_store.graph.edges(keys=True, data=True)
+                if int(attrs.get("source_book", -1)) == int(source_book) and int(attrs.get("source_chunk", -1)) == int(source_chunk)
+            ]
+        else:
+            lingering_edge_keys = [
+                (u, v)
+                for u, v, attrs in graph_store.graph.edges(data=True)
+                if int(attrs.get("source_book", -1)) == int(source_book) and int(attrs.get("source_chunk", -1)) == int(source_chunk)
+            ]
+        for edge_key in lingering_edge_keys:
+            graph_store.graph.remove_edge(*edge_key)
+            extra_removed_edges += 1
+
+        mutated_nodes = False
+        for node_id in pre_cleanup_node_ids:
+            if node_id not in graph_store.graph.nodes:
+                continue
+            attrs = graph_store.graph.nodes[node_id]
+            source_chunks = attrs.get("source_chunks", [])
+            if isinstance(source_chunks, str):
+                try:
+                    source_chunks = json.loads(source_chunks)
+                except (json.JSONDecodeError, TypeError):
+                    source_chunks = []
+            normalized_source_chunks = [str(raw_chunk_id).strip() for raw_chunk_id in (source_chunks or []) if str(raw_chunk_id).strip()]
+            filtered_source_chunks = [raw_chunk_id for raw_chunk_id in normalized_source_chunks if raw_chunk_id != chunk_id]
+
+            claims = attrs.get("claims", [])
+            if isinstance(claims, str):
+                try:
+                    claims = json.loads(claims)
+                except (json.JSONDecodeError, TypeError):
+                    claims = []
+            filtered_claims = []
+            for claim in claims or []:
+                if not isinstance(claim, dict):
+                    filtered_claims.append(claim)
+                    continue
+                try:
+                    claim_book = int(claim.get("source_book", -1))
+                    claim_chunk = int(claim.get("source_chunk", -1))
+                except (TypeError, ValueError, AttributeError):
+                    filtered_claims.append(claim)
+                    continue
+                if claim_book == int(source_book) and claim_chunk == int(source_chunk):
+                    extra_removed_claims += 1
+                    continue
+                filtered_claims.append(claim)
+
+            if filtered_source_chunks != normalized_source_chunks:
+                attrs["source_chunks"] = filtered_source_chunks
+                attrs["updated_at"] = _now_iso()
+                mutated_nodes = True
+            if filtered_claims != list(claims or []):
+                attrs["claims"] = filtered_claims
+                attrs["updated_at"] = _now_iso()
+                mutated_nodes = True
+
+        orphaned_node_ids = [
+            node_id
+            for node_id in pre_cleanup_node_ids
+            if node_id in graph_store.graph.nodes and not _node_has_remaining_provenance(dict(graph_store.graph.nodes[node_id]))
+        ]
+        for node_id in orphaned_node_ids:
+            graph_store.graph.remove_node(node_id)
+        if orphaned_node_ids or lingering_edge_keys or mutated_nodes:
+            graph_store.save()
+        remaining_node_ids = {
+            node_id
+            for node_id in pre_cleanup_node_ids
+            if node_id in graph_store.graph.nodes
+        }
 
     removed_node_ids = sorted(pre_cleanup_node_ids - remaining_node_ids)
     async with vector_lock:
@@ -1684,6 +1851,9 @@ async def _cleanup_chunk_retry_artifacts(
 
     return {
         **cleanup,
+        "removed_nodes": int(cleanup.get("removed_nodes", 0) or 0) + len(orphaned_node_ids),
+        "removed_edges": int(cleanup.get("removed_edges", 0) or 0) + extra_removed_edges,
+        "removed_claims": int(cleanup.get("removed_claims", 0) or 0) + extra_removed_claims,
         "removed_chunk_vectors": 1,
         "removed_unique_node_vectors": len(removed_node_ids),
         "removed_node_ids": removed_node_ids,
@@ -2274,7 +2444,7 @@ def get_reembed_eligibility(
             "can_reembed_all": False,
             "reason_code": "safety_review_pending",
             "message": (
-                "This world has unresolved safety review items. Resolve or discard them before running Re-embed All."
+                "This world has unresolved safety review items. Resolve or reset them before running Re-embed All."
             ),
             "ignored_pending_sources_count": 0,
             "requires_full_rebuild": False,
@@ -4160,20 +4330,157 @@ async def update_safety_review_draft(world_id: str, review_id: str, draft_raw_te
     return item
 
 
-async def discard_safety_review(world_id: str, review_id: str) -> dict:
+async def reset_safety_review(world_id: str, review_id: str) -> dict:
     if has_active_ingestion_run(world_id):
-        raise RuntimeError("Wait for the active ingest run to finish before discarding safety review items.")
+        raise RuntimeError("Wait for the active ingest run to finish before resetting safety review items.")
 
     meta_lock = _get_async_lock(world_id, _meta_locks)
+    graph_lock = _get_async_lock(world_id, _graph_locks)
+    vector_lock = _get_async_lock(world_id, _vector_locks)
+
     async with meta_lock:
-        deleted = _delete_safety_review(world_id, review_id)
-    if not deleted:
+        meta = _load_meta(world_id)
+        cache = _load_safety_review_cache(world_id)
+        review = _find_safety_review(cache, review_id)
+        if review is None:
+            raise FileNotFoundError("Safety review item not found.")
+
+        source_id = str(review.get("source_id") or "").strip()
+        source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
+        if source is None:
+            raise RuntimeError("The source for this safety review item no longer exists.")
+
+        try:
+            chunk_index = int(review.get("chunk_index", -1))
+        except (TypeError, ValueError):
+            chunk_index = -1
+        try:
+            book_number = int(review.get("book_number", 0))
+        except (TypeError, ValueError):
+            book_number = 0
+        chunk_id = str(review.get("chunk_id") or "").strip()
+        had_active_override = _review_has_active_override(review)
+        current_draft = _review_editor_raw_text(review)
+
+    graph_store = GraphStore(world_id)
+    vector_store = VectorStore(world_id, embedding_model=get_world_ingest_settings(meta=meta)["embedding_model"])
+    unique_node_vector_store = VectorStore(
+        world_id,
+        embedding_model=get_world_ingest_settings(meta=meta)["embedding_model"],
+        collection_suffix="unique_nodes",
+    )
+
+    live_snapshot = await _snapshot_chunk_live_artifacts(
+        graph_store=graph_store,
+        vector_store=vector_store,
+        unique_node_vector_store=unique_node_vector_store,
+        chunk_id=chunk_id,
+        source_book=book_number,
+        source_chunk=chunk_index,
+        graph_lock=graph_lock,
+        vector_lock=vector_lock,
+    )
+    had_live_artifacts = live_snapshot is not None
+
+    try:
+        cleanup = await _cleanup_chunk_retry_artifacts(
+            graph_store=graph_store,
+            vector_store=vector_store,
+            unique_node_vector_store=unique_node_vector_store,
+            chunk_id=chunk_id,
+            source_book=book_number,
+            source_chunk=chunk_index,
+            graph_lock=graph_lock,
+            vector_lock=vector_lock,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Could not reset this chunk's live ingest artifacts: {exc}") from exc
+
+    stale_provenance_node_ids = _chunk_provenance_node_ids(
+        GraphStore(world_id),
+        chunk_id=chunk_id,
+        source_book=book_number,
+        source_chunk=chunk_index,
+    )
+    if stale_provenance_node_ids:
+        async with graph_lock:
+            final_graph_store = GraphStore(world_id)
+            for node_id in stale_provenance_node_ids:
+                if node_id in final_graph_store.graph.nodes:
+                    final_graph_store.graph.remove_node(node_id)
+            final_graph_store.save()
+        async with vector_lock:
+            await asyncio.to_thread(unique_node_vector_store.delete_documents, stale_provenance_node_ids)
+        cleanup["removed_nodes"] = int(cleanup.get("removed_nodes", 0) or 0) + len(stale_provenance_node_ids)
+        cleanup["removed_unique_node_vectors"] = int(cleanup.get("removed_unique_node_vectors", 0) or 0) + len(stale_provenance_node_ids)
+        cleanup["removed_node_ids"] = sorted(set(list(cleanup.get("removed_node_ids", [])) + stale_provenance_node_ids))
+
+    reset_warning = _build_safety_review_reset_warning(
+        had_live_artifacts=had_live_artifacts,
+        had_active_override=had_active_override,
+    )
+
+    async with meta_lock:
+        meta = _load_meta(world_id)
+        source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
+        if source is None:
+            raise RuntimeError("The source for this safety review item no longer exists.")
+        _ensure_source_tracking(source)
+        source["extracted_chunks"] = [idx for idx in _normalize_index_list(source.get("extracted_chunks", [])) if idx != chunk_index]
+        source["embedded_chunks"] = [idx for idx in _normalize_index_list(source.get("embedded_chunks", [])) if idx != chunk_index]
+        _clear_stage_failure(source, stage="extraction", chunk_id=chunk_id)
+        _clear_stage_failure(source, stage="embedding", chunk_id=chunk_id)
+        source.pop("ingest_snapshot", None)
+        _update_source_status_from_coverage(source)
+        _save_meta(world_id, meta)
+
+        cache = _load_safety_review_cache(world_id)
+        review = _find_safety_review(cache, review_id)
+        if review is None:
+            raise FileNotFoundError("Safety review item not found.")
+        review["draft_raw_text"] = current_draft
+        _reset_safety_review_item(review)
+        _save_safety_review_cache(world_id, cache)
+
+    audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+    checkpoint = get_checkpoint_info(world_id)
+    item = _get_safety_review_item(world_id, review_id)
+    if item is None:
         raise FileNotFoundError("Safety review item not found.")
+
+    cleanup_log = {key: value for key, value in cleanup.items() if key != "removed_node_ids"}
+    _append_log(
+        world_id,
+        {
+            "event": "safety_review_reset",
+            "review_id": review_id,
+            "source_id": source_id,
+            "book_number": book_number,
+            "chunk_index": chunk_index,
+            "had_live_artifacts": had_live_artifacts,
+            "had_active_override": had_active_override,
+            **cleanup_log,
+        },
+    )
+
     return {
         "ok": True,
-        "review_id": review_id,
+        "review": item,
+        "checkpoint": checkpoint,
         "safety_review_summary": get_safety_review_summary(world_id),
+        "reset_details": {
+            "review_id": review_id,
+            "had_live_artifacts": had_live_artifacts,
+            "had_active_override": had_active_override,
+            "requires_reingest_for_entity_descriptions": bool(reset_warning),
+            "warning": reset_warning,
+            "cleanup": cleanup,
+        },
     }
+
+
+async def discard_safety_review(world_id: str, review_id: str) -> dict:
+    return await reset_safety_review(world_id, review_id)
 
 
 async def manual_rescue_safety_reviews(

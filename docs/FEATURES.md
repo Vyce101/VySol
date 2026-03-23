@@ -49,6 +49,47 @@ Important behavior:
 - Older data that predates the new run-mode field still maps safely to the previous behavior for historical status display instead of being relabeled to the new default
 - Every run now also exposes unique-node embedding batch and delay controls for the index rebuild step used by entity resolution
 - Those embedding controls affect only entity resolution's unique-node rebuild path, not chooser/combiner model calls and not normal ingestion
+- The entity-resolution panel now shows `Embedded N / N` while the unique-node index rebuild is running, using the post-merge unique-node total instead of the raw pre-merge extraction count
+- Exact-only result summaries now label unresolved exact-pass leftovers as `Left Unchanged`
+
+## Gemini Thinking Controls
+
+VySol now exposes per-model Gemini thinking controls for the non-embedding Gemini model slots in Settings.
+
+Shipped defaults:
+
+- Graph Architect Model: `gemini-3.1-flash-lite-preview` with `minimal` thinking
+- Chat Model: `gemini-3-flash-preview` with `high` thinking
+- Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Default Embedding Model: `gemini-embedding-2-preview`
+
+Built-in dropdown behavior:
+
+- If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown for that slot
+- `Gemini 3.1 Pro` supports `low`, `medium`, and `high`
+- `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
+- `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
+- Leaving the dropdown blank means `use the provider default` for that model
+
+Manual fallback behavior:
+
+- If the model name does not match one of the built-in Gemini 3 dropdown families, the row shows `Built-in thinking dropdown not supported`
+- Clicking the pencil opens a manual field for that exact model slot
+- VySol expects one raw value only in that field
+- Digits only, such as `512` or `1024`, are sent as Gemini `thinkingBudget`
+- Non-numeric text, such as `high`, `medium`, or another provider-documented level name, is sent as Gemini `thinkingLevel`
+- Do not type wrappers such as `thinking.thinkingLevel=high`, `thinkingBudget=1024`, JSON, or any other code-looking syntax
+- Good examples: `high`, `minimal`, `1024`
+- Bad examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingBudget": 1024 }`
+
+Chat thought visibility:
+
+- Chat has a Gemini-only `Send Thinking` toggle
+- The shipped default has `Send Thinking` enabled
+- When enabled, VySol asks Gemini to return thought content when that model/provider path supports it
+- Thought content is saved with the message and shown in a collapsible `Model Thinking` block above the normal answer text
+- `IntenseRP Next` does not use this toggle or thought-block rendering
 
 ## Context X-Ray
 
@@ -165,6 +206,9 @@ Important behavior:
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
 - A passed blank repair still counts as a real live repaired chunk override, so `Reset to Live`, `Re-ingest` reuse, `Re-embed All`, and rebuild guards continue to respect it
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved and the previously live repaired chunk remains live instead of being torn down first
+- `Reset Chunk` now replaces the old misleading discard behavior; it deletes the live ingest artifacts for that chunk and keeps the queue item restartable instead of hiding it from the queue
+- `Reset Chunk` removes chunk-level graph/vector state for that chunk, but it does not retroactively unwrite already-merged entity descriptions from a completed entity-resolution run
+- When that merged-entity case applies, VySol warns you and points you to `Re-ingest` if you need those merged descriptions rebuilt cleanly too
 - Retry and resume actions skip unresolved Safety Queue chunks so they do not silently fall back to original source text
 - The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items
 - If the only remaining failed chunks already belong to the Safety Queue, the main ingest page stops showing `Resume` and `Retry All Failures` and points you back to the queue instead

@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from .config import load_prompt, load_settings
+from .config import load_prompt, load_settings, resolve_gemini_thinking_settings
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ async def _call_agent(
     max_retries: int = 3,
     extra_system_instruction: str | None = None,
     world_id: str | None = None,
+    slot_key: str | None = None,
 ) -> tuple[dict, dict]:
     """
     Call a Gemini agent with retry logic and key rotation.
@@ -121,13 +122,34 @@ async def _call_agent(
             api_key, key_idx = await km.await_active_key()
             client = genai.Client(api_key=api_key)
 
-            config = types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=8192,
-                temperature=temperature,
-                response_mime_type="application/json",
-                safety_settings=safety_settings,
-            )
+            resolved_slot_key = slot_key
+            if resolved_slot_key is None:
+                resolved_slot_key = {
+                    "entity_architect_prompt": "default_model_flash",
+                    "relationship_architect_prompt": "default_model_flash",
+                    "graph_architect_prompt": "default_model_flash",
+                    "claim_architect_prompt": "default_model_flash",
+                    "entity_resolution_chooser_prompt": "default_model_entity_chooser",
+                    "entity_resolution_combiner_prompt": "default_model_entity_combiner",
+                }.get(prompt_key)
+
+            config_kwargs: dict[str, Any] = {
+                "system_instruction": system_prompt,
+                "max_output_tokens": 8192,
+                "temperature": temperature,
+                "response_mime_type": "application/json",
+                "safety_settings": safety_settings,
+            }
+            if resolved_slot_key:
+                thinking_config = resolve_gemini_thinking_settings(
+                    settings,
+                    slot_key=resolved_slot_key,
+                    model_name=model_name,
+                )
+                if thinking_config:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_config)
+
+            config = types.GenerateContentConfig(**config_kwargs)
 
             response = await client.aio.models.generate_content(
                 model=model_name,
@@ -222,7 +244,7 @@ class EntityArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str) -> tuple[EntityArchitectOutput, dict]:
         settings = load_settings()
-        model = settings.get("default_model_flash", "gemini-flash-lite-latest")
+    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="entity_architect_prompt",
@@ -248,7 +270,7 @@ class RelationshipArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str, entities: list[NodeOut]) -> tuple[RelationshipArchitectOutput, dict]:
         settings = load_settings()
-        model = settings.get("default_model_flash", "gemini-flash-lite-latest")
+    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         user_content = json.dumps(
             {
@@ -284,7 +306,7 @@ class GraphArchitectAgent:
 
     async def run(self, extraction_chunk_text: str) -> tuple[GraphArchitectOutput, dict]:
         settings = load_settings()
-        model = settings.get("default_model_flash", "gemini-flash-lite-latest")
+    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="graph_architect_prompt",
@@ -312,7 +334,7 @@ class GraphArchitectAgent:
         previous_edges: list[EdgeOut],
     ) -> tuple[GraphArchitectOutput, dict]:
         settings = load_settings()
-        model = settings.get("default_model_flash", "gemini-flash-lite-latest")
+    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         user_content = extraction_chunk_text + "\n\n"
         user_content += "Here are the previously extracted entities for this same chunk:\n"
@@ -346,7 +368,7 @@ class ClaimArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str) -> tuple[ClaimArchitectOutput, dict]:
         settings = load_settings()
-        model = settings.get("default_model_flash", "gemini-flash-lite-latest")
+    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="claim_architect_prompt",

@@ -21,7 +21,6 @@ from core.config import world_meta_path
 from core.ingestion_engine import (
     audit_ingestion_integrity,
     abort_ingestion,
-    discard_safety_review,
     drain_sse_events,
     get_actionable_resume_sources,
     get_reembed_eligibility,
@@ -33,6 +32,7 @@ from core.ingestion_engine import (
     list_safety_reviews,
     manual_rescue_safety_reviews,
     recover_stale_ingestion,
+    reset_safety_review,
     start_ingestion,
     test_safety_review,
     update_safety_review_draft,
@@ -385,14 +385,19 @@ async def ingest_safety_review_test(world_id: str, review_id: str):
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
-@router.post("/{world_id}/ingest/safety-reviews/{review_id}/discard")
-async def ingest_safety_review_discard(world_id: str, review_id: str):
+@router.post("/{world_id}/ingest/safety-reviews/{review_id}/reset")
+async def ingest_safety_review_reset(world_id: str, review_id: str):
     _load_meta(world_id)
     try:
-        return await discard_safety_review(world_id, review_id)
+        return await reset_safety_review(world_id, review_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         message = str(exc)
         status_code = 409 if "active ingest run" in message.lower() else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.post("/{world_id}/ingest/safety-reviews/{review_id}/discard")
+async def ingest_safety_review_discard(world_id: str, review_id: str):
+    return await ingest_safety_review_reset(world_id, review_id)

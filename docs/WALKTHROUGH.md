@@ -53,11 +53,28 @@ Important behavior:
 
 ### AI Models
 
+Shipped defaults:
+
+- Graph Architect Model: `gemini-3.1-flash-lite-preview` with `minimal` thinking
+- Chat Model: `gemini-3-flash-preview` with `high` thinking
+- Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Default Embedding Model: `gemini-embedding-2-preview`
+
 Graph Architect Model:
 
 - This is the extraction model used to turn text chunks into entities and relationships
 - Lighter, faster models usually work best here because ingestion can make many calls
 - A Gemini Flash-class model is a good fit for most users
+
+Thinking:
+
+- Gemini model rows now show a `Thinking` control next to the model field
+- If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown instead of a free-text field
+- `Gemini 3.1 Pro` supports `low`, `medium`, and `high`
+- `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
+- `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
+- Leaving the dropdown blank means `use the model's provider default`
 
 Chat Provider:
 
@@ -90,6 +107,19 @@ Default Embedding Model:
 
 - This is the default embedding model for new worlds
 - The shipped default is `gemini-embedding-2-preview`
+
+Unsupported Gemini models and manual thinking entry:
+
+- If you type a Gemini model name that does not match one of VySol's built-in Gemini 3 dropdown families, the `Thinking` row shows `Built-in thinking dropdown not supported`
+- Click the pencil button to open the manual thinking field for that model slot
+- Enter only one raw value in that field
+- If you enter digits only, such as `512` or `1024`, VySol sends that as a Gemini `thinkingBudget`
+- If you enter text, such as `high`, `medium`, or another provider-documented level name, VySol sends that as a Gemini `thinkingLevel`
+- Do not type wrappers such as `thinking.thinkingLevel=high`, `thinkingBudget=1024`, `level: high`, or JSON
+- Good manual examples: `high`, `medium`, `minimal`, `1024`
+- Bad manual examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingLevel": "high" }`
+- If you are unsure what values a custom Gemini model accepts, check that model family's provider docs first and then enter only the final raw value VySol should send
+- The default embedding model does not support thinking controls in VySol
 
 Disable Safety Filters:
 
@@ -221,6 +251,7 @@ Reading the ingest progress header:
 - `Embedded Unique Nodes` means how many current unique graph nodes still have matching embeddings in the unique-node index
 - After chunk work finishes, world-level progress can continue through `unique_node_rebuild` and `audit_finalization` before the run is actually done
 - `World Blockers` highlights graph/vector audit problems that are not tied to a single chunk and therefore do not belong under `Failed Records`
+- Each source row in `Books in This World` now also shows `Embedded X / Y`, where `X` is the number of chunks from that source whose embeddings are fully finished and `Y` is that source's total chunk count
 
 Important note about node counts:
 
@@ -253,7 +284,10 @@ If extraction hits a safety block:
 - `Reset to Live` restores the currently live repaired chunk text when that item already has a passed live repair
 - A passed blank repair still counts as a real live repaired chunk, so `Reset to Live` and later rebuild/reuse flows continue to treat it as the active repaired version
 - If a retest fails after a previous repair already passed, the world keeps using that last live repaired chunk until a newer test fully passes
-- `Discard` removes that repair item and its override state
+- `Reset Chunk` deletes the live ingest data for that chunk and keeps the item in the Safety Queue so the chunk can be rebuilt truthfully
+- `Reset Chunk` removes that chunk's live chunk vector, chunk-scoped graph artifacts, and other chunk-level ingest state instead of pretending the problem is gone
+- If the world already completed entity resolution, `Reset Chunk` warns when merged entity descriptions may still include information that came from that chunk
+- In that case, the queue item cannot directly discard those already-merged entity descriptions; use `Re-ingest` if you need those merged descriptions rebuilt cleanly too
 
 Entity-resolution controls:
 
@@ -265,6 +299,8 @@ Entity-resolution controls:
 - `Embedding batch size` controls unique-node embedding rebuild batch size for that entity-resolution run
 - `Embedding delay (seconds)` adds a per-batch cooldown to that same unique-node embedding rebuild step
 - The embedding controls apply to entity resolution only; they do not change ingest or `Re-embed All`
+- The entity-resolution status panel now shows `Embedded N / N` during the unique-node index rebuild, using the post-merge unique-node total instead of the raw pre-merge extraction total
+- Exact-only summaries now label unresolved exact-pass leftovers as `Left Unchanged`
 
 ## Rebuild And Retry Actions
 
@@ -316,6 +352,15 @@ Open a world, create a new chat, and use the right-side retrieval settings to tu
 The retrieval sidebar is grouped into collapsible sections. All sections start collapsed, and you can open more than one at a time:
 
 `General Settings`
+
+`Send Thinking`
+
+- This toggle appears only when the chat provider is `Google (Gemini)`
+- It is `on` by default in the shipped app defaults
+- Turning it on asks Gemini to include thought content when the chosen model and provider path support it
+- When Gemini returns thought content, VySol saves it with the message and renders a collapsible `Model Thinking` block above the normal reply text
+- Turning it off keeps normal replies and skips requesting thought content from Gemini
+- This toggle does not affect `IntenseRP Next`
 
 `Vector Query (Msgs)`
 

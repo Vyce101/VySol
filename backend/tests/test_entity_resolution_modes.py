@@ -46,10 +46,19 @@ def test_exact_only_mode_stops_after_normalized_match_pass(tmp_path, monkeypatch
 
     rebuild_calls: list[list[str]] = []
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(2, 2)
         return object()
 
     monkeypatch.setattr(engine, "_choose_matches", _fail_choose)
@@ -66,6 +75,8 @@ def test_exact_only_mode_stops_after_normalized_match_pass(tmp_path, monkeypatch
     assert status["resolution_mode"] == "exact_only"
     assert status["resolved_entities"] == 2
     assert status["unresolved_entities"] == 1
+    assert status["embedding_completed_entities"] == 2
+    assert status["embedding_total_entities"] == 2
     assert status["auto_resolved_pairs"] == 1
     assert status["new_nodes_since_last_completed_resolution"] == 0
     assert reloaded.get_node_count() == 2
@@ -85,10 +96,19 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     refreshed_merges: list[tuple[str, list[str]]] = []
     fake_unique_node_store = object()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(3, 3)
         return fake_unique_node_store
 
     async def _fake_refresh_unique_node_index_after_merge(
@@ -141,6 +161,8 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     assert status["resolution_mode"] == "exact_then_ai"
     assert status["resolved_entities"] == 3
     assert status["unresolved_entities"] == 0
+    assert status["embedding_completed_entities"] == 2
+    assert status["embedding_total_entities"] == 2
     assert reloaded.get_node_count() == 2
     assert rebuild_calls == [["node-a", "node-b", "node-c"]]
     assert refreshed_merges == [("node-a", ["node-b"])]
@@ -160,10 +182,19 @@ def test_exact_then_ai_rebuilds_unique_index_after_exact_pass_before_candidate_s
     rebuild_calls: list[list[str]] = []
     fake_unique_node_store = object()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(3, 3)
         return fake_unique_node_store
 
     async def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k, abort_event=None):
@@ -254,6 +285,8 @@ def test_entity_resolution_status_exposes_embedding_controls(tmp_path, monkeypat
                 "entity_resolution_phase": "waiting",
                 "entity_resolution_embedding_batch_size": 7,
                 "entity_resolution_embedding_cooldown_seconds": 1.5,
+                "entity_resolution_embedding_completed_entities": 4,
+                "entity_resolution_embedding_total_entities": 9,
             }
         ),
         encoding="utf-8",
@@ -263,6 +296,8 @@ def test_entity_resolution_status_exposes_embedding_controls(tmp_path, monkeypat
 
     assert status["embedding_batch_size"] == 7
     assert status["embedding_cooldown_seconds"] == 1.5
+    assert status["embedding_completed_entities"] == 4
+    assert status["embedding_total_entities"] == 9
 
 
 def test_entity_resolution_status_tracks_new_nodes_since_last_completed_run(tmp_path, monkeypatch):
@@ -278,9 +313,18 @@ def test_entity_resolution_status_tracks_new_nodes_since_last_completed_run(tmp_
     async def _fail_combine(*args, **kwargs):
         raise AssertionError("Combiner should not run in exact-only mode.")
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(active_store.get_node_count(), active_store.get_node_count())
         return object()
 
     monkeypatch.setattr(engine, "_choose_matches", _fail_choose)
@@ -325,8 +369,17 @@ def test_entity_resolution_start_uses_custom_embedding_controls(tmp_path, monkey
 
     rebuild_calls: list[tuple[list[str], int, float]] = []
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         rebuild_calls.append((sorted(active_store.graph.nodes()), batch_size, cooldown_seconds))
+        if progress_callback is not None:
+            await progress_callback(active_store.get_node_count(), active_store.get_node_count())
         return object()
 
     monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
@@ -443,7 +496,16 @@ def test_chooser_failure_fails_closed_without_live_graph_mutation(tmp_path, monk
 
     fake_unique_node_store = object()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
+        if progress_callback is not None:
+            await progress_callback(active_store.get_node_count(), active_store.get_node_count())
         return fake_unique_node_store
 
     async def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k, abort_event=None):
@@ -477,9 +539,18 @@ def test_exact_only_commit_pending_recovery_finishes_truthfully_after_meta_write
     store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
     store.save()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, _active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        _active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(_active_store.get_node_count(), _active_store.get_node_count())
         return object()
 
     original_update_meta_from_state = engine._update_meta_from_state
@@ -520,9 +591,18 @@ def test_staged_vector_snapshot_failure_leaves_live_graph_unmutated(tmp_path, mo
     store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
     store.save()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, _active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        _active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
         assert batch_size == 32
         assert cooldown_seconds == 0.0
+        if progress_callback is not None:
+            await progress_callback(_active_store.get_node_count(), _active_store.get_node_count())
         return object()
 
     replace_called = {"value": False}
@@ -556,7 +636,16 @@ def test_exact_only_events_label_current_exact_match_group(tmp_path, monkeypatch
     store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
     store.save()
 
-    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(
+        _vector_store,
+        active_store,
+        batch_size,
+        cooldown_seconds,
+        abort_event=None,
+        progress_callback=None,
+    ):
+        if progress_callback is not None:
+            await progress_callback(active_store.get_node_count(), active_store.get_node_count())
         return object()
 
     monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)

@@ -470,23 +470,14 @@ class GraphStore:
         # Remove chunk source references and chunk-scoped claims from nodes.
         nodes_to_remove: list[str] = []
         for nid, attrs in list(self.graph.nodes(data=True)):
-            source_chunks = attrs.get("source_chunks", [])
-            if isinstance(source_chunks, str):
-                try:
-                    source_chunks = json.loads(source_chunks)
-                except (json.JSONDecodeError, TypeError):
-                    source_chunks = []
-            source_chunks = [str(c) for c in source_chunks]
+            normalized_attrs = _cast_node(dict(attrs))
+            source_chunks = [str(c) for c in normalized_attrs.get("source_chunks", [])]
             had_chunk = chunk_id in source_chunks
 
-            claims = attrs.get("claims", [])
-            if isinstance(claims, str):
-                try:
-                    claims = json.loads(claims)
-                except (json.JSONDecodeError, TypeError):
-                    claims = []
+            claims = normalized_attrs.get("claims", [])
 
             filtered_claims = []
+            removed_chunk_claim = False
             for claim in claims:
                 try:
                     claim_book = int(claim.get("source_book", -1))
@@ -496,21 +487,26 @@ class GraphStore:
                     claim_chunk = -1
                 if claim_book == int(source_book) and claim_chunk == int(source_chunk):
                     removed_claims += 1
+                    removed_chunk_claim = True
                     continue
                 filtered_claims.append(claim)
 
             if had_chunk:
                 source_chunks = [c for c in source_chunks if c != chunk_id]
-                attrs["source_chunks"] = source_chunks
-                attrs["updated_at"] = _now_iso()
+                normalized_attrs["source_chunks"] = source_chunks
 
             if len(filtered_claims) != len(claims):
-                attrs["claims"] = filtered_claims
-                attrs["updated_at"] = _now_iso()
+                normalized_attrs["claims"] = filtered_claims
 
             # If this node is now orphaned for provenance, remove it.
-            if had_chunk and not source_chunks and not filtered_claims:
+            if (had_chunk or removed_chunk_claim) and not source_chunks and not filtered_claims:
                 nodes_to_remove.append(nid)
+                continue
+
+            if had_chunk or removed_chunk_claim:
+                normalized_attrs["updated_at"] = _now_iso()
+                attrs.clear()
+                attrs.update(normalized_attrs)
 
         for nid in nodes_to_remove:
             if nid in self.graph:

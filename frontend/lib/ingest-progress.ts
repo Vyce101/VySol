@@ -17,6 +17,7 @@ export interface IngestStageCounters {
 
 export interface IngestProgressPayload {
     active_operation?: string;
+    active_ingestion_run?: boolean;
     progress_phase?: IngestProgressPhase;
     progress_scope?: IngestProgressScope;
     completed_chunks_current_phase?: number;
@@ -108,13 +109,18 @@ function fallbackExtractedChunks(payload: IngestProgressPayload, expectedChunks:
     if (phase === "extracting") {
         return phaseCompleted;
     }
-    if (phase === "chunk_embedding" || phase === "aborting") {
+    if (
+        phase === "chunk_embedding"
+        || phase === "unique_node_rebuild"
+        || phase === "audit_finalization"
+        || phase === "aborting"
+    ) {
         return expectedChunks > 0 ? expectedChunks : phaseCompleted;
     }
     return phaseCompleted;
 }
 
-function fallbackEmbeddedChunks(payload: IngestProgressPayload): number {
+function fallbackEmbeddedChunks(payload: IngestProgressPayload, expectedChunks: number): number {
     const fromStageCounters = asCount(payload.stage_counters?.embedded_chunks);
     if (fromStageCounters > 0) return fromStageCounters;
 
@@ -125,6 +131,9 @@ function fallbackEmbeddedChunks(payload: IngestProgressPayload): number {
     );
     if (phase === "chunk_embedding" || phase === "aborting") {
         return phaseCompleted;
+    }
+    if (phase === "unique_node_rebuild" || phase === "audit_finalization") {
+        return expectedChunks > 0 ? expectedChunks : phaseCompleted;
     }
     return 0;
 }
@@ -147,7 +156,7 @@ export function resolveStableIngestProgress(payload?: IngestProgressPayload | nu
     const progressScope = payload?.progress_scope ?? ((phase === "unique_node_rebuild" || phase === "audit_finalization") ? "world" : "source");
     const expectedChunks = fallbackExpectedChunks(payload ?? {});
     const extractedChunks = Math.min(expectedChunks || Number.MAX_SAFE_INTEGER, fallbackExtractedChunks(payload ?? {}, expectedChunks));
-    const embeddedChunks = Math.min(expectedChunks || Number.MAX_SAFE_INTEGER, fallbackEmbeddedChunks(payload ?? {}));
+    const embeddedChunks = Math.min(expectedChunks || Number.MAX_SAFE_INTEGER, fallbackEmbeddedChunks(payload ?? {}, expectedChunks));
     const currentUniqueNodes = fallbackCurrentUniqueNodes(payload ?? {});
     const embeddedUniqueNodes = Math.min(
         currentUniqueNodes || Number.MAX_SAFE_INTEGER,
@@ -161,8 +170,18 @@ export function resolveStableIngestProgress(payload?: IngestProgressPayload | nu
     const explicitTotalWorkUnits = asCount(payload?.total_work_units);
     let completedWorkUnits = explicitCompletedWorkUnits;
     let totalWorkUnits = explicitTotalWorkUnits;
+    const activeIngestionRun = payload?.active_ingestion_run === true;
 
-    if (totalWorkUnits <= 0) {
+    if (!isReembedAll && expectedChunks > 0) {
+        totalWorkUnits = expectedChunks * 2 + 1;
+        completedWorkUnits = extractedChunks + embeddedChunks;
+
+        if (phase === "audit_finalization") {
+            completedWorkUnits = expectedChunks * 2;
+        } else if (!activeIngestionRun && extractedChunks >= expectedChunks && embeddedChunks >= expectedChunks) {
+            completedWorkUnits = totalWorkUnits;
+        }
+    } else if (totalWorkUnits <= 0) {
         if (isReembedAll) {
             totalWorkUnits = expectedChunks + currentUniqueNodes + 1;
             if (phase === "unique_node_rebuild") {

@@ -21,11 +21,12 @@ API key note:
 
 Default models (current):
 
-- Graph Architect Model: `gemini-flash-lite-latest`
-- Chat Model: `gemini-flash-latest`
-- Entity Chooser Model: `gemini-flash-latest`
-- Entity Combiner Model: `gemini-flash-lite-latest`
+- Graph Architect Model: `gemini-3.1-flash-lite-preview` with `minimal` thinking
+- Chat Model: `gemini-3-flash-preview` with `high` thinking
+- Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
 - Default Embedding Model: `gemini-embedding-2-preview`
+- Gemini `Send Thinking`: `on` by default
 
 Default chat settings (current):
 

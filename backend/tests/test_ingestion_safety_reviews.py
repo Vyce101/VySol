@@ -411,6 +411,103 @@ def test_successful_retest_replaces_live_override_and_vectors(monkeypatch):
     assert live_display_names == ["Candidate A", "Candidate B"]
 
 
+def test_reset_safety_review_clears_live_override_and_recreates_queue_owned_failure(monkeypatch):
+    world_id = "world-safety-review-reset-live"
+    _prepare_world(monkeypatch, world_id)
+    old_live_text = "old repaired text"
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text=old_live_text,
+        draft_raw_text=old_live_text,
+    )
+    _seed_live_chunk_artifacts(world_id, chunk_id, old_live_text)
+
+    result = asyncio.run(ingestion_engine.reset_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    meta = ingestion_engine._load_meta(world_id)
+    source = meta["sources"][0]
+    reloaded_graph = graph_store.GraphStore(world_id)
+    chunk_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL)
+    unique_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL, collection_suffix="unique_nodes")
+    extraction_failures = [failure for failure in source.get("stage_failures", []) if failure.get("stage") == "extraction"]
+    embedding_failures = [failure for failure in source.get("stage_failures", []) if failure.get("stage") == "embedding" and failure.get("scope") == "chunk"]
+
+    assert review["draft_raw_text"] == old_live_text
+    assert review["active_override_raw_text"] == ""
+    assert review["has_active_override"] is False
+    assert review["status"] == "draft"
+    assert review["last_test_outcome"] == "not_tested"
+    assert source["status"] == "partial_failure"
+    assert source["extracted_chunks"] == []
+    assert source["embedded_chunks"] == []
+    assert source["failed_chunks"] == [0]
+    assert len(extraction_failures) == 1
+    assert extraction_failures[0]["error_type"] == "coverage_gap"
+    assert extraction_failures[0]["chunk_id"] == chunk_id
+    assert len(embedding_failures) == 1
+    assert embedding_failures[0]["error_type"] == "coverage_gap"
+    assert reloaded_graph.get_node_count() == 0
+    assert chunk_store.get_records_by_ids([chunk_id], include_documents=True) == []
+    assert unique_store.get_records_by_ids(["live-node-a", "live-node-b"], include_documents=True) == []
+    assert result["safety_review_summary"]["unresolved_reviews"] == 1
+    assert result["safety_review_summary"]["active_override_reviews"] == 0
+    assert result["reset_details"]["had_live_artifacts"] is True
+    assert result["reset_details"]["requires_reingest_for_entity_descriptions"] is True
+
+
+def test_reset_safety_review_replaces_embedding_failure_with_full_restart_failure(monkeypatch):
+    world_id = "world-safety-review-reset-blocked"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="",
+        draft_raw_text="unsafe original text",
+        has_active_override=False,
+    )
+    meta = ingestion_engine._load_meta(world_id)
+    source = meta["sources"][0]
+    source["status"] = "partial_failure"
+    source["extracted_chunks"] = [0]
+    source["embedded_chunks"] = []
+    source["stage_failures"] = [
+        {
+            "stage": "embedding",
+            "scope": "chunk",
+            "chunk_index": 0,
+            "chunk_id": chunk_id,
+            "parent_chunk_id": chunk_id,
+            "source_id": "source-a",
+            "book_number": 1,
+            "error_type": "embedding_failed",
+            "error_message": "old embedding failure",
+            "attempt_count": 1,
+            "last_attempt_at": "2026-03-23T00:00:00+00:00",
+            "node_id": None,
+            "node_display_name": None,
+        }
+    ]
+    source["failed_chunks"] = [0]
+    ingestion_engine._save_meta(world_id, meta)
+
+    result = asyncio.run(ingestion_engine.reset_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    refreshed_meta = ingestion_engine._load_meta(world_id)
+    refreshed_source = refreshed_meta["sources"][0]
+    assert review["active_override_raw_text"] == ""
+    assert review["has_active_override"] is False
+    assert review["status"] == "blocked"
+    assert refreshed_source["extracted_chunks"] == []
+    assert refreshed_source["embedded_chunks"] == []
+    assert refreshed_source["failed_chunks"] == [0]
+    assert len(refreshed_source["stage_failures"]) == 2
+    assert {failure["stage"] for failure in refreshed_source["stage_failures"]} == {"embedding", "extraction"}
+    assert all(failure["error_type"] == "coverage_gap" for failure in refreshed_source["stage_failures"])
+    assert result["reset_details"]["had_live_artifacts"] is False
+    assert result["reset_details"]["requires_reingest_for_entity_descriptions"] is False
+
+
 def test_blank_draft_is_preserved_when_saved(monkeypatch):
     world_id = "world-safety-review-blank-draft-save"
     _prepare_world(monkeypatch, world_id)

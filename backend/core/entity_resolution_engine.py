@@ -11,7 +11,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from .agents import _call_agent
 from .config import load_settings, world_meta_path
@@ -362,6 +362,8 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
             ),
             "resolved_entities": meta.get("entity_resolution_resolved_entities", 0),
             "unresolved_entities": meta.get("entity_resolution_unresolved_entities", 0),
+            "embedding_completed_entities": meta.get("entity_resolution_embedding_completed_entities", 0),
+            "embedding_total_entities": meta.get("entity_resolution_embedding_total_entities", 0),
             "auto_resolved_pairs": meta.get("entity_resolution_auto_resolved_pairs", 0),
             "total_entities": meta.get("entity_resolution_total_entities", 0),
             "resolution_mode": resolution_mode,
@@ -458,6 +460,8 @@ def begin_entity_resolution_run(
         total_entities=0,
         resolved_entities=0,
         unresolved_entities=0,
+        embedding_completed_entities=0,
+        embedding_total_entities=0,
         auto_resolved_pairs=0,
         current_anchor=None,
         current_candidates=[],
@@ -672,6 +676,7 @@ async def _upsert_unique_node_snapshots(
     batch_size: int,
     cooldown_seconds: float,
     abort_event: threading.Event | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
 ) -> int:
     normalized_nodes: list[dict[str, Any]] = []
     seen_node_ids: set[str] = set()
@@ -683,9 +688,14 @@ async def _upsert_unique_node_snapshots(
         normalized_nodes.append(node)
 
     if not normalized_nodes:
+        if progress_callback is not None:
+            progress_result = progress_callback(0, 0)
+            if asyncio.iscoroutine(progress_result):
+                await progress_result
         return 0
 
     total_written = 0
+    total_nodes = len(normalized_nodes)
     normalized_batch_size = _normalize_embedding_batch_size(batch_size)
     normalized_cooldown_seconds = _normalize_embedding_cooldown_seconds(cooldown_seconds)
     for start in range(0, len(normalized_nodes), normalized_batch_size):
@@ -701,6 +711,10 @@ async def _upsert_unique_node_snapshots(
             embeddings=embeddings,
         )
         total_written += len(batch)
+        if progress_callback is not None:
+            progress_result = progress_callback(total_written, total_nodes)
+            if asyncio.iscoroutine(progress_result):
+                await progress_result
         has_more_batches = start + normalized_batch_size < len(normalized_nodes)
         if has_more_batches:
             await _sleep_with_abort(abort_event, normalized_cooldown_seconds)
@@ -713,6 +727,7 @@ async def _rebuild_unique_node_index(
     batch_size: int,
     cooldown_seconds: float,
     abort_event: threading.Event | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
 ) -> VectorStore:
     unique_node_vector_store.drop_collection()
 
@@ -727,6 +742,7 @@ async def _rebuild_unique_node_index(
         batch_size=batch_size,
         cooldown_seconds=cooldown_seconds,
         abort_event=abort_event,
+        progress_callback=progress_callback,
     )
     return unique_node_vector_store
 
@@ -810,7 +826,7 @@ async def _choose_matches(
         return [], "No candidates were available."
 
     settings = load_settings()
-    model_name = settings.get("default_model_entity_chooser", "gemini-flash-latest")
+    model_name = settings.get("default_model_entity_chooser", "gemini-3.1-flash-lite-preview")
     payload = json.dumps(
         {
             "anchor": anchor,
@@ -839,7 +855,7 @@ async def _choose_matches(
 
 async def _combine_entities(nodes: list[dict[str, Any]], *, world_id: str) -> tuple[str, str]:
     settings = load_settings()
-    model_name = settings.get("default_model_entity_combiner", "gemini-flash-lite-latest")
+    model_name = settings.get("default_model_entity_combiner", "gemini-3.1-flash-lite-preview")
     payload = json.dumps({"entities": nodes}, ensure_ascii=False)
 
     parsed, _ = await _call_agent(
@@ -948,6 +964,8 @@ def _update_meta_from_state(world_id: str, state: dict[str, Any], graph_store: G
     meta["entity_resolution_total_entities"] = state.get("total_entities", 0)
     meta["entity_resolution_resolved_entities"] = state.get("resolved_entities", 0)
     meta["entity_resolution_unresolved_entities"] = state.get("unresolved_entities", 0)
+    meta["entity_resolution_embedding_completed_entities"] = state.get("embedding_completed_entities", 0)
+    meta["entity_resolution_embedding_total_entities"] = state.get("embedding_total_entities", 0)
     meta["entity_resolution_auto_resolved_pairs"] = state.get("auto_resolved_pairs", 0)
     meta["entity_resolution_mode"] = state.get("resolution_mode")
     meta["entity_resolution_review_mode"] = state.get("review_mode", False)
@@ -1170,6 +1188,8 @@ async def start_entity_resolution(
             total_entities=initial_total,
             resolved_entities=0,
             unresolved_entities=initial_total,
+            embedding_completed_entities=0,
+            embedding_total_entities=0,
             auto_resolved_pairs=0,
             current_anchor=None,
             current_candidates=[],
@@ -1260,17 +1280,34 @@ async def start_entity_resolution(
                 message="Refreshing staged unique node index after exact match pass.",
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
+                embedding_completed_entities=0,
+                embedding_total_entities=working_graph_store.get_node_count(),
                 auto_resolved_pairs=auto_resolved_pairs,
                 current_anchor_label=current_anchor_label,
             )
             _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
+            async def on_exact_index_refresh_progress(completed_entities: int, total_entities: int) -> None:
+                progress_state = _set_state(
+                    world_id,
+                    phase="index_refresh",
+                    message="Refreshing staged unique node index after exact match pass.",
+                    resolved_entities=processed_count,
+                    unresolved_entities=len(remaining_ids),
+                    embedding_completed_entities=completed_entities,
+                    embedding_total_entities=total_entities,
+                    auto_resolved_pairs=auto_resolved_pairs,
+                    current_anchor_label=current_anchor_label,
+                )
+                _update_meta_from_state(world_id, progress_state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **progress_state})
             stage_vector_store = await _rebuild_unique_node_index(
                 stage_vector_store,
                 working_graph_store,
                 batch_size=normalized_embedding_batch_size,
                 cooldown_seconds=normalized_embedding_cooldown_seconds,
                 abort_event=abort_event,
+                progress_callback=on_exact_index_refresh_progress,
             )
 
         if not use_ai_pass:
@@ -1311,6 +1348,8 @@ async def start_entity_resolution(
                     "total_entities": initial_total,
                     "resolved_entities": processed_count,
                     "unresolved_entities": len(remaining_ids),
+                    "embedding_completed_entities": working_graph_store.get_node_count(),
+                    "embedding_total_entities": working_graph_store.get_node_count(),
                     "auto_resolved_pairs": auto_resolved_pairs,
                     "commit_state": "committed",
                 },
@@ -1324,17 +1363,34 @@ async def start_entity_resolution(
                 message="Preparing staged unique node index for AI candidate search.",
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
+                embedding_completed_entities=0,
+                embedding_total_entities=working_graph_store.get_node_count(),
                 auto_resolved_pairs=auto_resolved_pairs,
                 current_anchor_label=current_anchor_label,
             )
             _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
+            async def on_ai_index_refresh_progress(completed_entities: int, total_entities: int) -> None:
+                progress_state = _set_state(
+                    world_id,
+                    phase="index_refresh",
+                    message="Preparing staged unique node index for AI candidate search.",
+                    resolved_entities=processed_count,
+                    unresolved_entities=len(remaining_ids),
+                    embedding_completed_entities=completed_entities,
+                    embedding_total_entities=total_entities,
+                    auto_resolved_pairs=auto_resolved_pairs,
+                    current_anchor_label=current_anchor_label,
+                )
+                _update_meta_from_state(world_id, progress_state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **progress_state})
             stage_vector_store = await _rebuild_unique_node_index(
                 stage_vector_store,
                 working_graph_store,
                 batch_size=normalized_embedding_batch_size,
                 cooldown_seconds=normalized_embedding_cooldown_seconds,
                 abort_event=abort_event,
+                progress_callback=on_ai_index_refresh_progress,
             )
 
         while remaining_ids:
@@ -1497,6 +1553,7 @@ async def start_entity_resolution(
         _update_meta_from_state(world_id, state, live_graph_store)
         push_sse_event(world_id, {"event": "progress", **state})
 
+        final_unique_entity_count = working_graph_store.get_node_count()
         _finalize_resolution_commit(
             world_id,
             live_graph_store=live_graph_store,
@@ -1516,6 +1573,8 @@ async def start_entity_resolution(
                 "total_entities": initial_total,
                 "resolved_entities": initial_total,
                 "unresolved_entities": 0,
+                "embedding_completed_entities": final_unique_entity_count,
+                "embedding_total_entities": final_unique_entity_count,
                 "auto_resolved_pairs": auto_resolved_pairs,
                 "commit_state": "committed",
             },

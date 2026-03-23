@@ -22,10 +22,18 @@ SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
 _DEFAULT_SETTINGS = {
     "api_keys": [],
     "key_rotation_mode": "FAIL_OVER",
-    "default_model_flash": "gemini-flash-lite-latest",
-    "default_model_chat": "gemini-flash-latest",
-    "default_model_entity_chooser": "gemini-flash-latest",
-    "default_model_entity_combiner": "gemini-flash-lite-latest",
+    "default_model_flash": "gemini-3.1-flash-lite-preview",
+    "default_model_flash_thinking_level": "minimal",
+    "default_model_flash_thinking_manual": "",
+    "default_model_chat": "gemini-3-flash-preview",
+    "default_model_chat_thinking_level": "high",
+    "default_model_chat_thinking_manual": "",
+    "default_model_entity_chooser": "gemini-3.1-flash-lite-preview",
+    "default_model_entity_chooser_thinking_level": "high",
+    "default_model_entity_chooser_thinking_manual": "",
+    "default_model_entity_combiner": "gemini-3.1-flash-lite-preview",
+    "default_model_entity_combiner_thinking_level": "high",
+    "default_model_entity_combiner_thinking_manual": "",
     "embedding_model": "gemini-embedding-2-preview",
     "chunk_size_chars": 4000,
     "chunk_overlap_chars": 150,
@@ -50,9 +58,16 @@ _DEFAULT_SETTINGS = {
     "embedding_cooldown_seconds": 0,
     # Chat provider selection
     "chat_provider": "gemini",
+    "gemini_chat_send_thinking": True,
     "intenserp_base_url": "http://127.0.0.1:7777/v1",
     "intenserp_model_id": "glm-chat",
 }
+
+GEMINI_3_THINKING_LEVELS = (
+    ("gemini-3.1-pro", ("low", "medium", "high")),
+    ("gemini-3.1-flash-lite", ("minimal", "low", "medium", "high")),
+    ("gemini-3-flash", ("minimal", "low", "medium", "high")),
+)
 
 INGEST_SETTINGS_KEYS = (
     "chunk_size_chars",
@@ -89,6 +104,22 @@ def _coerce_float(value: object, default: float, *, minimum: float | None = None
     return normalized
 
 
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if value is None:
+        return bool(default)
+    return bool(value)
+
+
 def sanitize_settings(settings: dict) -> dict:
     """Normalize runtime/persisted settings so invalid stage limits cannot leak into execution."""
     data = dict(settings)
@@ -114,6 +145,26 @@ def sanitize_settings(settings: dict) -> dict:
         data.get("embedding_cooldown_seconds", _DEFAULT_SETTINGS["embedding_cooldown_seconds"]),
         _DEFAULT_SETTINGS["embedding_cooldown_seconds"],
         minimum=0.0,
+    )
+    thinking_keys = (
+        "default_model_flash_thinking_level",
+        "default_model_flash_thinking_manual",
+        "default_model_chat_thinking_level",
+        "default_model_chat_thinking_manual",
+        "default_model_entity_chooser_thinking_level",
+        "default_model_entity_chooser_thinking_manual",
+        "default_model_entity_combiner_thinking_level",
+        "default_model_entity_combiner_thinking_manual",
+    )
+    for key in thinking_keys:
+        data[key] = str(data.get(key, _DEFAULT_SETTINGS[key]) or "").strip()
+    data["disable_safety_filters"] = _coerce_bool(
+        data.get("disable_safety_filters", _DEFAULT_SETTINGS["disable_safety_filters"]),
+        _DEFAULT_SETTINGS["disable_safety_filters"],
+    )
+    data["gemini_chat_send_thinking"] = _coerce_bool(
+        data.get("gemini_chat_send_thinking", _DEFAULT_SETTINGS["gemini_chat_send_thinking"]),
+        _DEFAULT_SETTINGS["gemini_chat_send_thinking"],
     )
     return data
 
@@ -230,6 +281,46 @@ def load_prompt(key: str) -> str:
     if key not in defaults:
         raise ValueError(f"Prompt key '{key}' not found in settings or default_prompts.json")
     return defaults[key]
+
+
+def get_supported_gemini_thinking_levels(model_name: object) -> list[str]:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return []
+    for prefix, levels in GEMINI_3_THINKING_LEVELS:
+        if normalized.startswith(prefix):
+            return list(levels)
+    return []
+
+
+def resolve_gemini_thinking_settings(
+    settings: dict,
+    *,
+    slot_key: str,
+    model_name: object,
+    include_thoughts: bool = False,
+) -> dict | None:
+    payload: dict[str, object] = {}
+    supported_levels = get_supported_gemini_thinking_levels(model_name)
+
+    if supported_levels:
+        level_key = f"{slot_key}_thinking_level"
+        raw_level = str(settings.get(level_key, "") or "").strip().lower()
+        if raw_level and raw_level in supported_levels:
+            payload["thinking_level"] = raw_level.upper()
+    else:
+        manual_key = f"{slot_key}_thinking_manual"
+        raw_manual = str(settings.get(manual_key, "") or "").strip()
+        if raw_manual:
+            try:
+                payload["thinking_budget"] = int(raw_manual)
+            except ValueError:
+                payload["thinking_level"] = raw_manual.upper()
+
+    if include_thoughts:
+        payload["include_thoughts"] = True
+
+    return payload or None
 
 
 def world_dir(world_id: str) -> Path:
