@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from core.config import parse_csv_env
+from core.world_duplication import cleanup_incomplete_duplicate_worlds
 from routers import worlds, ingestion, chat, graph, settings, entity_resolution
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -47,3 +48,8 @@ app.include_router(settings.router, prefix="/settings", tags=["Settings"])
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+async def cleanup_incomplete_duplicate_worlds_on_startup():
+    cleanup_incomplete_duplicate_worlds()

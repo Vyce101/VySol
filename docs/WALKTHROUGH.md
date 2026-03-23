@@ -107,6 +107,27 @@ Supported source format:
 
 For most casual use cases, the defaults are already more than enough.
 
+## Duplicating A World
+
+You can duplicate a world from the home page overflow menu.
+
+What gets copied:
+
+- World settings and saved ingest snapshot
+- Source files and graph data
+- Chats
+- Safety-review data and repaired-chunk overrides
+- Chunk vectors and unique-node vectors
+
+Important behavior:
+
+- A duplicate starts as a temporary preview card on the home page
+- The bottom-right world activity panel shows duplication progress while the copy runs
+- The temporary duplicate card is not openable until validation finishes
+- Copied chats become independent files inside the new world, so continuing a chat in the duplicate does not change the original world's chat
+- VySol does not carry over transient runtime ingest state like old resume/checkpoint state or old ingest logs
+- If the app or backend crashes before duplication finishes, the incomplete duplicate is discarded and you must start duplication again manually
+
 ## Ingestion Settings
 
 The main ingest page now shows a read-only snapshot of the current world's saved ingest settings.

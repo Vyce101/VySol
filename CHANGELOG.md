@@ -18,6 +18,7 @@ All notable user-visible changes to this project will be documented in this file
 - Added inline chat renaming in the sidebar, with conflict-safe saves that preserve Recent ordering.
 - Added a world-specific `Re-ingest` settings editor for editing saved chunk settings, glean amount, world-local ingest prompts, and repaired-chunk reuse before starting a full rebuild.
 - Added a `New Nodes` entity-resolution metric that tracks graph growth since the last completed entity-resolution run when a saved baseline exists.
+- Added crash-safe world duplication from the home page, including copied chats/settings/graph data, temporary duplicate preview cards, and bottom-right duplication progress tracking.
 
 ### Changed
 
@@ -44,6 +45,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed world duplication so completed duplicates no longer inherit stale resume/checkpoint state, copied ingest logs, or source-world chunk provenance that could later make the duplicate regress into a fake `partial_failure` state.
+- Fixed world-duplication preview cards so active duplicates no longer disappear during normal polling, source cards lock the duplicate action while a copy is running, and world-card status pills/stats now keep a consistent compact layout across different worlds.
 - Fixed ingest-family color consistency so dark mode uses the intended purple accent, light mode uses the intended blue accent, safety-review passed states reuse the same success green, and washed-out or invisible ingest progress/book/status accents render correctly again.
 - Fixed glean default/input behavior and clarified the currently supported OS.
 - Fixed launcher startup state detection.

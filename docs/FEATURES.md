@@ -92,6 +92,22 @@ Important behavior:
 - In `Exact + chooser/combiner`, the unique-node index is rebuilt immediately after the exact pass and then incrementally refreshed after later AI merges
 - Existing worlds can migrate to this retrieval model by running `Re-embed All` once; world recreation is not required
 
+## World Duplication
+
+VySol can duplicate a world from the home page while keeping the copy crash-safe.
+
+Important behavior:
+
+- Duplication creates a new world id and a new world folder instead of linking the duplicate back to the source world
+- Chats are copied into the duplicate world's own `chats` folder, so editing or continuing a copied chat in the duplicate does not modify the original world's chat history
+- The home page shows a temporary duplicate preview card while the copy is running
+- The floating bottom-right world activity panel shows duplication progress alongside other world activity
+- VySol copies durable world state such as sources, graph data, safety-review state, repaired-chunk overrides, chunk vectors, and unique-node vectors
+- VySol does not carry over transient runtime ingest artifacts such as old checkpoints or old ingest logs
+- World-bound chunk provenance is rewritten to the new world id before the duplicate is finalized, so the copied world does not inherit fake extraction-coverage failures from the source world's chunk ids
+- A post-copy ingest-integrity validation pass runs before the duplicate becomes a normal world
+- If the app or backend crashes before duplication completes, the unfinished duplicate is discarded instead of resuming automatically later
+
 ## Ingest Rebuild Safety
 
 VySol now treats `Re-embed All` as a narrow vector-maintenance operation and uses one clearer full rebuild action: `Re-ingest`.

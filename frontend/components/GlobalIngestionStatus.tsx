@@ -2,16 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Loader2, Upload } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Loader2, Upload } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { buildIngestActivityLabel, clampPercent, resolveStableIngestProgress } from "@/lib/ingest-progress";
-
-interface WorldSummary {
-    world_id: string;
-    world_name: string;
-    ingestion_status: string;
-    active_ingestion_run?: boolean;
-}
 
 interface CheckpointInfo {
     chunk_index?: number;
@@ -37,25 +30,50 @@ interface CheckpointInfo {
     progress_source_book_number?: number | null;
 }
 
-interface ActiveWorldProgress {
+interface IngestionActivity {
+    activity_id: string;
+    kind: "ingestion";
     world_id: string;
     world_name: string;
+    link_href?: string | null;
     ingestion_status: string;
-    expected_chunks: number;
-    extracted_chunks: number;
-    embedded_chunks: number;
+    checkpoint: CheckpointInfo;
+}
+
+interface DuplicationActivity {
+    activity_id: string;
+    kind: "duplication";
+    world_id: string;
+    world_name: string;
+    source_world_id?: string | null;
+    source_world_name?: string | null;
+    duplication_status: string;
+    phase: "copying";
+    progress_percent: number;
     completed_work_units: number;
     total_work_units: number;
-    overall_percent: number;
-    phase: "extracting" | "embedding" | "aborting" | "idle";
-    operation: string;
-    activity_label: string | null;
+}
+
+type WorldActivity = IngestionActivity | DuplicationActivity;
+
+interface DisplayActivity {
+    activity_id: string;
+    kind: "ingestion" | "duplication";
+    world_id: string;
+    world_name: string;
+    link_href?: string | null;
+    percent: number;
+    completedWorkUnits: number;
+    totalWorkUnits: number;
+    detail: string;
+    trailingLabel: string;
+    useStoppingStyle: boolean;
 }
 
 const STORAGE_KEY = "global-ingestion-status-expanded";
 
 export function GlobalIngestionStatus() {
-    const [activeWorlds, setActiveWorlds] = useState<ActiveWorldProgress[]>([]);
+    const [activities, setActivities] = useState<WorldActivity[]>([]);
     const [expanded, setExpanded] = useState(false);
     const [hydrated, setHydrated] = useState(false);
 
@@ -79,65 +97,17 @@ export function GlobalIngestionStatus() {
 
         const poll = async () => {
             try {
-                const worlds = await apiFetch<WorldSummary[]>("/worlds");
-                const runningWorlds = worlds.filter(
-                    (world) => world.active_ingestion_run || world.ingestion_status === "in_progress",
-                );
-
-                if (runningWorlds.length === 0) {
-                    if (!cancelled) {
-                        setActiveWorlds([]);
-                    }
-                } else {
-                    const checkpoints = await Promise.all(
-                        runningWorlds.map(async (world) => {
-                            const checkpoint = await apiFetch<CheckpointInfo>(
-                                `/worlds/${world.world_id}/ingest/checkpoint`,
-                            ).catch(() => null);
-                            const progress = resolveStableIngestProgress({
-                                active_operation: checkpoint?.active_operation,
-                                progress_phase: checkpoint?.progress_phase,
-                                completed_chunks_current_phase: checkpoint?.completed_chunks_current_phase,
-                                total_chunks_current_phase: checkpoint?.total_chunks_current_phase,
-                                chunks_total: checkpoint?.chunks_total,
-                                chunk_index: checkpoint?.chunk_index,
-                                stage_counters: checkpoint?.stage_counters,
-                                wait_state: checkpoint?.wait_state,
-                                wait_label: checkpoint?.wait_label,
-                                wait_retry_after_seconds: checkpoint?.wait_retry_after_seconds,
-                                active_agent: checkpoint?.active_agent,
-                                progress_source_id: checkpoint?.progress_source_id,
-                                progress_source_display_name: checkpoint?.progress_source_display_name,
-                                progress_source_book_number: checkpoint?.progress_source_book_number,
-                            });
-                            return {
-                                world_id: world.world_id,
-                                world_name: world.world_name,
-                                ingestion_status: world.ingestion_status,
-                                expected_chunks: progress.expectedChunks,
-                                extracted_chunks: progress.extractedChunks,
-                                embedded_chunks: progress.embeddedChunks,
-                                completed_work_units: progress.completedWorkUnits,
-                                total_work_units: progress.totalWorkUnits,
-                                overall_percent: progress.overallPercent,
-                                phase: progress.phase,
-                                operation: progress.operation,
-                                activity_label: buildIngestActivityLabel(progress),
-                            };
-                        }),
-                    );
-
-                    if (!cancelled) {
-                        setActiveWorlds(checkpoints);
-                    }
+                const nextActivities = await apiFetch<WorldActivity[]>("/worlds/activities");
+                if (!cancelled) {
+                    setActivities(nextActivities);
                 }
             } catch {
                 if (!cancelled) {
-                    setActiveWorlds([]);
+                    setActivities([]);
                 }
             } finally {
                 if (!cancelled) {
-                    const nextDelay = activeWorlds.length > 0 ? 2500 : 6000;
+                    const nextDelay = activities.length > 0 ? 2500 : 6000;
                     timeoutId = window.setTimeout(poll, nextDelay);
                 }
             }
@@ -151,7 +121,7 @@ export function GlobalIngestionStatus() {
                 window.clearTimeout(timeoutId);
             }
         };
-    }, [hydrated, activeWorlds.length]);
+    }, [hydrated, activities.length]);
 
     useEffect(() => {
         if (!hydrated) return;
@@ -162,20 +132,95 @@ export function GlobalIngestionStatus() {
         }
     }, [expanded, hydrated]);
 
+    const displayActivities = useMemo<DisplayActivity[]>(() => {
+        return activities.map((activity) => {
+            if (activity.kind === "duplication") {
+                const total = Math.max(1, Number(activity.total_work_units || 0));
+                const completed = Math.max(0, Math.min(total, Number(activity.completed_work_units || 0)));
+                const percent = total > 0
+                    ? clampPercent((completed / total) * 100)
+                    : clampPercent(Number(activity.progress_percent || 0));
+                return {
+                    activity_id: activity.activity_id,
+                    kind: activity.kind,
+                    world_id: activity.world_id,
+                    world_name: activity.world_name,
+                    percent,
+                    completedWorkUnits: completed,
+                    totalWorkUnits: total,
+                    detail: activity.source_world_name
+                        ? `Duplicating from ${activity.source_world_name}`
+                        : "Duplicating world data",
+                    trailingLabel: `${Math.round(percent)}%`,
+                    useStoppingStyle: false,
+                };
+            }
+
+            const progress = resolveStableIngestProgress(activity.checkpoint);
+            const isStopping = progress.phase === "aborting";
+            return {
+                activity_id: activity.activity_id,
+                kind: activity.kind,
+                world_id: activity.world_id,
+                world_name: activity.world_name,
+                link_href: activity.link_href,
+                percent: progress.overallPercent,
+                completedWorkUnits: progress.completedWorkUnits,
+                totalWorkUnits: progress.totalWorkUnits,
+                detail: isStopping
+                    ? "Stopping after current in-flight work finishes"
+                    : (
+                        buildIngestActivityLabel(progress)
+                        || (progress.operation === "reembed_all"
+                            ? `Re-embedded ${progress.embeddedChunks}/${progress.expectedChunks || "?"} chunks`
+                            : `Extracted ${progress.extractedChunks}/${progress.expectedChunks || "?"} • Embedded ${progress.embeddedChunks}/${progress.expectedChunks || "?"}`)
+                    ),
+                trailingLabel: isStopping ? "Stopping" : `${Math.round(progress.overallPercent)}%`,
+                useStoppingStyle: isStopping,
+            };
+        });
+    }, [activities]);
+
     const aggregate = useMemo(() => {
-        const totalWorkUnits = activeWorlds.reduce((sum, world) => sum + world.total_work_units, 0);
-        const completedWorkUnits = activeWorlds.reduce((sum, world) => sum + world.completed_work_units, 0);
+        const totalWorkUnits = displayActivities.reduce((sum, activity) => sum + activity.totalWorkUnits, 0);
+        const completedWorkUnits = displayActivities.reduce((sum, activity) => sum + activity.completedWorkUnits, 0);
         const percent = totalWorkUnits > 0 ? clampPercent((completedWorkUnits / totalWorkUnits) * 100) : 0;
         return {
             totalWorkUnits,
             completedWorkUnits,
             percent,
         };
-    }, [activeWorlds]);
+    }, [displayActivities]);
 
-    if (!activeWorlds.length) {
+    const allDuplicating = displayActivities.length > 0 && displayActivities.every((activity) => activity.kind === "duplication");
+    const allStopping = displayActivities.length > 0 && displayActivities.every((activity) => activity.useStoppingStyle);
+    const HeaderIcon = allDuplicating ? Copy : Upload;
+
+    if (!displayActivities.length) {
         return null;
     }
+
+    const expandedTitle = allDuplicating
+        ? (displayActivities.length === 1 ? "World duplication in progress" : `${displayActivities.length} worlds duplicating`)
+        : (displayActivities.length === 1 ? "World activity in progress" : `${displayActivities.length} world activities running`);
+    const expandedSubtitle = allStopping
+        ? "Stopping in-flight work..."
+        : allDuplicating
+            ? (displayActivities.length === 1 ? "Creating a full copy of this world" : "Tracking duplicate-world jobs")
+            : "Stable progress across active worlds";
+
+    const collapsedTitle = displayActivities.length === 1
+        ? displayActivities[0].world_name
+        : allDuplicating
+            ? `${displayActivities.length} worlds duplicating`
+            : `${displayActivities.length} world activities`;
+    const collapsedSubtitle = allStopping
+        ? "Aborting..."
+        : displayActivities.length === 1
+            ? displayActivities[0].detail
+            : allDuplicating
+                ? "Duplication in progress"
+                : "Work in progress";
 
     return (
         <div
@@ -227,98 +272,99 @@ export function GlobalIngestionStatus() {
                                     color: "var(--primary-light)",
                                 }}
                             >
-                                <Upload size={15} />
+                                <HeaderIcon size={15} />
                             </div>
                             <div>
                                 <div style={{ fontSize: 13, fontWeight: 600 }}>
-                                    {activeWorlds.length === 1 ? "World ingest in progress" : `${activeWorlds.length} worlds ingesting`}
+                                    {expandedTitle}
                                 </div>
                                 <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
-                                    {activeWorlds.every((world) => world.phase === "aborting")
-                                        ? "Stopping in-flight work..."
-                                        : activeWorlds.length === 1
-                                            ? `${activeWorlds[0].expected_chunks || "?"} total chunks in this run`
-                                            : "Stable progress across active worlds"}
+                                    {expandedSubtitle}
                                 </div>
                             </div>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                             <span style={{ fontSize: 12, color: "var(--primary-light)", fontWeight: 600 }}>
-                                {Math.round(aggregate.percent)}%
+                                {allStopping ? "..." : `${Math.round(aggregate.percent)}%`}
                             </span>
                             <ChevronDown size={16} />
                         </div>
                     </button>
 
                     <div style={{ padding: "10px 12px 12px", display: "grid", gap: 10 }}>
-                        {activeWorlds.map((world) => (
-                            <Link
-                                key={world.world_id}
-                                href={`/worlds/${world.world_id}/ingest`}
-                                style={{
-                                    display: "block",
-                                    padding: 12,
-                                    borderRadius: 14,
-                                    border: "1px solid var(--border)",
-                                    background: "var(--overlay)",
-                                    textDecoration: "none",
-                                    color: "inherit",
-                                }}
-                            >
-                                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
-                                    <div style={{ minWidth: 0 }}>
-                                        <div
-                                            style={{
-                                                fontSize: 13,
-                                                fontWeight: 600,
-                                                whiteSpace: "nowrap",
-                                                overflow: "hidden",
-                                                textOverflow: "ellipsis",
-                                            }}
-                                        >
-                                            {world.world_name}
+                        {displayActivities.map((activity) => {
+                            const body = (
+                                <>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div
+                                                style={{
+                                                    fontSize: 13,
+                                                    fontWeight: 600,
+                                                    whiteSpace: "nowrap",
+                                                    overflow: "hidden",
+                                                    textOverflow: "ellipsis",
+                                                }}
+                                            >
+                                                {activity.world_name}
+                                            </div>
+                                            <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                                                {activity.detail}
+                                            </div>
                                         </div>
-                                        <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
-                                            {world.phase === "aborting"
-                                                ? "Stopping after current in-flight work finishes"
-                                                : world.activity_label
-                                                    ? world.activity_label
-                                                    : world.operation === "reembed_all"
-                                                        ? `Re-embedded ${world.embedded_chunks}/${world.expected_chunks || "?"} chunks`
-                                                        : `Extracted ${world.extracted_chunks}/${world.expected_chunks || "?"} • Embedded ${world.embedded_chunks}/${world.expected_chunks || "?"}`}
+                                        <div style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 6,
+                                            color: activity.useStoppingStyle ? "#fca5a5" : "var(--warning)",
+                                            fontSize: 12,
+                                            flexShrink: 0,
+                                        }}>
+                                            <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
+                                            {activity.trailingLabel}
                                         </div>
                                     </div>
-                                    <div style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 6,
-                                        color: world.phase === "aborting" ? "#fca5a5" : "var(--warning)",
-                                        fontSize: 12,
-                                    }}>
-                                        <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
-                                        {world.phase === "aborting" ? "Stopping" : `${Math.round(world.overall_percent)}%`}
-                                    </div>
-                                </div>
-                                <div
-                                    style={{
-                                        height: 8,
-                                        borderRadius: 999,
-                                        background: "var(--overlay-heavy)",
-                                        overflow: "hidden",
-                                    }}
-                                >
                                     <div
                                         style={{
-                                            width: `${world.overall_percent}%`,
-                                            height: "100%",
+                                            height: 8,
                                             borderRadius: 999,
-                                            background: "linear-gradient(90deg, var(--primary), var(--primary-hover))",
-                                            transition: "width 0.25s ease",
+                                            background: "var(--overlay-heavy)",
+                                            overflow: "hidden",
                                         }}
-                                    />
+                                    >
+                                        <div
+                                            style={{
+                                                width: `${activity.percent}%`,
+                                                height: "100%",
+                                                borderRadius: 999,
+                                                background: "linear-gradient(90deg, var(--primary), var(--primary-hover))",
+                                                transition: "width 0.25s ease",
+                                            }}
+                                        />
+                                    </div>
+                                </>
+                            );
+
+                            const sharedStyle = {
+                                display: "block",
+                                padding: 12,
+                                borderRadius: 14,
+                                border: "1px solid var(--border)",
+                                background: "var(--overlay)",
+                                textDecoration: "none",
+                                color: "inherit",
+                            } as const;
+
+                            return activity.link_href ? (
+                                <Link key={activity.activity_id} href={activity.link_href} style={sharedStyle}>
+                                    {body}
+                                </Link>
+                            ) : (
+                                <div key={activity.activity_id} style={sharedStyle}>
+                                    {body}
                                 </div>
-                            </Link>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             ) : (
@@ -351,20 +397,14 @@ export function GlobalIngestionStatus() {
                     />
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", minWidth: 0 }}>
                         <span style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.1 }}>
-                            {activeWorlds.length === 1 ? activeWorlds[0].world_name : `${activeWorlds.length} worlds ingesting`}
+                            {collapsedTitle}
                         </span>
                         <span style={{ fontSize: 11, color: "var(--text-subtle)", lineHeight: 1.1 }}>
-                            {activeWorlds.every((world) => world.phase === "aborting")
-                                ? "Aborting..."
-                                : activeWorlds.length === 1
-                                    ? (activeWorlds[0].activity_label || "In progress")
-                                    : "Ingest in progress"}
+                            {collapsedSubtitle}
                         </span>
                     </div>
                     <span style={{ fontSize: 12, color: "var(--primary-light)", fontWeight: 600 }}>
-                        {activeWorlds.every((world) => world.phase === "aborting")
-                            ? "..."
-                            : `${Math.round(aggregate.percent)}%`}
+                        {allStopping ? "..." : `${Math.round(aggregate.percent)}%`}
                     </span>
                     <ChevronUp size={16} />
                 </button>

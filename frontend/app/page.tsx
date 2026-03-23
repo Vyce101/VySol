@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useState, useEffect } from "react";
-import { Settings, Plus, MoreVertical, Trash2, Pencil, Loader2 } from "lucide-react";
+import { Settings, Plus, MoreVertical, Trash2, Pencil, Loader2, Copy } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { SettingsSidebar } from "@/components/SettingsSidebar";
@@ -17,12 +17,21 @@ interface World {
     total_nodes: number;
     total_edges: number;
     sources: Array<{ source_id: string; status: string }>;
+    is_temporary_duplicate?: boolean;
+    duplication_status?: string;
+    duplication_progress_percent?: number;
+    duplication_source_world_id?: string;
+    duplication_source_world_name?: string;
+    active_duplication_run?: boolean;
+    duplication_locked?: boolean;
+    duplication_error?: string | null;
 }
 
 function StatusBadge({ status }: { status: string }) {
     const styles: Record<string, string> = {
         pending: "background: var(--status-pending-bg); color: var(--status-pending-fg)",
         in_progress: "background: var(--status-progress-bg); color: var(--status-progress-fg)",
+        duplicating: "background: var(--status-progress-bg); color: var(--status-progress-fg)",
         complete: "background: var(--status-success-bg); color: var(--status-success-fg)",
         error: "background: var(--status-error-bg); color: var(--status-error-fg)",
     };
@@ -40,7 +49,7 @@ function StatusBadge({ status }: { status: string }) {
                 fontWeight: 500,
             }}
         >
-            {status === "in_progress" && (
+            {(status === "in_progress" || status === "duplicating") && (
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--status-progress-fg)", animation: "pulse-glow 2s infinite" }} />
             )}
             {status === "complete" && (
@@ -51,14 +60,38 @@ function StatusBadge({ status }: { status: string }) {
     );
 }
 
-function WorldCard({ world, onRefresh }: { world: World; onRefresh: () => void }) {
+const WORLD_STAT_ITEMS = [
+    { key: "nodes", label: "Nodes" },
+    { key: "edges", label: "Edges" },
+    { key: "chunks", label: "Chunks" },
+] as const;
+
+function WorldCard({
+    world,
+    onRefresh,
+    onDuplicate,
+    duplicatePending,
+}: {
+    world: World;
+    onRefresh: () => void;
+    onDuplicate: (world: World) => Promise<void>;
+    duplicatePending: boolean;
+}) {
     const router = useRouter();
     const [menuOpen, setMenuOpen] = useState(false);
     const [renaming, setRenaming] = useState(false);
     const [newName, setNewName] = useState(world.world_name);
+    const isTemporaryDuplicate = Boolean(world.is_temporary_duplicate);
+    const isDuplicating = isTemporaryDuplicate && world.duplication_status === "in_progress";
+    const isDuplicateError = isTemporaryDuplicate && world.duplication_status === "error";
+    const displayStatus = isDuplicating ? "duplicating" : isDuplicateError ? "error" : world.ingestion_status;
+    const duplicateDisabled = duplicatePending || isTemporaryDuplicate || Boolean(world.duplication_locked);
+    const renameDisabled = duplicatePending || isTemporaryDuplicate;
+    const deleteDisabled = duplicatePending || isDuplicating;
+    const interactiveCard = !renaming && !menuOpen && !isTemporaryDuplicate && !duplicatePending;
 
     const handleClick = () => {
-        if (renaming || menuOpen) return;
+        if (renaming || menuOpen || isTemporaryDuplicate || duplicatePending) return;
         if (world.ingestion_status === "complete") {
             router.push(`/worlds/${world.world_id}/chat`);
         } else {
@@ -94,13 +127,23 @@ function WorldCard({ world, onRefresh }: { world: World; onRefresh: () => void }
                 border: "1px solid var(--border)",
                 borderRadius: "var(--radius)",
                 padding: "20px",
-                cursor: renaming ? "default" : "pointer",
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 148,
+                cursor: interactiveCard ? "pointer" : "default",
                 transition: "border-color 0.2s, transform 0.2s",
                 position: "relative",
                 boxShadow: "0 12px 26px color-mix(in srgb, var(--shadow-color) 55%, transparent)",
             }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "var(--border-hover)"; (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "var(--border)"; (e.currentTarget as HTMLElement).style.transform = "none"; }}
+            onMouseEnter={(e) => {
+                if (!interactiveCard) return;
+                (e.currentTarget as HTMLElement).style.borderColor = "var(--border-hover)";
+                (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+                (e.currentTarget as HTMLElement).style.borderColor = "var(--border)";
+                (e.currentTarget as HTMLElement).style.transform = "none";
+            }}
         >
             <div style={{ position: "absolute", top: 12, right: 12 }}>
                 <button
@@ -115,14 +158,67 @@ function WorldCard({ world, onRefresh }: { world: World; onRefresh: () => void }
                         borderRadius: "8px", padding: "4px", zIndex: 10, minWidth: 120,
                     }}>
                         <button
+                            disabled={duplicateDisabled}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setMenuOpen(false);
+                                void onDuplicate(world);
+                            }}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                width: "100%",
+                                padding: "8px 12px",
+                                background: "none",
+                                border: "none",
+                                color: "var(--text-primary)",
+                                cursor: duplicateDisabled ? "not-allowed" : "pointer",
+                                opacity: duplicateDisabled ? 0.55 : 1,
+                                fontSize: 13,
+                                borderRadius: 6,
+                            }}
+                        >
+                            {duplicatePending ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Copy size={14} />}
+                            {duplicatePending ? "Duplicating..." : "Duplicate"}
+                        </button>
+                        <button
+                            disabled={renameDisabled}
                             onClick={(e) => { e.stopPropagation(); setRenaming(true); setMenuOpen(false); }}
-                            style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 13, borderRadius: 6 }}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                width: "100%",
+                                padding: "8px 12px",
+                                background: "none",
+                                border: "none",
+                                color: "var(--text-primary)",
+                                cursor: renameDisabled ? "not-allowed" : "pointer",
+                                opacity: renameDisabled ? 0.55 : 1,
+                                fontSize: 13,
+                                borderRadius: 6,
+                            }}
                         >
                             <Pencil size={14} /> Rename
                         </button>
                         <button
+                            disabled={deleteDisabled}
                             onClick={(e) => { e.stopPropagation(); handleDelete(); setMenuOpen(false); }}
-                            style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", background: "none", border: "none", color: "var(--status-error-fg)", cursor: "pointer", fontSize: 13, borderRadius: 6 }}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                width: "100%",
+                                padding: "8px 12px",
+                                background: "none",
+                                border: "none",
+                                color: "var(--status-error-fg)",
+                                cursor: deleteDisabled ? "not-allowed" : "pointer",
+                                opacity: deleteDisabled ? 0.55 : 1,
+                                fontSize: 13,
+                                borderRadius: 6,
+                            }}
                         >
                             <Trash2 size={14} /> Delete
                         </button>
@@ -144,13 +240,67 @@ function WorldCard({ world, onRefresh }: { world: World; onRefresh: () => void }
                 <h3 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12, paddingRight: 24 }}>{world.world_name}</h3>
             )}
 
-            <div style={{ display: "flex", gap: 16, color: "var(--text-subtle)", fontSize: 13, marginBottom: 12 }}>
-                <span>{world.total_nodes} nodes</span>
-                <span>{world.total_edges} edges</span>
-                <span>{world.total_chunks} chunks</span>
+            <div
+                style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                    gap: 16,
+                    marginBottom: 14,
+                }}
+            >
+                {WORLD_STAT_ITEMS.map((item) => {
+                    const value = item.key === "nodes"
+                        ? world.total_nodes
+                        : item.key === "edges"
+                            ? world.total_edges
+                            : world.total_chunks;
+                    return (
+                        <div key={item.key} style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                            <span style={{ fontSize: 21, lineHeight: 1.05, fontWeight: 500, color: "var(--text-primary)" }}>
+                                {value}
+                            </span>
+                            <span style={{ fontSize: 12, lineHeight: 1.2, color: "var(--text-subtle)" }}>
+                                {item.label}
+                            </span>
+                        </div>
+                    );
+                })}
             </div>
 
-            <StatusBadge status={world.ingestion_status} />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: isTemporaryDuplicate ? 10 : 0, width: "100%", marginTop: "auto" }}>
+                <StatusBadge status={displayStatus} />
+                {isTemporaryDuplicate && (
+                    <div style={{ display: "grid", gap: 8, width: "100%" }}>
+                        <div style={{ fontSize: 12, color: "var(--text-subtle)" }}>
+                            {isDuplicateError
+                                ? (world.duplication_error || "Duplication failed before the world finished copying.")
+                                : world.duplication_source_world_name
+                                ? `Copying from ${world.duplication_source_world_name}`
+                                : "Duplicating world data"}
+                        </div>
+                        <div
+                            style={{
+                                height: 8,
+                                borderRadius: 999,
+                                background: "var(--overlay-heavy)",
+                                overflow: "hidden",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    width: `${Math.max(0, Math.min(100, Number(world.duplication_progress_percent || 0)))}%`,
+                                    height: "100%",
+                                    borderRadius: 999,
+                                    background: isDuplicateError
+                                        ? "linear-gradient(90deg, var(--status-error-fg), color-mix(in srgb, var(--status-error-fg) 65%, transparent))"
+                                        : "linear-gradient(90deg, var(--primary), var(--primary-hover))",
+                                    transition: "width 0.25s ease",
+                                }}
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }
@@ -160,6 +310,7 @@ export default function HomePage() {
     const [loading, setLoading] = useState(true);
     const [showCreate, setShowCreate] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [duplicatePendingWorldId, setDuplicatePendingWorldId] = useState<string | null>(null);
 
     const fetchWorlds = async () => {
         try {
@@ -173,6 +324,32 @@ export default function HomePage() {
     };
 
     useEffect(() => { fetchWorlds(); }, []);
+
+    useEffect(() => {
+        const hasDuplicateInProgress = worlds.some(
+            (world) => world.is_temporary_duplicate && world.duplication_status === "in_progress",
+        );
+        if (!hasDuplicateInProgress) return;
+        const intervalId = window.setInterval(() => {
+            void fetchWorlds();
+        }, 2500);
+        return () => window.clearInterval(intervalId);
+    }, [worlds]);
+
+    const handleDuplicateWorld = async (world: World) => {
+        if (duplicatePendingWorldId || world.is_temporary_duplicate || world.duplication_locked) {
+            return;
+        }
+        setDuplicatePendingWorldId(world.world_id);
+        try {
+            await apiFetch(`/worlds/${world.world_id}/duplicate`, { method: "POST" });
+            await fetchWorlds();
+        } catch (err: unknown) {
+            alert((err as Error).message);
+        } finally {
+            setDuplicatePendingWorldId(null);
+        }
+    };
 
     return (
         <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 24px" }}>
@@ -218,7 +395,13 @@ export default function HomePage() {
                     gap: 16,
                 }}>
                     {worlds.map((w) => (
-                        <WorldCard key={w.world_id} world={w} onRefresh={fetchWorlds} />
+                        <WorldCard
+                            key={w.world_id}
+                            world={w}
+                            onRefresh={fetchWorlds}
+                            onDuplicate={handleDuplicateWorld}
+                            duplicatePending={duplicatePendingWorldId === w.world_id}
+                        />
                     ))}
 
                     <div
