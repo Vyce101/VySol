@@ -42,6 +42,7 @@ All notable user-visible changes to this project will be documented in this file
 - Changed `Re-embed All` to reuse active repaired chunk bodies when the locked ingest snapshot still matches, while full rebuild paths remain blocked until overrides are discarded.
 - Changed entity resolution to expose per-run unique-node embedding batch and delay controls in the UI.
 - Changed the entity-resolution modal to replace the old top stat-card strip with a split controls/last-run summary layout, rename exact-only result counters to `Exact Matches` and `Left Unchanged`, and move per-setting helper copy into tooltips.
+- Changed entity resolution so `Exact only` is now the true default for fresh and idle worlds, while older worlds without a saved run-mode field still preserve their inferred historical mode in status views.
 - Changed the ingest page to use one `Re-ingest` rebuild action with a read-only world snapshot on the main page and world-local saved prompt precedence (`world -> global -> default`) for ingest/entity-resolution prompts.
 - Changed full `Re-ingest` to optionally reuse repaired chunk overrides when the chunk map stays the same instead of forcing users through separate rebuild buttons and warning cards.
 - Changed the ingest UI so `Re-ingest` settings open in an in-page popup, `Books in This World` collapses inside the left control column, `Safety Queue` opens as an on-page workspace, and `Retry All Failures` appears only when failures exist.

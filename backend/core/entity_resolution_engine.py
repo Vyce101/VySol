@@ -67,11 +67,15 @@ def _normalize_embedding_cooldown_seconds(value: Any) -> float:
 def resolve_entity_resolution_mode(
     resolution_mode: str | None,
     include_normalized_exact_pass: bool = True,
+    *,
+    missing_default: EntityResolutionMode | None = None,
 ) -> EntityResolutionMode:
     if resolution_mode == "exact_only":
         return "exact_only"
     if resolution_mode == "exact_then_ai":
         return "exact_then_ai"
+    if missing_default is not None:
+        return missing_default
     return "exact_then_ai" if include_normalized_exact_pass else "ai_only"
 
 
@@ -115,6 +119,21 @@ def _get_lock(lock_map: dict[str, threading.Lock], world_id: str) -> threading.L
     if world_id not in lock_map:
         lock_map[world_id] = threading.Lock()
     return lock_map[world_id]
+
+
+def _should_default_missing_mode_to_exact_only(meta: dict[str, Any]) -> bool:
+    if str(meta.get("entity_resolution_mode") or "").strip():
+        return False
+    if meta.get("entity_resolution_exact_pass") is not None:
+        return False
+    if meta.get("entity_resolution_updated_at"):
+        return False
+    status = str(meta.get("entity_resolution_status") or "").strip().lower()
+    if status and status != "idle":
+        return False
+    if meta.get(_META_COMMIT_PENDING) or _normalize_commit_state(meta.get(_META_COMMIT_STATE)):
+        return False
+    return True
 
 
 def _load_meta(world_id: str) -> dict:
@@ -321,9 +340,11 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
     if world_id not in _active_runs and _is_stale_in_progress(meta_like_state):
         return _recover_stale_run(world_id)
     settings = load_settings()
+    missing_default = "exact_only" if _should_default_missing_mode_to_exact_only(meta) else None
     resolution_mode = resolve_entity_resolution_mode(
         meta.get("entity_resolution_mode"),
         meta.get("entity_resolution_exact_pass", True),
+        missing_default=missing_default,
     )
     return _with_new_node_summary(
         world_id,

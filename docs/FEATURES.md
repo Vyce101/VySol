@@ -28,6 +28,7 @@ Entity resolution now has two run modes.
 - Runs the normalized-name pass only
 - Auto-resolves obvious duplicates without spending chooser or combiner model calls
 - Still rebuilds the unique-node index before the run is considered complete
+- This is now the default mode for fresh and idle worlds
 
 `Exact + chooser/combiner`
 
@@ -45,7 +46,7 @@ Important behavior:
 - Entity resolution now stages graph and unique-node-index changes first and only commits them live after the full run succeeds
 - If a chooser, combiner, embedding, or finalization step fails, the run now reports a real error instead of silently degrading or leaving partial live merges behind
 - Exact + chooser/combiner runs still preserve temporal graph edges while merging entities
-- Older data that predates the new run-mode field still maps safely to the previous behavior
+- Older data that predates the new run-mode field still maps safely to the previous behavior for historical status display instead of being relabeled to the new default
 - Every run now also exposes unique-node embedding batch and delay controls for the index rebuild step used by entity resolution
 - Those embedding controls affect only entity resolution's unique-node rebuild path, not chooser/combiner model calls and not normal ingestion
 

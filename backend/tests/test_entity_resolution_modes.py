@@ -213,6 +213,37 @@ def test_legacy_metadata_without_resolution_mode_maps_safely(tmp_path, monkeypat
     assert status["include_normalized_exact_pass"] is False
 
 
+def test_fresh_world_without_saved_mode_defaults_status_to_exact_only(tmp_path, monkeypatch):
+    world_id = "world-fresh-default-exact-only"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    status = engine.get_resolution_status(world_id)
+
+    assert status["status"] == "idle"
+    assert status["resolution_mode"] == "exact_only"
+    assert status["include_normalized_exact_pass"] is True
+
+
+def test_legacy_completed_metadata_without_resolution_mode_preserves_inferred_mode(tmp_path, monkeypatch):
+    world_id = "world-legacy-complete-mode"
+    meta_path, _ = _prepare_world(tmp_path, monkeypatch, world_id)
+    meta_path.write_text(
+        json.dumps(
+            {
+                "entity_resolution_status": "complete",
+                "entity_resolution_phase": "complete",
+                "entity_resolution_exact_pass": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = engine.get_resolution_status(world_id)
+
+    assert status["resolution_mode"] == "exact_then_ai"
+    assert status["include_normalized_exact_pass"] is True
+
+
 def test_entity_resolution_status_exposes_embedding_controls(tmp_path, monkeypatch):
     world_id = "world-embed-controls-status"
     meta_path, _ = _prepare_world(tmp_path, monkeypatch, world_id)
@@ -600,6 +631,84 @@ def test_entity_resolution_router_thread_start_failure_rolls_back_run(tmp_path, 
     assert status["message"] == "Entity resolution failed to start."
     assert world_id not in engine._active_runs
     assert world_id not in engine._abort_events
+
+
+def test_entity_resolution_start_without_mode_defaults_to_exact_only(tmp_path, monkeypatch):
+    world_id = "world-router-default-exact-only"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete", "sources": [{"status": "complete"}]})
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(entity_resolution_router, "audit_ingestion_integrity", lambda _world_id, **kwargs: {"world": {"failed_records": 0}})
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 0})
+
+    captured: dict[str, object] = {}
+
+    def _fake_begin_entity_resolution_run(*args, **kwargs):
+        captured["begin_mode"] = args[4]
+        return {"status": "in_progress", "resolution_mode": args[4]}
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            captured["thread_args"] = kwargs.get("args")
+
+        def start(self):
+            captured["thread_started"] = True
+
+    monkeypatch.setattr(entity_resolution_router, "begin_entity_resolution_run", _fake_begin_entity_resolution_run)
+    monkeypatch.setattr(entity_resolution_router.threading, "Thread", FakeThread)
+
+    response = asyncio.run(
+        entity_resolution_router.entity_resolution_start(
+            world_id,
+            entity_resolution_router.EntityResolutionStartRequest(),
+        )
+    )
+
+    assert captured["begin_mode"] == "exact_only"
+    assert captured["thread_args"][4] == "exact_only"
+    assert response["state"]["resolution_mode"] == "exact_only"
+    assert captured["thread_started"] is True
+
+
+def test_entity_resolution_start_preserves_explicit_mode_selection(tmp_path, monkeypatch):
+    world_id = "world-router-explicit-mode"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete", "sources": [{"status": "complete"}]})
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(entity_resolution_router, "audit_ingestion_integrity", lambda _world_id, **kwargs: {"world": {"failed_records": 0}})
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 0})
+
+    captured: dict[str, object] = {}
+
+    def _fake_begin_entity_resolution_run(*args, **kwargs):
+        captured["begin_mode"] = args[4]
+        return {"status": "in_progress", "resolution_mode": args[4]}
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            captured["thread_args"] = kwargs.get("args")
+
+        def start(self):
+            captured["thread_started"] = True
+
+    monkeypatch.setattr(entity_resolution_router, "begin_entity_resolution_run", _fake_begin_entity_resolution_run)
+    monkeypatch.setattr(entity_resolution_router.threading, "Thread", FakeThread)
+
+    response = asyncio.run(
+        entity_resolution_router.entity_resolution_start(
+            world_id,
+            entity_resolution_router.EntityResolutionStartRequest(resolution_mode="exact_then_ai"),
+        )
+    )
+
+    assert captured["begin_mode"] == "exact_then_ai"
+    assert captured["thread_args"][4] == "exact_then_ai"
+    assert response["state"]["resolution_mode"] == "exact_then_ai"
+    assert captured["thread_started"] is True
 
 
 def test_upsert_unique_node_snapshots_obeys_cooldown_and_abort(monkeypatch):

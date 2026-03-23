@@ -100,6 +100,7 @@ async def entity_resolution_start(world_id: str, req: EntityResolutionStartReque
     resolution_mode = resolve_entity_resolution_mode(
         req.resolution_mode,
         req.include_normalized_exact_pass,
+        missing_default="exact_only",
     )
     state = begin_entity_resolution_run(
         world_id,

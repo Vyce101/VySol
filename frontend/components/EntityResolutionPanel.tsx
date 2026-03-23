@@ -166,7 +166,7 @@ export default function EntityResolutionPanel({
     const [topK, setTopK] = useState(50);
     const [embeddingBatchSize, setEmbeddingBatchSize] = useState(32);
     const [embeddingCooldownSeconds, setEmbeddingCooldownSeconds] = useState(0);
-    const [resolutionMode, setResolutionMode] = useState<EntityResolutionMode>("exact_then_ai");
+    const [resolutionMode, setResolutionMode] = useState<EntityResolutionMode>("exact_only");
     const [status, setStatus] = useState<EntityResolutionStatus | null>(null);
     const [logs, setLogs] = useState<ResolutionLogRow[]>([]);
     const [running, setRunning] = useState(false);
