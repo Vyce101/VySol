@@ -160,7 +160,8 @@ Important behavior:
 - A chunk is only considered repaired after extraction coverage and embedding both succeed for that edited chunk
 - If a retest fails for another reason, such as a rate limit or provider error, the chunk stays unresolved instead of being treated as fixed
 - Retry actions skip unresolved safety-review chunks so they do not silently fall back to original source text
-- Manual one-shot recovery for already-collapsed blocked chunks is world-local and temporary; it only exists to restore those chunks to the review queue for editing
+- The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items
+- `Add failed chunks to Safety Queue` is world-local and temporary; it moves stubborn failed extraction chunks into the review queue for editing when automatic retry paths did not clear them
 - `Re-ingest` can optionally reuse repaired chunk overrides when the chunk map stays the same, and `Re-embed All` continues to respect those repaired chunk bodies when its locked-source checks still pass
 
 ## Extraction Payload Separation

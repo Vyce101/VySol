@@ -28,6 +28,8 @@ All notable user-visible changes to this project will be documented in this file
 - Documented entity resolution run modes.
 - Documented API key toggle behavior in the walkthrough and Google AI Studio key guide.
 - Renamed the default embedding model to `gemini-embedding-2-preview`.
+- Clarified the ingest progress header with tooltip help that explains the difference between `Failed Records` and `World Blockers` and points users toward the right recovery action.
+- Clarified the ingest failure-help area with a step-by-step recovery list and renamed the manual rescue action to explain that it moves failed chunks into the Safety Queue.
 - Changed retrieval entry-node indexing to use one persistent vector per current graph node, with `Re-embed All` rebuilding from the current saved graph state.
 - Changed model-context assembly and Context X-Ray to preserve real graph nodes even when different nodes share the same display name, instead of fake-merging them by label.
 - Changed `# RAG Chunks` context assembly to keep full chunk text and `[B#:C#]` provenance tags while ordering included chunks by temporal provenance.

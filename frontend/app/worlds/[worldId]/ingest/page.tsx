@@ -1016,6 +1016,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         : (checkpoint?.stage_counters ?? progress.stageCounters);
     const failedRecordCount = stageCounters.failed_records ?? 0;
     const blockingIssueCount = stageCounters.blocking_issues ?? 0;
+    const blockingIssueCode = typeof checkpoint?.blocking_issues?.[0]?.code === "string" ? checkpoint.blocking_issues[0].code : null;
     const blockingIssueMessage = checkpoint?.blocking_issues?.[0]?.message ?? null;
     const hasBlockingIssues = blockingIssueCount > 0;
     const totalReviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
@@ -1068,6 +1069,76 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const runtimeSyncSummary = lastSuccessfulRuntimeSyncAt
         ? `Last successful sync ${new Date(lastSuccessfulRuntimeSyncAt).toLocaleTimeString()}.`
         : "No successful live status sync yet.";
+    const collapsedFailureActionLabel = `Add ${collapsedCoverageGapFailures.length} Failed Chunk${collapsedCoverageGapFailures.length === 1 ? "" : "s"} to Safety Queue`;
+    const failureActionSteps: string[] = [];
+    if (showResume) {
+        failureActionSteps.push("If Resume is available, try Resume first.");
+    }
+    if (hasRetryableFailures) {
+        failureActionSteps.push("If failures remain, click Retry All Failures.");
+    }
+    if (collapsedCoverageGapFailures.length > 0) {
+        failureActionSteps.push(
+            `If ${collapsedFailureActionLabel} is still showing, click it to move stubborn failed chunks into the repair queue.`
+        );
+    }
+    if (hasUnresolvedSafetyQueue) {
+        failureActionSteps.push("Open the Safety Queue and fix the remaining chunks there.");
+    }
+    const showFailureActionGuide = !ingesting && (failureActionSteps.length > 0 || Boolean(retryNotice));
+    const worldBlockerNextStep = (() => {
+        if (!blockingIssueCode) {
+            if (showResume) {
+                return "If this goes above 0 after an interrupted run, use Resume first.";
+            }
+            return canReembedAll
+                ? "If this goes above 0, try Re-embed All first. If that is disabled, use Re-ingest."
+                : "If this goes above 0, use Re-ingest.";
+        }
+        if (blockingIssueCode === "chunk_vector_store_unreadable" || blockingIssueCode === "unique_node_vector_store_unreadable") {
+            return canReembedAll
+                ? "Next step: use Re-embed All."
+                : "Next step: use Re-ingest.";
+        }
+        if (blockingIssueCode === "ingestion_runtime_error") {
+            if (showResume) {
+                return "Next step: use Resume.";
+            }
+            if (hasRetryableFailures) {
+                return "Next step: use Retry All Failures.";
+            }
+            return "Next step: use Re-ingest.";
+        }
+        return canReembedAll
+            ? "Next step: try Re-embed All first. If that is disabled, use Re-ingest."
+            : "Next step: use Re-ingest.";
+    })();
+    const ingestHealthTooltip = [
+        [
+            "Failed Records",
+            failedRecordCount === 0
+                ? "No specific books or chunks are failing right now."
+                : "These are specific books or chunks that failed during ingest.",
+            failedRecordCount > 0
+                ? (hasRetryableFailures
+                    ? "Next step: use Retry All Failures."
+                    : hasUnresolvedSafetyQueue
+                        ? "Next step: fix Safety Queue items there."
+                        : "Next step: use Re-ingest.")
+                : "If this goes above 0, use Retry All Failures.",
+            hasUnresolvedSafetyQueue
+                ? "If a chunk is in the Safety Queue, fix it there instead."
+                : null,
+        ].filter(Boolean).join("\n"),
+        [
+            "World Blockers",
+            blockingIssueCount === 0
+                ? "No whole-world data problems are recorded right now."
+                : "This means the world's saved data needs repair, even if Failed Records is 0.",
+            blockingIssueMessage ? `Current issue: ${blockingIssueMessage}` : null,
+            worldBlockerNextStep,
+        ].filter(Boolean).join("\n"),
+    ].join("\n\n");
     const handleReingestModalSubmit = async (submission: ReingestSetupSubmission) => {
         await startIngestion(false, "rechunk_reingest", submission.ingest_settings, {
             useActiveChunkOverrides: submission.use_active_chunk_overrides,
@@ -1641,6 +1712,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             }}>
                                                 World Blockers: {blockingIssueCount}
                                             </span>
+                                            <ChipInfo title={ingestHealthTooltip} label="Failed Records and World Blockers help" />
                                             {showRetryAllButton && (
                                                 <button
                                                     onClick={() => retryFailures("all")}
@@ -1789,12 +1861,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             }}
                                         >
                                             {isRescuingCollapsedFailures
-                                                ? "Recovering Blocked Chunks..."
-                                                : `Recover ${collapsedCoverageGapFailures.length} Collapsed Blocked Chunk(s)`}
+                                                ? "Adding Failed Chunks..."
+                                                : collapsedFailureActionLabel}
                                         </button>
                                     )}
                                 </div>
-                                {(retryNotice || collapsedCoverageGapFailures.length > 0) && !ingesting && (
+                                {showFailureActionGuide && (
                                     <div style={{
                                         marginBottom: 12,
                                         padding: "10px 12px",
@@ -1805,13 +1877,17 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                         color: "var(--status-warning-soft-fg)",
                                         lineHeight: 1.5,
                                     }}>
-                                        <div>Retry All Failures skips chunks that are already in the Safety Queue.</div>
-                                        {retryNotice && <div>{retryNotice}</div>}
-                                        {collapsedCoverageGapFailures.length > 0 && (
-                                            <div>
-                                                The recover action above converts the current collapsed `coverage_gap` extraction failures into editable safety-review items for this world only.
-                                            </div>
+                                        <div style={{ fontWeight: 700, marginBottom: 6 }}>What To Do</div>
+                                        {failureActionSteps.length > 0 && (
+                                            <ol style={{ margin: "0 0 8px 18px", padding: 0, display: "grid", gap: 6 }}>
+                                                {failureActionSteps.map((step) => (
+                                                    <li key={step}>{step}</li>
+                                                ))}
+                                            </ol>
                                         )}
+                                        <div>Retry All Failures skips chunks that are already in the Safety Queue.</div>
+                                        <div>Use the Safety Queue for chunks that still need manual repair after Resume and Retry.</div>
+                                        {retryNotice && <div>{retryNotice}</div>}
                                     </div>
                                 )}
                                 <div style={{
@@ -2421,6 +2497,31 @@ function InlineInfo({ title }: { title: string }) {
             }}
         >
             <Info size={14} />
+        </span>
+    );
+}
+
+function ChipInfo({ title, label }: { title: string; label: string }) {
+    return (
+        <span
+            title={title}
+            aria-label={label}
+            style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                minWidth: 18,
+                height: 18,
+                padding: "0 5px",
+                borderRadius: 999,
+                border: "1px solid var(--border)",
+                color: "var(--text-subtle)",
+                fontSize: 11,
+                flexShrink: 0,
+                cursor: "help",
+            }}
+        >
+            <Info size={11} />
         </span>
     );
 }

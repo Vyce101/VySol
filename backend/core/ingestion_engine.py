@@ -160,12 +160,33 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
+async def _sleep_with_abort(expected_event: threading.Event | None, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    if expected_event is None:
+        await asyncio.sleep(seconds)
+        return
+    aborted = await asyncio.to_thread(expected_event.wait, seconds)
+    if aborted:
+        raise asyncio.CancelledError()
+
+
 def _is_current_run(world_id: str, expected_event: threading.Event) -> bool:
     return _abort_events.get(world_id) is expected_event and _active_runs.get(world_id) is expected_event
 
 
 def has_active_ingestion_run(world_id: str) -> bool:
     return world_id in _active_runs
+
+
+def _clear_run_ownership(world_id: str, expected_event: threading.Event | None = None) -> None:
+    active_event = _active_runs.get(world_id)
+    if expected_event is None or active_event is expected_event:
+        _active_runs.pop(world_id, None)
+
+    abort_event = _abort_events.get(world_id)
+    if expected_event is None or abort_event is expected_event:
+        _abort_events.pop(world_id, None)
 
 
 def _ensure_not_aborted(world_id: str, expected_event: threading.Event) -> None:
@@ -715,6 +736,42 @@ def _is_stale_in_progress(meta: dict) -> bool:
     return (datetime.now(timezone.utc) - updated).total_seconds() > _STALE_RUN_GRACE_SECONDS
 
 
+def _is_stale_abort_requested(meta: dict) -> bool:
+    if meta.get("ingestion_status") != "in_progress":
+        return False
+    abort_requested_at = _parse_iso(meta.get("ingestion_abort_requested_at"))
+    if abort_requested_at is None:
+        return False
+    if (datetime.now(timezone.utc) - abort_requested_at).total_seconds() <= _STALE_RUN_GRACE_SECONDS:
+        return False
+    updated = _parse_iso(meta.get("ingestion_updated_at")) or _parse_iso(meta.get("ingestion_started_at"))
+    if updated is None:
+        return True
+    return updated <= abort_requested_at
+
+
+def _recover_stale_abort(world_id: str) -> dict:
+    _clear_run_ownership(world_id)
+    _clear_active_waits(world_id)
+    audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+    refreshed = _load_meta(world_id)
+    _clear_active_waits(world_id)
+    _mark_ingestion_terminal(refreshed, "aborted")
+    refreshed["ingestion_recovered_at"] = refreshed["ingestion_updated_at"]
+    _save_meta(world_id, refreshed)
+    push_sse_event(
+        world_id,
+        {
+            "event": "aborted",
+            "world_id": world_id,
+            "recovered": True,
+            "safety_review_summary": get_safety_review_summary(world_id),
+            **_build_progress_event(world_id, refreshed),
+        },
+    )
+    return refreshed
+
+
 def get_abort_event(world_id: str) -> threading.Event:
     if world_id not in _abort_events:
         _abort_events[world_id] = threading.Event()
@@ -1181,6 +1238,8 @@ def recover_stale_ingestion(world_id: str) -> dict:
     meta = _load_meta(world_id)
     if meta.get("ingestion_status") != "in_progress":
         return meta
+    if _is_stale_abort_requested(meta):
+        return _recover_stale_abort(world_id)
     if has_active_ingestion_run(world_id):
         return meta
     if not _is_stale_in_progress(meta):
@@ -3068,7 +3127,7 @@ async def start_ingestion(
                                 wait_key=wait_key,
                                 wait_retry_after_seconds=exc.retry_after_seconds,
                             )
-                        await asyncio.sleep(jittered_delay(exc.retry_after_seconds))
+                        await _sleep_with_abort(my_event, jittered_delay(exc.retry_after_seconds))
             finally:
                 if wait_started:
                     await _finish_wait(
@@ -3745,10 +3804,7 @@ async def start_ingestion(
             )
     finally:
         _clear_active_waits(world_id)
-        if _abort_events.get(world_id) is my_event:
-            _abort_events.pop(world_id, None)
-        if _active_runs.get(world_id) is my_event:
-            _active_runs.pop(world_id, None)
+        _clear_run_ownership(world_id, my_event)
 
 
 def abort_ingestion(world_id: str) -> None:

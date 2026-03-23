@@ -141,6 +141,20 @@ def _patch_meta_store(monkeypatch, meta: dict):
     return holder
 
 
+def _patch_recovery_audit_store(monkeypatch, *, graph_chunk_ids: list[str], vector_records: list[dict]):
+    node_vector_records = _build_node_vector_records(graph_chunk_ids, vector_records)
+    monkeypatch.setattr(ingestion_engine, "GraphStore", lambda world_id: DummyGraphStore(world_id, graph_chunk_ids))
+    monkeypatch.setattr(
+        ingestion_engine,
+        "VectorStore",
+        lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
+            world_id,
+            node_vector_records if collection_suffix == "unique_nodes" else vector_records,
+            collection_suffix=collection_suffix,
+        ),
+    )
+
+
 def test_audit_synthesizes_stage_failures_from_coverage_gaps(monkeypatch):
     meta = {
         "world_id": "world-1",
@@ -1086,6 +1100,176 @@ def test_abort_ingestion_emits_aborting_for_live_run(monkeypatch):
     assert events[-1]["event"] == "aborting"
     assert events[-1]["progress_phase"] == "aborting"
     assert events[-1]["wait_state"] is None
+
+
+def test_sleep_with_abort_cancels_promptly():
+    async def scenario():
+        abort_event = threading.Event()
+        sleeper = asyncio.create_task(ingestion_engine._sleep_with_abort(abort_event, 30))
+        await asyncio.sleep(0)
+        abort_event.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(sleeper, timeout=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_recover_stale_abort_clears_lingering_live_run_and_marks_aborted(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "in_progress",
+        "ingestion_updated_at": "2026-03-20T00:00:00+00:00",
+        "ingestion_abort_requested_at": "2026-03-20T00:00:20+00:00",
+        "ingestion_operation": "default",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 1,
+                "status": "ingesting",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0],
+                "embedded_chunks": [0],
+            }
+        ],
+        "ingestion_wait": {
+            "wait_state": "waiting_for_api_key",
+            "wait_stage": "embedding",
+            "wait_label": "Waiting for API key cooldown",
+            "wait_retry_after_seconds": 9.0,
+        },
+    }
+    holder = _patch_meta_store(monkeypatch, meta)
+    live_event = threading.Event()
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": live_event})
+    monkeypatch.setattr(ingestion_engine, "_abort_events", {"world-1": live_event})
+    monkeypatch.setattr(
+        ingestion_engine,
+        "_active_waits",
+        {
+            "world-1": {
+                "wait-1": {
+                    "wait_state": "waiting_for_api_key",
+                    "wait_stage": "embedding",
+                    "wait_label": "Waiting for API key cooldown",
+                    "wait_retry_after_seconds": 9.0,
+                    "source_id": "source-a",
+                    "book_number": 1,
+                    "chunk_index": 0,
+                    "active_agent": "node_embedding",
+                    "started_monotonic": time.monotonic() - 30.0,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(ingestion_engine, "get_safety_review_summary", lambda world_id: {"unresolved_reviews": 0})
+    _patch_recovery_audit_store(
+        monkeypatch,
+        graph_chunk_ids=["chunk_world-1_source-a_0"],
+        vector_records=[{"id": "chunk_world-1_source-a_0", "metadata": {"source_id": "source-a", "chunk_index": 0}}],
+    )
+
+    recovered = ingestion_engine.recover_stale_ingestion("world-1")
+
+    assert recovered["ingestion_status"] == "aborted"
+    assert holder["meta"]["ingestion_status"] == "aborted"
+    assert "ingestion_abort_requested_at" not in holder["meta"]
+    assert "ingestion_wait" not in holder["meta"]
+    assert holder["meta"]["sources"][0]["status"] == "complete"
+    assert "world-1" not in ingestion_engine._active_runs
+    assert "world-1" not in ingestion_engine._abort_events
+    assert "world-1" not in ingestion_engine._active_waits
+    events = ingestion_engine.drain_sse_events("world-1")
+    assert events[-1]["event"] == "aborted"
+    assert events[-1]["recovered"] is True
+    assert events[-1]["active_ingestion_run"] is False
+
+
+def test_recover_stale_abort_preserves_completed_books_and_synthesizes_missing_work(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "in_progress",
+        "ingestion_updated_at": "2026-03-20T00:00:00+00:00",
+        "ingestion_abort_requested_at": "2026-03-20T00:00:20+00:00",
+        "ingestion_operation": "default",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 2,
+                "status": "complete",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0, 1],
+                "embedded_chunks": [0, 1],
+                "ingested_at": "2026-03-20T00:00:00+00:00",
+            },
+            {
+                "source_id": "source-b",
+                "book_number": 2,
+                "display_name": "Book 2",
+                "chunk_count": 3,
+                "status": "ingesting",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0, 1],
+                "embedded_chunks": [0],
+                "ingested_at": None,
+            },
+        ],
+    }
+    holder = _patch_meta_store(monkeypatch, meta)
+    live_event = threading.Event()
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": live_event})
+    monkeypatch.setattr(ingestion_engine, "_abort_events", {"world-1": live_event})
+    monkeypatch.setattr(ingestion_engine, "get_safety_review_summary", lambda world_id: {"unresolved_reviews": 0})
+    monkeypatch.setattr(ingestion_engine, "_unresolved_safety_review_chunk_ids", lambda world_id: set())
+    _patch_recovery_audit_store(
+        monkeypatch,
+        graph_chunk_ids=[
+            "chunk_world-1_source-a_0",
+            "chunk_world-1_source-a_1",
+            "chunk_world-1_source-b_0",
+            "chunk_world-1_source-b_1",
+        ],
+        vector_records=[
+            {"id": "chunk_world-1_source-a_0", "metadata": {"source_id": "source-a", "chunk_index": 0}},
+            {"id": "chunk_world-1_source-a_1", "metadata": {"source_id": "source-a", "chunk_index": 1}},
+            {"id": "chunk_world-1_source-b_0", "metadata": {"source_id": "source-b", "chunk_index": 0}},
+        ],
+    )
+
+    recovered = ingestion_engine.recover_stale_ingestion("world-1")
+
+    assert recovered["ingestion_status"] == "aborted"
+    source_a = holder["meta"]["sources"][0]
+    source_b = holder["meta"]["sources"][1]
+    assert source_a["status"] == "complete"
+    assert source_a["embedded_chunks"] == [0, 1]
+    assert source_a["stage_failures"] == []
+    assert source_b["status"] == "partial_failure"
+    failure_keys = {
+        (row["stage"], row["chunk_index"], row.get("scope", "chunk"))
+        for row in source_b["stage_failures"]
+    }
+    assert ("embedding", 1, "chunk") in failure_keys
+    assert ("extraction", 2, "chunk") in failure_keys
+
+    retry_plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source_b,
+        chunks_total=3,
+        resume=True,
+        retry_only=True,
+        retry_stage="all",
+        checkpoint=None,
+    )
+    assert retry_plan[1] == "embedding_only"
+    assert retry_plan[2] == "full_cleanup"
 
 
 def test_abort_route_rejects_missing_world(monkeypatch):

@@ -292,13 +292,15 @@ Use the rebuild and retry actions based on what went wrong:
 Important behavior:
 
 - `Resume` is the normal path when you simply add another new source after a previous ingest
+- If the failure-help box appears, the normal order is `Resume` -> `Retry All Failures` -> `Add failed chunks to Safety Queue` -> `Fix Safety Queue`
 - When you add or remove pending sources, the ingest action area now refreshes immediately so `Resume`, `Re-ingest`, and completion state stay in sync without leaving the page
 - `Re-embed All` is intentionally narrower than a full rebuild and will now explain when it is unsafe
 - `Re-embed All` can reuse active repaired chunk bodies when its locked-source checks still pass
 - `Re-ingest` can also reuse repaired chunk bodies, but only when chunk size and overlap stay the same and you leave repaired-chunk reuse enabled
 - `Retry All Failures` only appears when there are actual failed records to retry, so no button usually means the current world has no failures
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
-- The one-shot collapsed-chunk recovery action is only for the current world and current failed chunks; it does not teach future ingests to always treat those chunks as safety-blocked
+- `Add failed chunks to Safety Queue` is a manual fallback for stubborn extraction failures that still need repair work after `Resume` and `Retry All Failures`
+- That action is only for the current world and current failed chunks; it moves those failed chunks into the Safety Queue for editing and does not teach future ingests to always treat them as safety-blocked
 
 ## Chat
 

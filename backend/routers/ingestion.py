@@ -284,7 +284,7 @@ async def ingest_status(world_id: str):
     async def event_generator():
         while True:
             meta = _load_meta(world_id)
-            if not has_active_ingestion_run(world_id) and meta.get("ingestion_status") == "in_progress":
+            if meta.get("ingestion_status") == "in_progress":
                 meta = recover_stale_ingestion(world_id)
 
             events = drain_sse_events(world_id)
