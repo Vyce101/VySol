@@ -6,6 +6,8 @@ import { Children, cloneElement, isValidElement, useState, useEffect, useRef, us
 import { Send, Loader2, ChevronRight, ChevronLeft, AlertTriangle, Trash2, Info, MessageSquare, Plus, MoreVertical, Edit2, RefreshCw, X, Check } from "lucide-react";
 import { ApiError, apiFetch, apiStreamPost } from "@/lib/api";
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import InteractiveGraphViewer, {
     GraphViewerNode,
     GraphViewerLink,
@@ -215,10 +217,41 @@ const markdownComponents = {
     h4: ({ children, ...props }: any) => <h4 {...props}>{highlightDialogueNode(children, "h4")}</h4>,
     h5: ({ children, ...props }: any) => <h5 {...props}>{highlightDialogueNode(children, "h5")}</h5>,
     h6: ({ children, ...props }: any) => <h6 {...props}>{highlightDialogueNode(children, "h6")}</h6>,
+    th: ({ children, ...props }: any) => <th {...props}>{highlightDialogueNode(children, "th")}</th>,
+    td: ({ children, ...props }: any) => <td {...props}>{highlightDialogueNode(children, "td")}</td>,
+    table: ({ children, ...props }: any) => (
+        <div className="markdown-table-wrap">
+            <table {...props}>{children}</table>
+        </div>
+    ),
+    pre: ({ children, className, ...props }: any) => (
+        <pre {...props} className={["markdown-pre", className].filter(Boolean).join(" ")}>
+            {children}
+        </pre>
+    ),
+    code: ({ inline, className, children, ...props }: any) => (
+        <code
+            {...props}
+            className={[
+                inline ? "markdown-inline-code" : "markdown-code-block",
+                className,
+            ].filter(Boolean).join(" ")}
+        >
+            {children}
+        </code>
+    ),
 };
 
 function ChatMessageMarkdown({ content }: { content: string }) {
-    return <ReactMarkdown components={markdownComponents}>{content.replace(/\n/g, "  \n")}</ReactMarkdown>;
+    return (
+        <ReactMarkdown
+            components={markdownComponents}
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            skipHtml
+        >
+            {content}
+        </ReactMarkdown>
+    );
 }
 
 export default function ChatPage({ params }: { params: Promise<{ worldId: string }> }) {

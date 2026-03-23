@@ -56,6 +56,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed safety-block retry handling so blocked chunks stay in the safety-review flow, retries do not collapse them into fake extraction success, and stale review popups/testing states recover cleanly.
 - Fixed chat thread switching so in-flight replies and history versions stay isolated to the correct chat tab instead of leaking across chats.
 - Fixed chat auto-scroll so any upward scroll disables snapping until the user reaches the bottom again.
+- Fixed chat markdown rendering so saved replies can display real headings, GFM tables, code blocks, and block spacing correctly instead of flattening or mis-spacing markdown content.
 - Fixed Gemini key rotation so extraction, embeddings, retrieval, and Gemini chat wait through shared cooldown windows, fail over on transient timeout/connect failures, and stop skipping extra keys after some retries.
 - Fixed ingest progress so long pauses now surface as queued slot or API-key cooldown waits instead of looking like the run silently froze.
 - Fixed the ingest page so adding or deleting pending books refreshes the action controls immediately instead of showing stale `Start Ingestion` / completion state until a page reload.
