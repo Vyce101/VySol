@@ -45,6 +45,7 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed entity resolution so runs stage graph and unique-node-index changes until the full run succeeds, failed chooser/combiner/provider paths surface real backend errors instead of silent degradation, and stale unique-node vectors are now treated as repairable missing coverage instead of silently counting as healthy.
 - Fixed world duplication so completed duplicates no longer inherit stale resume/checkpoint state, copied ingest logs, or source-world chunk provenance that could later make the duplicate regress into a fake `partial_failure` state.
 - Fixed world-duplication preview cards so active duplicates no longer disappear during normal polling, source cards lock the duplicate action while a copy is running, and world-card status pills/stats now keep a consistent compact layout across different worlds.
 - Fixed ingest-family color consistency so dark mode uses the intended purple accent, light mode uses the intended blue accent, safety-review passed states reuse the same success green, and washed-out or invisible ingest progress/book/status accents render correctly again.

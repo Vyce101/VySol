@@ -27,7 +27,7 @@ Entity resolution now has two run modes.
 
 - Runs the normalized-name pass only
 - Auto-resolves obvious duplicates without spending chooser or combiner model calls
-- Stops after the exact pass finishes
+- Still rebuilds the unique-node index before the run is considered complete
 
 `Exact + chooser/combiner`
 
@@ -41,6 +41,7 @@ Entity resolution now has two run modes.
 Important behavior:
 
 - Exact-only runs never enter candidate search, chooser, or combiner phases
+- Both run modes still need a successful unique-node index refresh before their results are finalized
 - Exact + chooser/combiner runs still preserve temporal graph edges while merging entities
 - Older data that predates the new run-mode field still maps safely to the previous behavior
 - Every run now also exposes unique-node embedding batch and delay controls for the index rebuild step used by entity resolution
@@ -134,9 +135,10 @@ Important behavior:
 - `Chunks Extracted` tracks chunks whose graph extraction has been durably written
 - `Chunks Embedded` tracks chunks whose chunk-vector embedding has been durably written
 - `Unique Graph Nodes` tracks the current unique nodes in the saved graph
-- `Embedded Unique Nodes` tracks how many current unique graph nodes already exist in the unique-node index
+- `Embedded Unique Nodes` tracks how many current unique graph nodes still have matching embeddings in the unique-node index
 - The node counters reflect the current merged graph state, not raw per-chunk extraction totals
 - Because of that, node counts can change after entity resolution merges duplicate entities and refreshes unique-node embeddings
+- If a node id exists in the index but its stored document no longer matches the current merged node text, it is treated as stale until repaired
 - Wait states such as `Queued for extraction slot`, `Queued for embedding slot`, and `Waiting for API key cooldown` are shown as secondary activity context instead of replacing the main progress summary
 - The floating global ingest panel stays compact and keeps the same calm world-level progress semantics without showing the full row set
 

@@ -49,6 +49,7 @@ export interface EntityResolutionStatus {
         display_name?: string;
         description?: string;
     };
+    current_anchor_label?: string;
     current_candidates?: Array<{
         node_id?: string;
         display_name?: string;
@@ -279,7 +280,12 @@ export function apiStreamGet(
                 (ingestionStatus && ingestionStatus !== "in_progress")
                 || (status && ["complete", "aborted", "error", "partial_failure"].includes(status))
             );
-            if (data.event === "complete" || data.event === "aborted" || (data.event === "status" && isTerminalStatus)) {
+            if (
+                data.event === "complete"
+                || data.event === "aborted"
+                || data.event === "error"
+                || (data.event === "status" && isTerminalStatus)
+            ) {
                 terminal = true;
                 es.close();
                 onDone?.();

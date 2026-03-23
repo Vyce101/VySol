@@ -35,6 +35,8 @@ backend/.pytest_tmp/
 backend/pytest-basetemp*/
 backend/pytest-cache-files-*/
 backend/tmp*/
+backend/tests/_manual*/
+backend/tests/_mr/
 
 # Node / Next
 frontend/node_modules/

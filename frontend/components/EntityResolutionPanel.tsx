@@ -71,8 +71,11 @@ function summarizeEvent(event: EntityResolutionEvent) {
     }
 
     const anchor = event.current_anchor as { display_name?: string } | undefined;
+    const anchorLabel = typeof event.current_anchor_label === "string" && event.current_anchor_label.trim()
+        ? event.current_anchor_label.trim()
+        : "Current Anchor";
     if (anchor?.display_name) {
-        return `Current anchor: ${anchor.display_name}`;
+        return `${anchorLabel}: ${anchor.display_name}`;
     }
 
     const candidates = event.current_candidates as unknown[] | undefined;
@@ -155,7 +158,18 @@ export default function EntityResolutionPanel({
         setStatus(next);
         setRunning(isActiveStatus(next.status));
         setLastSyncedAt(new Date().toISOString());
-        setError(null);
+        setError((previous) => {
+            if (typeof next.reason === "string" && next.reason.trim()) {
+                return next.reason.trim();
+            }
+            if (typeof next.message === "string" && next.status === "error" && next.message.trim()) {
+                return next.message.trim();
+            }
+            if (isActiveStatus(next.status) || isTerminalStatus(next.status)) {
+                return null;
+            }
+            return previous;
+        });
         if (typeof next.top_k === "number") {
             setTopK(next.top_k);
         }
@@ -174,6 +188,11 @@ export default function EntityResolutionPanel({
         setStreamState("streaming");
         setStatus((prev) => ({ ...(prev || {}), ...event }));
         setRunning(!isTerminalStatus(event.status) && !isTerminalStatus(event.event));
+        if (typeof event.reason === "string" && event.reason.trim()) {
+            setError(event.reason.trim());
+        } else if (typeof event.message === "string" && event.event === "error" && event.message.trim()) {
+            setError(event.message.trim());
+        }
         setLogs((prev) => {
             logIdRef.current += 1;
             const nextRow: ResolutionLogRow = {
@@ -198,8 +217,10 @@ export default function EntityResolutionPanel({
                 void loadSnapshot(false);
             },
             (streamError) => {
-                setError(streamError.message);
                 closeStream();
+                void loadSnapshot(false).then(() => {
+                    setError((previous) => previous ?? streamError.message);
+                });
             }
         );
     }
@@ -258,6 +279,9 @@ export default function EntityResolutionPanel({
     const abortRequested = running && status?.phase === "aborting";
     const badge = statusBadge(status?.status || (running ? "running" : "idle"), status?.phase);
     const lastUsedResolutionMode = status?.resolution_mode as EntityResolutionRunMode | undefined;
+    const currentAnchorLabel = typeof status?.current_anchor_label === "string" && status.current_anchor_label.trim()
+        ? status.current_anchor_label.trim()
+        : "Current Anchor";
     const showExactOnlyOutcomeLabels = isCompletedStatus(status?.status) && lastUsedResolutionMode === "exact_only";
     const unresolvedMetricTooltip = showExactOnlyOutcomeLabels
         ? "These entities were checked during exact normalization, but no exact normalized match was found."
@@ -330,6 +354,7 @@ export default function EntityResolutionPanel({
     const handleStart = async () => {
         setBusy(true);
         setError(null);
+        setLogs([]);
         try {
             await startEntityResolution(worldId, {
                 top_k: topK,
@@ -687,7 +712,7 @@ export default function EntityResolutionPanel({
 
                             {status?.current_anchor && (
                                 <div style={panelStyle}>
-                                    <div style={panelHeaderStyle}>Current Anchor</div>
+                                    <div style={panelHeaderStyle}>{currentAnchorLabel}</div>
                                     <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>
                                         {(status.current_anchor as { display_name?: string }).display_name || "Unnamed entity"}
                                     </div>

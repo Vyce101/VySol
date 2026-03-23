@@ -2139,12 +2139,20 @@ def _collect_expected_node_records_by_source(world_id: str, graph_store: GraphSt
             source_nodes = by_source.setdefault(source_id, {})
             record = source_nodes.get(str(node_id))
             if record is None or int(record["chunk_index"]) > chunk_index:
+                node_snapshot = {
+                    "node_id": str(node_id),
+                    "display_name": str(attrs.get("display_name", "")),
+                    "description": str(attrs.get("description", "")),
+                    "claims": attrs.get("claims", []),
+                    "source_chunks": source_chunks,
+                }
                 source_nodes[str(node_id)] = {
                     "id": str(node_id),
                     "display_name": str(attrs.get("display_name", "")),
                     "normalized_id": str(attrs.get("normalized_id", "")),
                     "chunk_id": chunk_id,
                     "chunk_index": int(chunk_index),
+                    "canonical_document": build_unique_node_document(node_snapshot),
                 }
     return {
         source_id: sorted(records.values(), key=lambda record: (int(record["chunk_index"]), record["id"]))
@@ -2152,12 +2160,42 @@ def _collect_expected_node_records_by_source(world_id: str, graph_store: GraphSt
     }
 
 
-def _collect_unique_node_embedding_ids(unique_node_vector_store: VectorStore) -> set[str]:
-    return {
-        str(rec.get("id", "")).strip()
-        for rec in unique_node_vector_store.get_all_chunk_records()
-        if str(rec.get("id", "")).strip()
-    }
+def _collect_canonical_unique_node_documents(graph_store: GraphStore) -> dict[str, str]:
+    documents: dict[str, str] = {}
+    for node_id, attrs in graph_store.graph.nodes(data=True):
+        snapshot = {
+            "node_id": str(node_id),
+            "display_name": str(attrs.get("display_name", "")),
+            "description": str(attrs.get("description", "")),
+            "claims": attrs.get("claims", []),
+            "source_chunks": attrs.get("source_chunks", []),
+        }
+        documents[str(node_id)] = build_unique_node_document(snapshot)
+    return documents
+
+
+def _collect_unique_node_embedding_records(unique_node_vector_store: VectorStore) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    raw_records: list[dict[str, Any]]
+    if hasattr(unique_node_vector_store, "get_all_records"):
+        raw_records = unique_node_vector_store.get_all_records(include_documents=True)
+    elif hasattr(unique_node_vector_store, "get_all_chunk_records"):
+        raw_records = unique_node_vector_store.get_all_chunk_records()
+    else:
+        raw_records = []
+
+    for rec in raw_records:
+        record_id = str(rec.get("id", "")).strip()
+        if not record_id:
+            continue
+        has_document = "document" in rec
+        records[record_id] = {
+            "id": record_id,
+            "document": str(rec.get("document") or ""),
+            "has_document": has_document,
+            "metadata": rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {},
+        }
+    return records
 
 
 def _collect_orphan_graph_nodes(world_id: str, graph_store: GraphStore) -> list[dict]:
@@ -2204,7 +2242,8 @@ def audit_ingestion_integrity(
     extracted_by_source = _collect_extracted_coverage(world_id, graph_store)
     embedded_by_source = _collect_embedded_coverage(world_id, vector_store)
     expected_nodes_by_source = _collect_expected_node_records_by_source(world_id, graph_store)
-    embedded_unique_node_ids = _collect_unique_node_embedding_ids(unique_node_vector_store)
+    canonical_node_documents = _collect_canonical_unique_node_documents(graph_store)
+    embedded_unique_node_records = _collect_unique_node_embedding_records(unique_node_vector_store)
     orphan_graph_nodes = _collect_orphan_graph_nodes(world_id, graph_store)
     graph_node_ids = {str(node_id) for node_id in graph_store.graph.nodes()}
 
@@ -2214,11 +2253,28 @@ def audit_ingestion_integrity(
     extracted_total = 0
     embedded_total = 0
     expected_node_total = len(graph_node_ids)
-    embedded_node_total = len(graph_node_ids & embedded_unique_node_ids)
+    fresh_unique_node_ids = {
+        node_id
+        for node_id, document in canonical_node_documents.items()
+        if node_id in embedded_unique_node_records
+        and (
+            not embedded_unique_node_records.get(node_id, {}).get("has_document")
+            or str(embedded_unique_node_records.get(node_id, {}).get("document") or "") == str(document)
+        )
+    }
+    stale_unique_node_ids = {
+        node_id
+        for node_id, document in canonical_node_documents.items()
+        if node_id in embedded_unique_node_records
+        and embedded_unique_node_records.get(node_id, {}).get("has_document")
+        and str(embedded_unique_node_records.get(node_id, {}).get("document") or "") != str(document)
+    }
+    embedded_node_total = len(fresh_unique_node_ids)
     failed_total = 0
     complete_sources = 0
     partial_sources = 0
     synthesized_total = 0
+    stale_total = len(stale_unique_node_ids)
 
     for source in meta.get("sources", []):
         _ensure_source_tracking(source)
@@ -2254,7 +2310,12 @@ def audit_ingestion_integrity(
                 continue
             if stage == "embedding":
                 if scope == "node" and node_id:
-                    if node_id in embedded_unique_node_ids:
+                    expected_node = next((node for node in expected_nodes_by_source.get(source_id, []) if str(node.get("id")) == node_id), None)
+                    record = embedded_unique_node_records.get(node_id)
+                    if expected_node is not None and record and (
+                        not record.get("has_document")
+                        or str(record.get("document") or "") == str(expected_node.get("canonical_document") or "")
+                    ):
                         continue
                 elif idx in embedded_set:
                     continue
@@ -2282,8 +2343,17 @@ def audit_ingestion_integrity(
 
         expected_nodes = expected_nodes_by_source.get(source_id, [])
         missing_node_vectors: list[dict] = []
+        stale_node_vectors: list[dict] = []
         source_expected_node_total = len(expected_nodes)
-        source_embedded_node_total = sum(1 for node in expected_nodes if node["id"] in embedded_unique_node_ids)
+        fresh_node_ids: set[str] = set()
+        stale_node_ids: set[str] = set()
+        for node in expected_nodes:
+            if node["id"] in fresh_unique_node_ids:
+                fresh_node_ids.add(node["id"])
+            elif node["id"] in stale_unique_node_ids:
+                stale_node_ids.add(node["id"])
+
+        source_embedded_node_total = len(fresh_node_ids)
 
         for idx in range(expected):
             chunk = _chunk_id(world_id, source_id, idx)
@@ -2333,8 +2403,9 @@ def audit_ingestion_integrity(
         if synthesize_failures:
             for node in expected_nodes:
                 idx = int(node["chunk_index"])
-                if node["id"] in embedded_unique_node_ids or ("embedding", idx, node["id"]) in existing_node_failure_keys:
+                if node["id"] in fresh_node_ids or ("embedding", idx, node["id"]) in existing_node_failure_keys:
                     continue
+                is_stale = node["id"] in stale_node_ids
                 source["stage_failures"].append(
                     {
                         "stage": "embedding",
@@ -2344,8 +2415,10 @@ def audit_ingestion_integrity(
                         "parent_chunk_id": node["chunk_id"],
                         "source_id": source_id,
                         "book_number": book_number,
-                        "error_type": "coverage_gap",
-                        "error_message": "Node missing embedding coverage in unique node vector store.",
+                        "error_type": "stale_vector" if is_stale else "coverage_gap",
+                        "error_message": "Node embedding is stale and no longer matches the current graph entity."
+                        if is_stale
+                        else "Node missing embedding coverage in unique node vector store.",
                         "attempt_count": 0,
                         "last_attempt_at": _now_iso(),
                         "node_id": node["id"],
@@ -2356,16 +2429,18 @@ def audit_ingestion_integrity(
                 synthesized_total += 1
 
         for node in expected_nodes:
-            if node["id"] in embedded_unique_node_ids:
+            if node["id"] in fresh_node_ids:
                 continue
-            missing_node_vectors.append(
-                {
-                    "chunk_index": int(node["chunk_index"]),
-                    "chunk_id": node["chunk_id"],
-                    "node_id": node["id"],
-                    "node_display_name": node.get("display_name", ""),
-                }
-            )
+            row = {
+                "chunk_index": int(node["chunk_index"]),
+                "chunk_id": node["chunk_id"],
+                "node_id": node["id"],
+                "node_display_name": node.get("display_name", ""),
+            }
+            if node["id"] in stale_node_ids:
+                stale_node_vectors.append(row)
+            else:
+                missing_node_vectors.append(row)
 
         _sync_failed_chunks(source)
         _update_source_status_from_coverage(source)
@@ -2393,6 +2468,7 @@ def audit_ingestion_integrity(
             "missing_extraction_chunks": missing_extraction,
             "missing_embedding_chunks": missing_embedding,
             "missing_node_vectors": missing_node_vectors,
+            "stale_node_vectors": stale_node_vectors,
             "failed_records": len(source.get("stage_failures", [])),
             "status": source.get("status"),
             "stage_failures": list(source.get("stage_failures", [])),
@@ -2427,6 +2503,7 @@ def audit_ingestion_integrity(
             "embedded_unique_nodes": embedded_node_total,
             "expected_node_vectors": expected_node_total,
             "embedded_node_vectors": embedded_node_total,
+            "stale_unique_node_vectors": stale_total,
             "failed_records": failed_total,
             "sources_total": len(meta.get("sources", [])),
             "sources_complete": complete_sources,
@@ -3125,10 +3202,7 @@ async def start_ingestion(
                     current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
                     if current_unique_nodes > 0:
                         embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
-                    meta["embedded_unique_nodes"] = max(
-                        _coerce_non_negative_int(meta.get("embedded_unique_nodes")),
-                        embedded_unique_node_total,
-                    )
+                    meta["embedded_unique_nodes"] = embedded_unique_node_total
                     checkpoint = _load_checkpoint(world_id) or {}
                     last_completed = int(checkpoint.get("last_completed_chunk_index", -1))
                     _save_checkpoint(

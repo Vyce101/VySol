@@ -51,6 +51,17 @@ class DummyVectorStore:
     def get_all_chunk_records(self):
         return list(self._records)
 
+    def get_all_records(self, *, include_documents: bool = False):
+        if include_documents:
+            return list(self._records)
+        return [
+            {
+                "id": record.get("id"),
+                "metadata": record.get("metadata", {}),
+            }
+            for record in self._records
+        ]
+
     def count(self) -> int:
         return len(self._records)
 
@@ -68,7 +79,7 @@ class RecordingNodeVectorStore:
 def _build_node_vector_records(graph_chunk_ids: list[str], vector_records: list[dict]) -> list[dict]:
     chunk_to_node = {chunk_id: f"n{index}" for index, chunk_id in enumerate(graph_chunk_ids)}
     node_records: list[dict] = []
-    for record in vector_records:
+    for index, record in enumerate(vector_records):
         chunk_id = str(record.get("id", ""))
         node_id = chunk_to_node.get(chunk_id)
         if not node_id:
@@ -79,6 +90,15 @@ def _build_node_vector_records(graph_chunk_ids: list[str], vector_records: list[
                 "metadata": {
                     "node_id": node_id,
                 },
+                "document": ingestion_engine.build_unique_node_document(
+                    {
+                        "node_id": node_id,
+                        "display_name": f"Node {index}",
+                        "description": "",
+                        "claims": [],
+                        "source_chunks": [chunk_id],
+                    }
+                ),
             }
         )
     return node_records
@@ -175,6 +195,59 @@ def test_audit_synthesizes_stage_failures_from_coverage_gaps(monkeypatch):
     assert ("embedding", 1, "chunk") in stages
     assert ("embedding", 1, "node") in stages
     assert ("embedding", 2, "chunk") in stages
+
+
+def test_audit_detects_stale_unique_node_vectors(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "complete",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 1,
+                "status": "complete",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0],
+                "embedded_chunks": [0],
+            }
+        ],
+    }
+    saved = {}
+
+    stale_node_records = [
+        {
+            "id": "n0",
+            "metadata": {"node_id": "n0"},
+            "document": "stale vector document",
+        }
+    ]
+
+    monkeypatch.setattr(ingestion_engine, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_engine, "_save_meta", lambda world_id, payload: saved.setdefault("meta", payload))
+    monkeypatch.setattr(ingestion_engine, "GraphStore", lambda world_id: DummyGraphStore(world_id, ["chunk_world-1_source-a_0"]))
+    monkeypatch.setattr(
+        ingestion_engine,
+        "VectorStore",
+        lambda world_id, collection_suffix="", **kwargs: DummyVectorStore(
+            world_id,
+            stale_node_records if collection_suffix == "unique_nodes" else [
+                {"id": "chunk_world-1_source-a_0", "metadata": {"source_id": "source-a", "chunk_index": 0}}
+            ],
+            collection_suffix=collection_suffix,
+        ),
+    )
+
+    summary = ingestion_engine.audit_ingestion_integrity("world-1", synthesize_failures=True, persist=True)
+
+    assert summary["world"]["embedded_unique_nodes"] == 0
+    assert summary["world"]["stale_unique_node_vectors"] == 1
+    source = saved["meta"]["sources"][0]
+    node_failures = [row for row in source["stage_failures"] if row.get("scope") == "node"]
+    assert len(node_failures) == 1
+    assert node_failures[0]["error_type"] == "stale_vector"
 
 
 def test_audit_clears_out_of_range_failures_when_current_coverage_is_complete(monkeypatch):

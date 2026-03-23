@@ -46,7 +46,7 @@ def test_exact_only_mode_stops_after_normalized_match_pass(tmp_path, monkeypatch
 
     rebuild_calls: list[list[str]] = []
 
-    async def _fake_rebuild_unique_node_index(_world_id, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
@@ -85,7 +85,7 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
     refreshed_merges: list[tuple[str, list[str]]] = []
     fake_unique_node_store = object()
 
-    async def _fake_rebuild_unique_node_index(_world_id, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
@@ -104,7 +104,7 @@ def test_exact_then_ai_mode_runs_chooser_and_combiner(tmp_path, monkeypatch):
         assert batch_size == 32
         assert cooldown_seconds == 0.0
 
-    def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k):
+    async def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k, abort_event=None):
         assert active_store.world_id == world_id
         assert unique_node_vector_store is fake_unique_node_store
         assert anchor_id == "node-a"
@@ -160,13 +160,13 @@ def test_exact_then_ai_rebuilds_unique_index_after_exact_pass_before_candidate_s
     rebuild_calls: list[list[str]] = []
     fake_unique_node_store = object()
 
-    async def _fake_rebuild_unique_node_index(_world_id, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
         rebuild_calls.append(sorted(active_store.graph.nodes()))
         assert batch_size == 32
         assert cooldown_seconds == 0.0
         return fake_unique_node_store
 
-    def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k):
+    async def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k, abort_event=None):
         assert unique_node_vector_store is fake_unique_node_store
         assert sorted(active_store.graph.nodes()) == ["node-a", "node-c", "node-d"]
         assert anchor_id == "node-c"
@@ -247,7 +247,7 @@ def test_entity_resolution_status_tracks_new_nodes_since_last_completed_run(tmp_
     async def _fail_combine(*args, **kwargs):
         raise AssertionError("Combiner should not run in exact-only mode.")
 
-    async def _fake_rebuild_unique_node_index(_world_id, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
         assert batch_size == 32
         assert cooldown_seconds == 0.0
         return object()
@@ -294,7 +294,7 @@ def test_entity_resolution_start_uses_custom_embedding_controls(tmp_path, monkey
 
     rebuild_calls: list[tuple[list[str], int, float]] = []
 
-    async def _fake_rebuild_unique_node_index(_world_id, active_store, batch_size, cooldown_seconds, abort_event=None):
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
         rebuild_calls.append((sorted(active_store.graph.nodes()), batch_size, cooldown_seconds))
         return object()
 
@@ -379,12 +379,93 @@ def test_entity_resolution_startup_failure_clears_active_run_and_marks_error(tmp
     assert world_id not in engine._abort_events
 
 
+def test_exact_only_failure_rolls_back_live_graph(tmp_path, monkeypatch):
+    world_id = "world-exact-only-rollback"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    async def _boom_rebuild(*args, **kwargs):
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _boom_rebuild)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    status = engine.get_resolution_status(world_id)
+    reloaded = graph_store.GraphStore(world_id)
+
+    assert status["status"] == "error"
+    assert status["reason"] == "rebuild failed"
+    assert reloaded.get_node_count() == 3
+
+
+def test_chooser_failure_fails_closed_without_live_graph_mutation(tmp_path, monkeypatch):
+    world_id = "world-chooser-fail-closed"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="Alicia", description="Possible duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    fake_unique_node_store = object()
+
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+        return fake_unique_node_store
+
+    async def _fake_query_candidates(active_store, unique_node_vector_store, anchor_id, remaining_ids, _top_k, abort_event=None):
+        candidate = engine._node_snapshot(active_store, "node-b")
+        assert candidate is not None
+        candidate["score"] = 0.1
+        return [candidate]
+
+    async def _boom_choose(*args, **kwargs):
+        raise RuntimeError("chooser boom")
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+    monkeypatch.setattr(engine, "_query_candidates", _fake_query_candidates)
+    monkeypatch.setattr(engine, "_choose_matches", _boom_choose)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 25, False, True, "exact_then_ai"))
+
+    status = engine.get_resolution_status(world_id)
+    reloaded = graph_store.GraphStore(world_id)
+
+    assert status["status"] == "error"
+    assert status["reason"] == "chooser boom"
+    assert reloaded.get_node_count() == 3
+
+
+def test_exact_only_events_label_current_exact_match_group(tmp_path, monkeypatch):
+    world_id = "world-exact-only-anchor-label"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
+    store.save()
+
+    async def _fake_rebuild_unique_node_index(_vector_store, active_store, batch_size, cooldown_seconds, abort_event=None):
+        return object()
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    events = engine.drain_sse_events(world_id)
+
+    assert any(event.get("current_anchor_label") == "Current Exact Match Group" for event in events)
+
+
 def test_entity_resolution_router_thread_start_failure_rolls_back_run(tmp_path, monkeypatch):
     world_id = "world-router-thread-start-failure"
     _prepare_world(tmp_path, monkeypatch, world_id)
 
-    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete"})
+    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete", "sources": [{"status": "complete"}]})
     monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(entity_resolution_router, "audit_ingestion_integrity", lambda _world_id, **kwargs: {"world": {"failed_records": 0}})
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 0})
 
     class BrokenThread:
         def __init__(self, *args, **kwargs):
@@ -415,12 +496,7 @@ def test_entity_resolution_router_thread_start_failure_rolls_back_run(tmp_path, 
 def test_upsert_unique_node_snapshots_obeys_cooldown_and_abort(monkeypatch):
     class _FakeVectorStore:
         def __init__(self):
-            self.embed_calls: list[list[str]] = []
             self.upsert_calls: list[list[str]] = []
-
-        def embed_texts(self, texts, api_key):
-            self.embed_calls.append(list(texts))
-            return [[0.1] for _ in texts]
 
         def upsert_documents_embeddings(self, document_ids, texts, metadatas, embeddings):
             self.upsert_calls.append(list(document_ids))
@@ -439,7 +515,13 @@ def test_upsert_unique_node_snapshots_obeys_cooldown_and_abort(monkeypatch):
         expected_event.set()
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(engine, "_get_embedding_api_key", lambda: "test-key")
+    embed_calls: list[list[str]] = []
+
+    async def _fake_embed_texts_abortable(_vector_store, texts, *, abort_event=None):
+        embed_calls.append(list(texts))
+        return [[0.1] for _ in texts]
+
+    monkeypatch.setattr(engine, "_embed_texts_abortable", _fake_embed_texts_abortable)
     monkeypatch.setattr(engine, "_sleep_with_abort", _fake_sleep_with_abort)
 
     try:
@@ -449,6 +531,6 @@ def test_upsert_unique_node_snapshots_obeys_cooldown_and_abort(monkeypatch):
     else:
         raise AssertionError("Expected the cooldown abort to cancel the batch loop.")
 
-    assert len(vector_store.embed_calls) == 1
+    assert len(embed_calls) == 1
     assert len(vector_store.upsert_calls) == 1
     assert sleep_calls == [0.5]

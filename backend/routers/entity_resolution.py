@@ -22,6 +22,11 @@ from core.entity_resolution_engine import (
     resolve_entity_resolution_mode,
     start_entity_resolution,
 )
+from core.ingestion_engine import (
+    audit_ingestion_integrity,
+    get_safety_review_summary,
+    has_active_ingestion_run,
+)
 
 router = APIRouter()
 
@@ -68,11 +73,24 @@ def _run_entity_resolution_in_thread(
 @router.post("/{world_id}/entity-resolution/start")
 async def entity_resolution_start(world_id: str, req: EntityResolutionStartRequest):
     meta = _load_meta(world_id)
-    if meta.get("ingestion_status") == "in_progress":
+    if meta.get("ingestion_status") == "in_progress" or has_active_ingestion_run(world_id):
         raise HTTPException(status_code=409, detail="Finish ingestion before resolving entities.")
     current_status = get_resolution_status(world_id)
     if current_status.get("status") == "in_progress":
         raise HTTPException(status_code=409, detail="Entity resolution is already in progress.")
+
+    audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+    meta = _load_meta(world_id)
+    sources = list(meta.get("sources", []))
+    if not sources:
+        raise HTTPException(status_code=409, detail="Ingest at least one complete source before resolving entities.")
+    if any(str(source.get("status") or "").lower() != "complete" for source in sources):
+        raise HTTPException(status_code=409, detail="Finish ingestion and repair source failures before resolving entities.")
+    if int(audit.get("world", {}).get("failed_records", 0) or 0) > 0 or str(meta.get("ingestion_status") or "").lower() == "partial_failure":
+        raise HTTPException(status_code=409, detail="Resolve retryable ingest failures before running entity resolution.")
+    safety_review_summary = get_safety_review_summary(world_id)
+    if int(safety_review_summary.get("unresolved_reviews", 0) or 0) > 0:
+        raise HTTPException(status_code=409, detail="Resolve or discard pending safety review items before running entity resolution.")
 
     resolution_mode = resolve_entity_resolution_mode(
         req.resolution_mode,

@@ -8,14 +8,21 @@ import logging
 import os
 import re
 import threading
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from .agents import _call_agent
 from .config import load_settings, world_meta_path
 from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
-from .key_manager import get_key_manager
+from .key_manager import (
+    AllKeysInCooldownError,
+    classify_transient_provider_error,
+    get_key_manager,
+    jittered_delay,
+)
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -29,6 +36,11 @@ _active_runs: set[str] = set()
 _STALE_RUN_GRACE_SECONDS = 15
 _UNIQUE_NODE_REBUILD_BATCH_SIZE = 32
 _UNIQUE_NODE_REBUILD_COOLDOWN_SECONDS = 0.0
+
+_META_STAGE_GRAPH_PATH = "entity_resolution_staging_graph_path"
+_META_STAGE_COLLECTION_SUFFIX = "entity_resolution_staging_collection_suffix"
+_META_COMMIT_PENDING = "entity_resolution_commit_pending"
+_META_CURRENT_ANCHOR_LABEL = "entity_resolution_current_anchor_label"
 
 EntityResolutionMode = Literal["exact_only", "exact_then_ai", "ai_only"]
 
@@ -70,6 +82,10 @@ def _mode_uses_ai_pass(resolution_mode: EntityResolutionMode) -> bool:
     return resolution_mode != "exact_only"
 
 
+def _current_anchor_label_for_mode(resolution_mode: EntityResolutionMode) -> str:
+    return "Current Exact Match Group" if resolution_mode == "exact_only" else "Current Anchor"
+
+
 def _is_stale_in_progress(state: dict[str, Any]) -> bool:
     if state.get("status") != "in_progress":
         return False
@@ -103,6 +119,14 @@ def _save_meta(world_id: str, meta: dict) -> None:
     os.replace(str(tmp), str(path))
 
 
+def _staging_graph_path(world_id: str) -> Path:
+    return world_meta_path(world_id).parent / "entity_resolution_staging_graph.gexf"
+
+
+def _new_staging_collection_suffix() -> str:
+    return f"unique_nodes_staging_{uuid.uuid4().hex}"
+
+
 def clear_sse_queue(world_id: str) -> None:
     with _get_lock(_sse_locks, world_id):
         _sse_queues[world_id] = []
@@ -127,20 +151,6 @@ def _set_state(world_id: str, **updates: Any) -> dict[str, Any]:
         current["updated_at"] = _now_iso()
         _states[world_id] = current
         return current
-
-
-def _mark_run_stale(world_id: str) -> dict[str, Any]:
-    state = _set_state(
-        world_id,
-        status="aborted",
-        phase="aborted",
-        message="Previous entity-resolution run is no longer active.",
-        reason="stale_run",
-        current_anchor=None,
-        current_candidates=[],
-    )
-    _update_meta_from_state(world_id, state)
-    return state
 
 
 def _coerce_non_negative_int(value: Any) -> int | None:
@@ -176,13 +186,105 @@ def _with_new_node_summary(world_id: str, payload: dict[str, Any], meta: dict[st
     return enriched
 
 
+def _cleanup_staging_artifacts(world_id: str, meta: dict[str, Any] | None = None) -> None:
+    local_meta = dict(meta or _load_meta(world_id))
+    stage_suffix = str(local_meta.get(_META_STAGE_COLLECTION_SUFFIX) or "").strip()
+    stage_graph_path = str(local_meta.get(_META_STAGE_GRAPH_PATH) or "").strip()
+    if stage_suffix:
+        try:
+            _get_unique_node_vector_store(world_id, collection_suffix=stage_suffix).drop_collection()
+        except Exception:
+            logger.warning("Failed to drop staged entity-resolution collection for %s", world_id, exc_info=True)
+    if stage_graph_path:
+        try:
+            path = Path(stage_graph_path)
+            if path.exists():
+                path.unlink()
+        except Exception:
+            logger.warning("Failed to remove staged entity-resolution graph for %s", world_id, exc_info=True)
+
+
+def _recover_stale_run(world_id: str) -> dict[str, Any]:
+    meta = _load_meta(world_id)
+    stage_suffix = str(meta.get(_META_STAGE_COLLECTION_SUFFIX) or "").strip()
+    stage_graph_path = str(meta.get(_META_STAGE_GRAPH_PATH) or "").strip()
+    commit_pending = bool(meta.get(_META_COMMIT_PENDING))
+
+    try:
+        if commit_pending and stage_suffix and stage_graph_path:
+            live_graph_store = GraphStore(world_id)
+            state = _set_state(
+                world_id,
+                status="in_progress",
+                phase="commit_recovery",
+                message="Recovering an interrupted entity-resolution commit.",
+                reason="stale_run_commit_recovery",
+            )
+            _update_meta_from_state(world_id, state, live_graph_store)
+            _finalize_resolution_commit(
+                world_id,
+                live_graph_store=live_graph_store,
+                stage_suffix=stage_suffix,
+                stage_graph_path=Path(stage_graph_path),
+                final_state_updates={
+                    "status": "complete",
+                    "phase": "complete",
+                    "message": "Recovered and finalized the interrupted entity-resolution run.",
+                    "reason": None,
+                },
+                push_terminal_event=False,
+            )
+            recovered_state = dict(_states.get(world_id, {}))
+            recovered_state["message"] = "Recovered and finalized the interrupted entity-resolution run."
+            _states[world_id] = recovered_state
+            push_sse_event(world_id, {"event": "complete", **recovered_state, "recovered": True})
+            return recovered_state
+    except Exception as exc:
+        logger.exception("Failed to recover stale entity-resolution commit for %s", world_id)
+        _cleanup_staging_artifacts(world_id, meta)
+        state = _set_state(
+            world_id,
+            status="error",
+            phase="error",
+            message="A stale entity-resolution run could not be recovered.",
+            reason=str(exc),
+            current_anchor=None,
+            current_candidates=[],
+            current_anchor_label=None,
+            staging_collection_suffix=None,
+            staging_graph_path=None,
+            commit_pending=False,
+        )
+        _update_meta_from_state(world_id, state)
+        push_sse_event(world_id, {"event": "error", **state, "recovered": True})
+        return state
+
+    _cleanup_staging_artifacts(world_id, meta)
+    state = _set_state(
+        world_id,
+        status="aborted",
+        phase="aborted",
+        message="Previous entity-resolution run was interrupted before commit. No graph changes were kept.",
+        reason="stale_run",
+        current_anchor=None,
+        current_candidates=[],
+        current_anchor_label=None,
+        staging_collection_suffix=None,
+        staging_graph_path=None,
+        commit_pending=False,
+    )
+    _update_meta_from_state(world_id, state)
+    push_sse_event(world_id, {"event": "aborted", **state, "recovered": True})
+    return state
+
+
 def get_resolution_status(world_id: str) -> dict[str, Any]:
     with _get_lock(_state_locks, world_id):
         current = dict(_states.get(world_id, {}))
 
     if current:
         if world_id not in _active_runs and _is_stale_in_progress(current):
-            return _mark_run_stale(world_id)
+            return _recover_stale_run(world_id)
         return _with_new_node_summary(world_id, current)
 
     if not world_meta_path(world_id).exists():
@@ -194,7 +296,7 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
         "updated_at": meta.get("entity_resolution_updated_at"),
     }
     if world_id not in _active_runs and _is_stale_in_progress(meta_like_state):
-        return _mark_run_stale(world_id)
+        return _recover_stale_run(world_id)
     settings = load_settings()
     resolution_mode = resolve_entity_resolution_mode(
         meta.get("entity_resolution_mode"),
@@ -203,25 +305,26 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
     return _with_new_node_summary(
         world_id,
         {
-        "status": meta.get("entity_resolution_status", "idle"),
-        "phase": meta.get("entity_resolution_phase"),
-        "message": meta.get("entity_resolution_message"),
-        "reason": meta.get("entity_resolution_reason"),
-        "top_k": meta.get("entity_resolution_top_k", settings.get("entity_resolution_top_k", 50)),
-        "embedding_batch_size": _normalize_embedding_batch_size(
-            meta.get("entity_resolution_embedding_batch_size", _UNIQUE_NODE_REBUILD_BATCH_SIZE)
-        ),
-        "embedding_cooldown_seconds": _normalize_embedding_cooldown_seconds(
-            meta.get("entity_resolution_embedding_cooldown_seconds", _UNIQUE_NODE_REBUILD_COOLDOWN_SECONDS)
-        ),
-        "resolved_entities": meta.get("entity_resolution_resolved_entities", 0),
-        "unresolved_entities": meta.get("entity_resolution_unresolved_entities", 0),
-        "auto_resolved_pairs": meta.get("entity_resolution_auto_resolved_pairs", 0),
-        "total_entities": meta.get("entity_resolution_total_entities", 0),
-        "resolution_mode": resolution_mode,
-        "review_mode": meta.get("entity_resolution_review_mode", False),
-        "include_normalized_exact_pass": _mode_uses_exact_pass(resolution_mode),
-        "can_resume": False,
+            "status": meta.get("entity_resolution_status", "idle"),
+            "phase": meta.get("entity_resolution_phase"),
+            "message": meta.get("entity_resolution_message"),
+            "reason": meta.get("entity_resolution_reason"),
+            "top_k": meta.get("entity_resolution_top_k", settings.get("entity_resolution_top_k", 50)),
+            "embedding_batch_size": _normalize_embedding_batch_size(
+                meta.get("entity_resolution_embedding_batch_size", _UNIQUE_NODE_REBUILD_BATCH_SIZE)
+            ),
+            "embedding_cooldown_seconds": _normalize_embedding_cooldown_seconds(
+                meta.get("entity_resolution_embedding_cooldown_seconds", _UNIQUE_NODE_REBUILD_COOLDOWN_SECONDS)
+            ),
+            "resolved_entities": meta.get("entity_resolution_resolved_entities", 0),
+            "unresolved_entities": meta.get("entity_resolution_unresolved_entities", 0),
+            "auto_resolved_pairs": meta.get("entity_resolution_auto_resolved_pairs", 0),
+            "total_entities": meta.get("entity_resolution_total_entities", 0),
+            "resolution_mode": resolution_mode,
+            "review_mode": meta.get("entity_resolution_review_mode", False),
+            "include_normalized_exact_pass": _mode_uses_exact_pass(resolution_mode),
+            "can_resume": False,
+            "current_anchor_label": meta.get(_META_CURRENT_ANCHOR_LABEL),
         },
         meta,
     )
@@ -257,6 +360,7 @@ def fail_entity_resolution_startup(
     reason: str | None = None,
     graph_store: GraphStore | None = None,
 ) -> dict[str, Any]:
+    _cleanup_staging_artifacts(world_id)
     state = _set_state(
         world_id,
         status="error",
@@ -265,6 +369,10 @@ def fail_entity_resolution_startup(
         reason=reason,
         current_anchor=None,
         current_candidates=[],
+        current_anchor_label=None,
+        staging_collection_suffix=None,
+        staging_graph_path=None,
+        commit_pending=False,
     )
     _update_meta_from_state(world_id, state, graph_store)
     push_sse_event(world_id, {"event": "error", **state})
@@ -284,6 +392,7 @@ def begin_entity_resolution_run(
 ) -> dict[str, Any]:
     """Mark a run as active immediately so status checks don't race the background task."""
     clear_sse_queue(world_id)
+    _cleanup_staging_artifacts(world_id)
     _abort_events[world_id] = threading.Event()
     _active_runs.add(world_id)
     normalized_embedding_batch_size = _normalize_embedding_batch_size(embedding_batch_size)
@@ -306,7 +415,11 @@ def begin_entity_resolution_run(
         auto_resolved_pairs=0,
         current_anchor=None,
         current_candidates=[],
+        current_anchor_label=None,
         can_resume=False,
+        staging_collection_suffix=None,
+        staging_graph_path=None,
+        commit_pending=False,
     )
     _update_meta_from_state(world_id, state)
     return state
@@ -390,11 +503,6 @@ def _combine_exact_match_group(nodes: list[dict[str, Any]]) -> tuple[str, str]:
     return _pick_fallback_name(nodes), _pick_fallback_description(nodes)
 
 
-def _get_embedding_api_key() -> str:
-    api_key, _ = get_key_manager().wait_for_available_key()
-    return api_key
-
-
 def _build_unique_node_metadata(node: dict[str, Any]) -> dict[str, Any]:
     node_id = str(node.get("node_id", "")).strip()
     return {
@@ -404,16 +512,111 @@ def _build_unique_node_metadata(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _get_unique_node_vector_store(world_id: str) -> VectorStore:
-    return VectorStore(world_id, collection_suffix="unique_nodes")
+def _get_unique_node_vector_store(world_id: str, *, collection_suffix: str = "unique_nodes") -> VectorStore:
+    return VectorStore(world_id, collection_suffix=collection_suffix)
 
 
-async def _sleep_with_abort(expected_event: threading.Event, seconds: float) -> None:
+def _working_graph_store(world_id: str, source_graph_store: GraphStore) -> GraphStore:
+    store = GraphStore(world_id)
+    store.path = _staging_graph_path(world_id)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.graph = source_graph_store.graph.copy(as_view=False)
+    return store
+
+
+def _load_staged_graph_store(world_id: str, stage_graph_path: Path) -> GraphStore:
+    store = GraphStore(world_id)
+    store.path = stage_graph_path
+    store.graph = store._load()
+    return store
+
+
+def _save_graph_store(store: GraphStore) -> None:
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.save()
+
+
+async def _sleep_with_abort(expected_event: threading.Event | None, seconds: float) -> None:
     if seconds <= 0:
+        return
+    if expected_event is None:
+        await asyncio.sleep(seconds)
         return
     aborted = await asyncio.to_thread(expected_event.wait, seconds)
     if aborted:
         raise asyncio.CancelledError()
+
+
+async def _await_available_key(
+    abort_event: threading.Event | None,
+) -> tuple[str, int]:
+    key_manager = get_key_manager()
+    while True:
+        if abort_event is not None and abort_event.is_set():
+            raise asyncio.CancelledError()
+        try:
+            return key_manager.get_active_key()
+        except AllKeysInCooldownError as exc:
+            await _sleep_with_abort(abort_event, jittered_delay(exc.retry_after_seconds))
+
+
+async def _embed_texts_abortable(
+    vector_store: VectorStore,
+    texts: list[str],
+    *,
+    abort_event: threading.Event | None = None,
+) -> list[list[float]]:
+    if not texts:
+        return []
+
+    candidates = vector_store._candidate_embedding_models()
+    key_manager = get_key_manager()
+    last_error: Exception | None = None
+    current_api_key, current_key_index = await _await_available_key(abort_event)
+    max_key_attempts = max(3, key_manager.key_count * 2)
+
+    for attempt in range(max_key_attempts):
+        if abort_event is not None and abort_event.is_set():
+            raise asyncio.CancelledError()
+        client = vector_store._get_embed_client(current_api_key)
+        rotate_key = False
+
+        for model_name in candidates:
+            if abort_event is not None and abort_event.is_set():
+                raise asyncio.CancelledError()
+            try:
+                payload: str | list[str] = texts if len(texts) > 1 else texts[0]
+                result = await asyncio.to_thread(client.models.embed_content, model=model_name, contents=payload)
+                embeddings = [list(item.values) for item in (result.embeddings or [])]
+                if len(embeddings) != len(texts):
+                    raise RuntimeError(
+                        f"Embedding API returned {len(embeddings)} embeddings for {len(texts)} texts."
+                    )
+                vector_store._record_effective_embedding_model(candidates, model_name)
+                return embeddings
+            except Exception as exc:
+                last_error = exc
+                message = str(exc).lower()
+                transient_kind = classify_transient_provider_error(exc)
+                if transient_kind and current_key_index is not None:
+                    key_manager.report_error(current_key_index, transient_kind)
+                    current_api_key, current_key_index = await _await_available_key(abort_event)
+                    rotate_key = True
+                    break
+                if ("not found" in message or "not supported" in message) and model_name != candidates[-1]:
+                    continue
+                rotate_key = False
+                break
+
+        if rotate_key:
+            if attempt < max_key_attempts - 1:
+                await _sleep_with_abort(abort_event, jittered_delay(0.5))
+            continue
+        break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Embedding generation failed with no model candidates.")
 
 
 async def _upsert_unique_node_snapshots(
@@ -435,7 +638,6 @@ async def _upsert_unique_node_snapshots(
     if not normalized_nodes:
         return 0
 
-    api_key = _get_embedding_api_key()
     total_written = 0
     normalized_batch_size = _normalize_embedding_batch_size(batch_size)
     normalized_cooldown_seconds = _normalize_embedding_cooldown_seconds(cooldown_seconds)
@@ -444,7 +646,7 @@ async def _upsert_unique_node_snapshots(
             raise asyncio.CancelledError()
         batch = normalized_nodes[start:start + normalized_batch_size]
         texts = [_entity_document(node) for node in batch]
-        embeddings = unique_node_vector_store.embed_texts(texts, api_key)
+        embeddings = await _embed_texts_abortable(unique_node_vector_store, texts, abort_event=abort_event)
         unique_node_vector_store.upsert_documents_embeddings(
             document_ids=[str(node["node_id"]) for node in batch],
             texts=texts,
@@ -453,19 +655,18 @@ async def _upsert_unique_node_snapshots(
         )
         total_written += len(batch)
         has_more_batches = start + normalized_batch_size < len(normalized_nodes)
-        if abort_event is not None and has_more_batches:
+        if has_more_batches:
             await _sleep_with_abort(abort_event, normalized_cooldown_seconds)
     return total_written
 
 
 async def _rebuild_unique_node_index(
-    world_id: str,
+    unique_node_vector_store: VectorStore,
     graph_store: GraphStore,
     batch_size: int,
     cooldown_seconds: float,
     abort_event: threading.Event | None = None,
 ) -> VectorStore:
-    unique_node_vector_store = _get_unique_node_vector_store(world_id)
     unique_node_vector_store.drop_collection()
 
     node_snapshots = [
@@ -506,12 +707,14 @@ async def _refresh_unique_node_index_after_merge(
         unique_node_vector_store.delete_document(winner_id)
 
 
-def _query_candidates(
+async def _query_candidates(
     graph_store: GraphStore,
     unique_node_vector_store: VectorStore,
     anchor_id: str,
     remaining_ids: list[str],
     top_k: int,
+    *,
+    abort_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     anchor = _node_snapshot(graph_store, anchor_id)
     if not anchor:
@@ -521,14 +724,17 @@ def _query_candidates(
     if collection_count <= 1:
         return []
 
-    api_key = _get_embedding_api_key()
-    remaining_set = set(remaining_ids)
-    raw_results = unique_node_vector_store.query(
-        _entity_document(anchor),
-        api_key=api_key,
+    query_embeddings = await _embed_texts_abortable(
+        unique_node_vector_store,
+        [_entity_document(anchor)],
+        abort_event=abort_event,
+    )
+    raw_results = unique_node_vector_store.query_by_embedding(
+        query_embeddings[0],
         n_results=collection_count,
     )
 
+    remaining_set = set(remaining_ids)
     candidates: list[dict[str, Any]] = []
     for result in raw_results:
         metadata = result.get("metadata", {}) or {}
@@ -566,17 +772,13 @@ async def _choose_matches(
         ensure_ascii=False,
     )
 
-    try:
-        parsed, _ = await _call_agent(
-            prompt_key="entity_resolution_chooser_prompt",
-            user_content=payload,
-            model_name=model_name,
-            temperature=0.1,
-            world_id=world_id,
-        )
-    except Exception as exc:
-        logger.warning("Entity chooser failed, falling back to no matches: %s", exc)
-        return [], f"Chooser failed: {exc}"
+    parsed, _ = await _call_agent(
+        prompt_key="entity_resolution_chooser_prompt",
+        user_content=payload,
+        model_name=model_name,
+        temperature=0.1,
+        world_id=world_id,
+    )
 
     chosen_ids = parsed.get("chosen_ids", []) if isinstance(parsed, dict) else []
     if not isinstance(chosen_ids, list):
@@ -593,24 +795,20 @@ async def _combine_entities(nodes: list[dict[str, Any]], *, world_id: str) -> tu
     model_name = settings.get("default_model_entity_combiner", "gemini-flash-lite-latest")
     payload = json.dumps({"entities": nodes}, ensure_ascii=False)
 
-    try:
-        parsed, _ = await _call_agent(
-            prompt_key="entity_resolution_combiner_prompt",
-            user_content=payload,
-            model_name=model_name,
-            temperature=0.2,
-            world_id=world_id,
-        )
-    except Exception as exc:
-        logger.warning("Entity combiner failed, using fallback merge text: %s", exc)
-        return _pick_fallback_name(nodes), _pick_fallback_description(nodes)
+    parsed, _ = await _call_agent(
+        prompt_key="entity_resolution_combiner_prompt",
+        user_content=payload,
+        model_name=model_name,
+        temperature=0.2,
+        world_id=world_id,
+    )
 
     display_name = parsed.get("display_name") if isinstance(parsed, dict) else None
     description = parsed.get("description") if isinstance(parsed, dict) else None
     if not isinstance(display_name, str) or not display_name.strip():
-        display_name = _pick_fallback_name(nodes)
+        raise RuntimeError("Entity combiner returned no merged display_name.")
     if not isinstance(description, str):
-        description = _pick_fallback_description(nodes)
+        raise RuntimeError("Entity combiner returned no merged description.")
     return display_name.strip(), description.strip()
 
 
@@ -653,7 +851,10 @@ def _merge_group(
         for source_id, target_id, attrs in incident_edges:
             rewired_source = winner_id if source_id == loser_id else source_id
             rewired_target = winner_id if target_id == loser_id else target_id
-            graph.add_edge(rewired_source, rewired_target, **attrs)
+            rewired_attrs = dict(attrs)
+            rewired_attrs["source_node_id"] = rewired_source
+            rewired_attrs["target_node_id"] = rewired_target
+            graph.add_edge(rewired_source, rewired_target, **rewired_attrs)
 
         graph.remove_node(loser_id)
 
@@ -705,6 +906,24 @@ def _update_meta_from_state(world_id: str, state: dict[str, Any], graph_store: G
     meta["entity_resolution_review_mode"] = state.get("review_mode", False)
     meta["entity_resolution_exact_pass"] = state.get("include_normalized_exact_pass", True)
     meta["entity_resolution_updated_at"] = state.get("updated_at")
+    meta[_META_CURRENT_ANCHOR_LABEL] = state.get("current_anchor_label")
+
+    stage_suffix = state.get("staging_collection_suffix")
+    if stage_suffix:
+        meta[_META_STAGE_COLLECTION_SUFFIX] = stage_suffix
+    else:
+        meta.pop(_META_STAGE_COLLECTION_SUFFIX, None)
+
+    stage_graph_path = state.get("staging_graph_path")
+    if stage_graph_path:
+        meta[_META_STAGE_GRAPH_PATH] = stage_graph_path
+    else:
+        meta.pop(_META_STAGE_GRAPH_PATH, None)
+
+    meta[_META_COMMIT_PENDING] = bool(state.get("commit_pending"))
+    if not meta[_META_COMMIT_PENDING]:
+        meta.pop(_META_COMMIT_PENDING, None)
+
     if graph_store is not None:
         current_total_nodes = graph_store.get_node_count()
         meta["total_nodes"] = current_total_nodes
@@ -721,6 +940,129 @@ def _update_meta_from_state(world_id: str, state: dict[str, Any], graph_store: G
     state["new_nodes_since_last_completed_resolution"] = None if baseline is None or current_total is None else max(0, current_total - baseline)
 
 
+def _as_sequence(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        return converted if isinstance(converted, list) else list(converted)
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _normalize_embedding_rows(value: Any) -> list[list[float]]:
+    rows = _as_sequence(value)
+    normalized: list[list[float]] = []
+    for row in rows:
+        if row is None:
+            normalized.append([])
+            continue
+        if hasattr(row, "tolist"):
+            row = row.tolist()
+        if isinstance(row, tuple):
+            row = list(row)
+        if not isinstance(row, list):
+            row = list(row)
+        normalized.append([float(item) for item in row])
+    return normalized
+
+
+def _snapshot_vector_store_records(vector_store: VectorStore) -> list[dict[str, Any]]:
+    try:
+        data = vector_store.collection.get(include=["documents", "metadatas", "embeddings"])
+    except Exception:
+        return []
+
+    ids = [str(record_id) for record_id in _as_sequence(data.get("ids")) if str(record_id).strip()]
+    documents = _as_sequence(data.get("documents"))
+    metadatas = _as_sequence(data.get("metadatas"))
+    embeddings = _normalize_embedding_rows(data.get("embeddings"))
+    if not ids:
+        return []
+    if not (len(ids) == len(documents) == len(metadatas) == len(embeddings)):
+        raise RuntimeError("Unique-node vector snapshot returned mismatched record lengths during entity resolution.")
+    return [
+        {
+            "id": ids[index],
+            "document": str(documents[index] or ""),
+            "metadata": metadatas[index] if isinstance(metadatas[index], dict) else {},
+            "embedding": embeddings[index],
+        }
+        for index in range(len(ids))
+    ]
+
+
+def _replace_vector_store_records(vector_store: VectorStore, records: list[dict[str, Any]]) -> None:
+    vector_store.drop_collection()
+    if not records:
+        return
+    vector_store.upsert_documents_embeddings(
+        document_ids=[str(record["id"]) for record in records],
+        texts=[str(record.get("document") or "") for record in records],
+        metadatas=[
+            record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            for record in records
+        ],
+        embeddings=[
+            [float(value) for value in list(record.get("embedding") or [])]
+            for record in records
+        ],
+    )
+
+
+def _finalize_resolution_commit(
+    world_id: str,
+    *,
+    live_graph_store: GraphStore,
+    stage_suffix: str,
+    stage_graph_path: Path,
+    final_state_updates: dict[str, Any],
+    push_terminal_event: bool = True,
+) -> dict[str, Any]:
+    staged_graph_store = _load_staged_graph_store(world_id, stage_graph_path)
+    live_graph_store.graph = staged_graph_store.graph.copy(as_view=False)
+    live_graph_store.save()
+
+    staged_vector_store = _get_unique_node_vector_store(world_id, collection_suffix=stage_suffix)
+    staged_records = _snapshot_vector_store_records(staged_vector_store)
+    live_unique_node_store = _get_unique_node_vector_store(world_id)
+    _replace_vector_store_records(live_unique_node_store, staged_records)
+
+    _cleanup_staging_artifacts(
+        world_id,
+        {
+            _META_STAGE_COLLECTION_SUFFIX: stage_suffix,
+            _META_STAGE_GRAPH_PATH: str(stage_graph_path),
+        },
+    )
+
+    state = _set_state(
+        world_id,
+        current_anchor=None,
+        current_candidates=[],
+        current_anchor_label=None,
+        staging_collection_suffix=None,
+        staging_graph_path=None,
+        commit_pending=False,
+        **final_state_updates,
+    )
+    _update_meta_from_state(world_id, state, live_graph_store)
+    if push_terminal_event:
+        terminal_event = "complete" if state.get("status") == "complete" else str(state.get("status") or "status")
+        push_sse_event(world_id, {"event": terminal_event, **state})
+    return state
+
+
+def _resolution_failure_message(base: str) -> str:
+    return f"{base} No graph changes were kept."
+
+
 async def start_entity_resolution(
     world_id: str,
     top_k: int,
@@ -735,10 +1077,12 @@ async def start_entity_resolution(
         abort_event = threading.Event()
         _abort_events[world_id] = abort_event
     _active_runs.add(world_id)
-    graph_store: GraphStore | None = None
+    live_graph_store: GraphStore | None = None
+    stage_suffix: str | None = None
     try:
-        graph_store = GraphStore(world_id)
-        initial_ids = list(graph_store.graph.nodes())
+        live_graph_store = GraphStore(world_id)
+        working_graph_store = _working_graph_store(world_id, live_graph_store)
+        initial_ids = list(working_graph_store.graph.nodes())
         initial_total = len(initial_ids)
         normalized_resolution_mode = resolve_entity_resolution_mode(
             resolution_mode,
@@ -748,6 +1092,9 @@ async def start_entity_resolution(
         normalized_embedding_cooldown_seconds = _normalize_embedding_cooldown_seconds(embedding_cooldown_seconds)
         include_exact_pass = _mode_uses_exact_pass(normalized_resolution_mode)
         use_ai_pass = _mode_uses_ai_pass(normalized_resolution_mode)
+        current_anchor_label = _current_anchor_label_for_mode(normalized_resolution_mode)
+        stage_suffix = _new_staging_collection_suffix()
+        stage_vector_store = _get_unique_node_vector_store(world_id, collection_suffix=stage_suffix)
 
         state = _set_state(
             world_id,
@@ -767,48 +1114,61 @@ async def start_entity_resolution(
             auto_resolved_pairs=0,
             current_anchor=None,
             current_candidates=[],
+            current_anchor_label=current_anchor_label,
+            staging_collection_suffix=stage_suffix,
+            staging_graph_path=str(_staging_graph_path(world_id)),
+            commit_pending=False,
             can_resume=False,
         )
-        _update_meta_from_state(world_id, state, graph_store)
+        _update_meta_from_state(world_id, state, live_graph_store)
         push_sse_event(world_id, {"event": "status", **state})
         _ensure_not_aborted(world_id, abort_event)
 
         if initial_total == 0:
-            state = _set_state(
+            _save_graph_store(working_graph_store)
+            _finalize_resolution_commit(
                 world_id,
-                status="complete",
-                phase="complete",
-                message="No entities are available for resolution.",
-                unresolved_entities=0,
-                current_anchor=None,
-                current_candidates=[],
+                live_graph_store=live_graph_store,
+                stage_suffix=stage_suffix,
+                stage_graph_path=working_graph_store.path,
+                final_state_updates={
+                    "status": "complete",
+                    "phase": "complete",
+                    "message": "No entities are available for resolution.",
+                    "reason": None,
+                    "top_k": top_k,
+                    "embedding_batch_size": normalized_embedding_batch_size,
+                    "embedding_cooldown_seconds": normalized_embedding_cooldown_seconds,
+                    "resolution_mode": normalized_resolution_mode,
+                    "review_mode": review_mode,
+                    "include_normalized_exact_pass": include_exact_pass,
+                    "total_entities": 0,
+                    "resolved_entities": 0,
+                    "unresolved_entities": 0,
+                    "auto_resolved_pairs": 0,
+                },
             )
-            _update_meta_from_state(world_id, state, graph_store)
-            push_sse_event(world_id, {"event": "complete", **state})
             return
 
         remaining_ids = list(initial_ids)
         processed_count = 0
         auto_resolved_pairs = 0
-        unique_node_vector_store: VectorStore | None = None
 
         if include_exact_pass:
             state = _set_state(world_id, phase="exact_match_pass", message="Running exact match pass after normalization.")
-            _update_meta_from_state(world_id, state, graph_store)
+            _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
 
-            exact_groups = _group_exact_matches(graph_store, remaining_ids)
-            pending_exact_saves = 0
+            exact_groups = _group_exact_matches(working_graph_store, remaining_ids)
             for group in exact_groups:
                 _ensure_not_aborted(world_id, abort_event)
-                nodes = [snapshot for snapshot in (_node_snapshot(graph_store, node_id) for node_id in group) if snapshot]
+                nodes = [snapshot for snapshot in (_node_snapshot(working_graph_store, node_id) for node_id in group) if snapshot]
                 if len(nodes) < 2:
                     continue
                 display_name, description = _combine_exact_match_group(nodes)
                 winner_id = group[0]
                 loser_ids = group[1:]
-                _merge_group(graph_store, winner_id, loser_ids, display_name, description)
-                pending_exact_saves += 1
+                _merge_group(working_graph_store, winner_id, loser_ids, display_name, description)
 
                 processed_count += len(group)
                 auto_resolved_pairs += len(loser_ids)
@@ -820,72 +1180,95 @@ async def start_entity_resolution(
                     resolved_entities=processed_count,
                     unresolved_entities=len(remaining_ids),
                     auto_resolved_pairs=auto_resolved_pairs,
+                    current_anchor_label=current_anchor_label,
                 )
-                _update_meta_from_state(world_id, state, graph_store)
+                _update_meta_from_state(world_id, state, live_graph_store)
                 push_sse_event(
                     world_id,
                     {
                         "event": "progress",
                         **state,
                         "current_anchor": {"node_id": winner_id, "display_name": display_name},
+                        "current_anchor_label": current_anchor_label,
                     },
                 )
-                if pending_exact_saves >= 10:
-                    graph_store.save()
-                    pending_exact_saves = 0
-
-            if pending_exact_saves:
-                graph_store.save()
 
             state = _set_state(
                 world_id,
                 phase="index_refresh",
-                message="Refreshing unique node index after exact match pass.",
+                message="Refreshing staged unique node index after exact match pass.",
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
                 auto_resolved_pairs=auto_resolved_pairs,
+                current_anchor_label=current_anchor_label,
             )
-            _update_meta_from_state(world_id, state, graph_store)
+            _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
-            unique_node_vector_store = await _rebuild_unique_node_index(
-                world_id,
-                graph_store,
+            stage_vector_store = await _rebuild_unique_node_index(
+                stage_vector_store,
+                working_graph_store,
                 batch_size=normalized_embedding_batch_size,
                 cooldown_seconds=normalized_embedding_cooldown_seconds,
                 abort_event=abort_event,
             )
 
         if not use_ai_pass:
+            _save_graph_store(working_graph_store)
             state = _set_state(
                 world_id,
-                status="complete",
-                phase="complete",
-                message="Exact-only entity resolution complete.",
-                reason=None,
+                phase="committing",
+                message="Finalizing exact-only entity resolution.",
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
+                auto_resolved_pairs=auto_resolved_pairs,
                 current_anchor=None,
                 current_candidates=[],
-                auto_resolved_pairs=auto_resolved_pairs,
+                current_anchor_label=current_anchor_label,
+                staging_collection_suffix=stage_suffix,
+                staging_graph_path=str(working_graph_store.path),
+                commit_pending=True,
             )
-            _update_meta_from_state(world_id, state, graph_store)
-            push_sse_event(world_id, {"event": "complete", **state})
+            _update_meta_from_state(world_id, state, live_graph_store)
+            push_sse_event(world_id, {"event": "progress", **state})
+            _finalize_resolution_commit(
+                world_id,
+                live_graph_store=live_graph_store,
+                stage_suffix=stage_suffix,
+                stage_graph_path=working_graph_store.path,
+                final_state_updates={
+                    "status": "complete",
+                    "phase": "complete",
+                    "message": "Exact-only entity resolution complete.",
+                    "reason": None,
+                    "top_k": top_k,
+                    "embedding_batch_size": normalized_embedding_batch_size,
+                    "embedding_cooldown_seconds": normalized_embedding_cooldown_seconds,
+                    "resolution_mode": normalized_resolution_mode,
+                    "review_mode": review_mode,
+                    "include_normalized_exact_pass": include_exact_pass,
+                    "total_entities": initial_total,
+                    "resolved_entities": processed_count,
+                    "unresolved_entities": len(remaining_ids),
+                    "auto_resolved_pairs": auto_resolved_pairs,
+                },
+            )
             return
 
-        if unique_node_vector_store is None:
+        if not include_exact_pass:
             state = _set_state(
                 world_id,
                 phase="index_refresh",
-                message="Preparing unique node index for AI candidate search.",
+                message="Preparing staged unique node index for AI candidate search.",
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
                 auto_resolved_pairs=auto_resolved_pairs,
+                current_anchor_label=current_anchor_label,
             )
-            _update_meta_from_state(world_id, state, graph_store)
+            _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
-            unique_node_vector_store = await _rebuild_unique_node_index(
-                world_id,
-                graph_store,
+            stage_vector_store = await _rebuild_unique_node_index(
+                stage_vector_store,
+                working_graph_store,
                 batch_size=normalized_embedding_batch_size,
                 cooldown_seconds=normalized_embedding_cooldown_seconds,
                 abort_event=abort_event,
@@ -895,7 +1278,7 @@ async def start_entity_resolution(
             _ensure_not_aborted(world_id, abort_event)
 
             anchor_id = remaining_ids[0]
-            anchor = _node_snapshot(graph_store, anchor_id)
+            anchor = _node_snapshot(working_graph_store, anchor_id)
             if not anchor:
                 remaining_ids.pop(0)
                 processed_count += 1
@@ -913,9 +1296,10 @@ async def start_entity_resolution(
                     unresolved_entities=len(remaining_ids),
                     current_anchor=anchor,
                     current_candidates=[],
+                    current_anchor_label=current_anchor_label,
                 )
-                _update_meta_from_state(world_id, state, graph_store)
-                push_sse_event(world_id, {"event": "progress", **state})
+                _update_meta_from_state(world_id, state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **state, "current_anchor_label": current_anchor_label})
                 continue
 
             state = _set_state(
@@ -924,49 +1308,73 @@ async def start_entity_resolution(
                 message=f"Searching candidate entities for {anchor['display_name']}.",
                 current_anchor=anchor,
                 current_candidates=[],
+                current_anchor_label=current_anchor_label,
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
                 auto_resolved_pairs=auto_resolved_pairs,
             )
-            _update_meta_from_state(world_id, state, graph_store)
-            push_sse_event(world_id, {"event": "progress", **state})
+            _update_meta_from_state(world_id, state, live_graph_store)
+            push_sse_event(world_id, {"event": "progress", **state, "current_anchor_label": current_anchor_label})
 
-            candidates = _query_candidates(graph_store, unique_node_vector_store, anchor_id, remaining_ids, top_k)
+            _ensure_not_aborted(world_id, abort_event)
+            candidates = await _query_candidates(
+                working_graph_store,
+                stage_vector_store,
+                anchor_id,
+                remaining_ids,
+                top_k,
+                abort_event=abort_event,
+            )
+            _ensure_not_aborted(world_id, abort_event)
             state = _set_state(
                 world_id,
                 phase="candidate_search",
                 message=f"Evaluating {len(candidates)} candidates for {anchor['display_name']}.",
                 current_anchor=anchor,
                 current_candidates=candidates,
+                current_anchor_label=current_anchor_label,
                 resolved_entities=processed_count,
                 unresolved_entities=len(remaining_ids),
                 auto_resolved_pairs=auto_resolved_pairs,
             )
-            _update_meta_from_state(world_id, state, graph_store)
-            push_sse_event(world_id, {"event": "progress", **state})
+            _update_meta_from_state(world_id, state, live_graph_store)
+            push_sse_event(world_id, {"event": "progress", **state, "current_anchor_label": current_anchor_label})
 
             chosen_ids: list[str] = []
             chooser_reason = "No candidates were selected."
             if candidates:
-                state = _set_state(world_id, phase="chooser", message=f"Chooser evaluating {len(candidates)} candidate entities.")
-                _update_meta_from_state(world_id, state, graph_store)
-                push_sse_event(world_id, {"event": "progress", **state})
+                _ensure_not_aborted(world_id, abort_event)
+                state = _set_state(
+                    world_id,
+                    phase="chooser",
+                    message=f"Chooser evaluating {len(candidates)} candidate entities.",
+                    current_anchor_label=current_anchor_label,
+                )
+                _update_meta_from_state(world_id, state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **state, "current_anchor_label": current_anchor_label})
                 chosen_ids, chooser_reason = await _choose_matches(anchor, candidates, world_id=world_id)
+                _ensure_not_aborted(world_id, abort_event)
                 chosen_ids = [node_id for node_id in chosen_ids if node_id in remaining_ids and node_id != anchor_id]
 
             if chosen_ids:
                 group_ids = [anchor_id, *chosen_ids]
-                nodes = [snapshot for snapshot in (_node_snapshot(graph_store, node_id) for node_id in group_ids) if snapshot]
-                state = _set_state(world_id, phase="combiner", message=f"Merging {len(group_ids)} entities for {anchor['display_name']}.")
-                _update_meta_from_state(world_id, state, graph_store)
-                push_sse_event(world_id, {"event": "progress", **state, "reason": chooser_reason})
+                nodes = [snapshot for snapshot in (_node_snapshot(working_graph_store, node_id) for node_id in group_ids) if snapshot]
+                state = _set_state(
+                    world_id,
+                    phase="combiner",
+                    message=f"Merging {len(group_ids)} entities for {anchor['display_name']}.",
+                    current_anchor_label=current_anchor_label,
+                )
+                _update_meta_from_state(world_id, state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **state, "reason": chooser_reason, "current_anchor_label": current_anchor_label})
 
+                _ensure_not_aborted(world_id, abort_event)
                 display_name, description = await _combine_entities(nodes, world_id=world_id)
-                _merge_group(graph_store, anchor_id, chosen_ids, display_name, description)
-                graph_store.save()
+                _ensure_not_aborted(world_id, abort_event)
+                _merge_group(working_graph_store, anchor_id, chosen_ids, display_name, description)
                 await _refresh_unique_node_index_after_merge(
-                    unique_node_vector_store,
-                    graph_store,
+                    stage_vector_store,
+                    working_graph_store,
                     anchor_id,
                     chosen_ids,
                     batch_size=normalized_embedding_batch_size,
@@ -976,17 +1384,20 @@ async def start_entity_resolution(
 
                 processed_count += len(group_ids)
                 remaining_ids = [node_id for node_id in remaining_ids if node_id not in group_ids]
+                auto_resolved_pairs += len(chosen_ids)
                 state = _set_state(
                     world_id,
                     phase="applied",
                     message=f"Merged {len(group_ids)} entities into {display_name}.",
                     resolved_entities=processed_count,
                     unresolved_entities=len(remaining_ids),
+                    auto_resolved_pairs=auto_resolved_pairs,
                     current_anchor={"node_id": anchor_id, "display_name": display_name, "description": description},
                     current_candidates=[],
+                    current_anchor_label=current_anchor_label,
                 )
-                _update_meta_from_state(world_id, state, graph_store)
-                push_sse_event(world_id, {"event": "progress", **state, "reason": chooser_reason})
+                _update_meta_from_state(world_id, state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **state, "reason": chooser_reason, "current_anchor_label": current_anchor_label})
             else:
                 processed_count += 1
                 remaining_ids = remaining_ids[1:]
@@ -999,38 +1410,91 @@ async def start_entity_resolution(
                     unresolved_entities=len(remaining_ids),
                     current_anchor=anchor,
                     current_candidates=[],
+                    current_anchor_label=current_anchor_label,
                 )
-                _update_meta_from_state(world_id, state, graph_store)
-                push_sse_event(world_id, {"event": "progress", **state})
+                _update_meta_from_state(world_id, state, live_graph_store)
+                push_sse_event(world_id, {"event": "progress", **state, "current_anchor_label": current_anchor_label})
 
+        _save_graph_store(working_graph_store)
         state = _set_state(
             world_id,
-            status="complete",
-            phase="complete",
-            message="Entity resolution complete.",
-            reason=None,
-            resolved_entities=initial_total,
-            unresolved_entities=0,
+            phase="committing",
+            message="Finalizing entity resolution.",
+            resolved_entities=processed_count,
+            unresolved_entities=len(remaining_ids),
+            auto_resolved_pairs=auto_resolved_pairs,
             current_anchor=None,
             current_candidates=[],
-            auto_resolved_pairs=auto_resolved_pairs,
+            current_anchor_label=current_anchor_label,
+            staging_collection_suffix=stage_suffix,
+            staging_graph_path=str(working_graph_store.path),
+            commit_pending=True,
         )
-        _update_meta_from_state(world_id, state, graph_store)
-        push_sse_event(world_id, {"event": "complete", **state})
+        _update_meta_from_state(world_id, state, live_graph_store)
+        push_sse_event(world_id, {"event": "progress", **state})
+
+        _finalize_resolution_commit(
+            world_id,
+            live_graph_store=live_graph_store,
+            stage_suffix=stage_suffix,
+            stage_graph_path=working_graph_store.path,
+            final_state_updates={
+                "status": "complete",
+                "phase": "complete",
+                "message": "Entity resolution complete.",
+                "reason": None,
+                "top_k": top_k,
+                "embedding_batch_size": normalized_embedding_batch_size,
+                "embedding_cooldown_seconds": normalized_embedding_cooldown_seconds,
+                "resolution_mode": normalized_resolution_mode,
+                "review_mode": review_mode,
+                "include_normalized_exact_pass": include_exact_pass,
+                "total_entities": initial_total,
+                "resolved_entities": initial_total,
+                "unresolved_entities": 0,
+                "auto_resolved_pairs": auto_resolved_pairs,
+            },
+        )
     except asyncio.CancelledError:
+        if stage_suffix:
+            _cleanup_staging_artifacts(
+                world_id,
+                {
+                    _META_STAGE_COLLECTION_SUFFIX: stage_suffix,
+                    _META_STAGE_GRAPH_PATH: str(_staging_graph_path(world_id)),
+                },
+            )
         state = _set_state(
             world_id,
             status="aborted",
             phase="aborted",
-            message="Entity resolution aborted.",
+            message=_resolution_failure_message("Entity resolution aborted."),
+            reason="aborted",
             current_anchor=None,
             current_candidates=[],
+            current_anchor_label=None,
+            staging_collection_suffix=None,
+            staging_graph_path=None,
+            commit_pending=False,
         )
-        _update_meta_from_state(world_id, state, graph_store)
+        _update_meta_from_state(world_id, state, live_graph_store)
         push_sse_event(world_id, {"event": "aborted", **state})
     except Exception as exc:
         logger.exception("Entity resolution failed for %s", world_id)
-        fail_entity_resolution_startup(world_id, "Entity resolution failed.", reason=str(exc), graph_store=graph_store)
+        if stage_suffix:
+            _cleanup_staging_artifacts(
+                world_id,
+                {
+                    _META_STAGE_COLLECTION_SUFFIX: stage_suffix,
+                    _META_STAGE_GRAPH_PATH: str(_staging_graph_path(world_id)),
+                },
+            )
+        fail_entity_resolution_startup(
+            world_id,
+            _resolution_failure_message("Entity resolution failed."),
+            reason=str(exc),
+            graph_store=live_graph_store,
+        )
     finally:
         _active_runs.discard(world_id)
         if _abort_events.get(world_id) is abort_event:

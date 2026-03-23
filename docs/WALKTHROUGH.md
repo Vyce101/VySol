@@ -199,6 +199,7 @@ Important:
 
 - The chooser and combiner prompts matter only when you run `Exact + chooser/combiner`
 - `Exact only` does not call either model stage
+- `Exact only` still needs to rebuild the unique-node index before the run is complete
 
 ## Ingestion Flow
 
@@ -216,12 +217,13 @@ Reading the ingest progress header:
 - `Chunks Extracted` means chunks whose graph extraction has been durably written
 - `Chunks Embedded` means chunks whose chunk vectors have been durably written
 - `Unique Graph Nodes` means the current unique nodes in the saved graph
-- `Embedded Unique Nodes` means how many current unique graph nodes already have embeddings in the unique-node index
+- `Embedded Unique Nodes` means how many current unique graph nodes still have matching embeddings in the unique-node index
 
 Important note about node counts:
 
 - `Unique Graph Nodes` and `Embedded Unique Nodes` reflect the current merged graph state, not raw per-chunk extraction totals
 - Those counts can change after entity resolution merges duplicate entities and refreshes unique-node embeddings
+- A current node can still count as missing here if its old vector row exists but no longer matches the node's current merged text
 
 Wait states during ingest:
 
@@ -248,6 +250,7 @@ If extraction hits a safety block:
 Entity-resolution controls:
 
 - `Resolution mode` chooses whether the run stops after exact normalized matching or continues into chooser/combiner review
+- Exact-only still rebuilds the unique-node index before it reports success
 - `Top K candidates` is used only for `Exact + chooser/combiner`
 - `Embedding batch size` controls unique-node embedding rebuild batch size for that entity-resolution run
 - `Embedding delay (seconds)` adds a per-batch cooldown to that same unique-node embedding rebuild step
