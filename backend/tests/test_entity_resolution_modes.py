@@ -438,6 +438,86 @@ def test_chooser_failure_fails_closed_without_live_graph_mutation(tmp_path, monk
     assert reloaded.get_node_count() == 3
 
 
+def test_exact_only_commit_pending_recovery_finishes_truthfully_after_meta_write_failure(tmp_path, monkeypatch):
+    world_id = "world-commit-pending-recovery"
+    meta_path, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    async def _fake_rebuild_unique_node_index(_vector_store, _active_store, batch_size, cooldown_seconds, abort_event=None):
+        assert batch_size == 32
+        assert cooldown_seconds == 0.0
+        return object()
+
+    original_update_meta_from_state = engine._update_meta_from_state
+    failed_once = {"value": False}
+
+    def _flaky_update_meta_from_state(world_id_arg: str, state: dict, graph_store_arg=None):
+        original_update_meta_from_state(world_id_arg, state, graph_store_arg)
+        if state.get("commit_state") == "committed" and not failed_once["value"]:
+            failed_once["value"] = True
+            raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+    monkeypatch.setattr(engine, "_update_meta_from_state", _flaky_update_meta_from_state)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    interrupted_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    interrupted_graph = graph_store.GraphStore(world_id)
+
+    assert interrupted_meta["entity_resolution_commit_state"] == "commit_pending"
+    assert interrupted_meta["entity_resolution_commit_pending"] is True
+    assert interrupted_graph.get_node_count() == 2
+
+    status = engine.get_resolution_status(world_id)
+    final_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    assert status["status"] == "complete"
+    assert status["commit_state"] == "committed"
+    assert final_meta["entity_resolution_commit_state"] == "committed"
+    assert "entity_resolution_commit_pending" not in final_meta
+
+
+def test_staged_vector_snapshot_failure_leaves_live_graph_unmutated(tmp_path, monkeypatch):
+    world_id = "world-staged-snapshot-failure"
+    _, store = _prepare_world(tmp_path, monkeypatch, world_id)
+    store.graph.add_node("node-a", display_name="Alice", description="Primary", claims=[], source_chunks=[])
+    store.graph.add_node("node-b", display_name="ALICE", description="Duplicate", claims=[], source_chunks=[])
+    store.graph.add_node("node-c", display_name="Bob", description="Other", claims=[], source_chunks=[])
+    store.save()
+
+    async def _fake_rebuild_unique_node_index(_vector_store, _active_store, batch_size, cooldown_seconds, abort_event=None):
+        assert batch_size == 32
+        assert cooldown_seconds == 0.0
+        return object()
+
+    replace_called = {"value": False}
+
+    def _boom_snapshot(*args, **kwargs):
+        raise RuntimeError("snapshot failed")
+
+    def _record_replace(*args, **kwargs):
+        replace_called["value"] = True
+
+    monkeypatch.setattr(engine, "_rebuild_unique_node_index", _fake_rebuild_unique_node_index)
+    monkeypatch.setattr(engine, "_snapshot_vector_store_records", _boom_snapshot)
+    monkeypatch.setattr(engine, "_replace_vector_store_records", _record_replace)
+
+    asyncio.run(engine.start_entity_resolution(world_id, 50, False, True, "exact_only"))
+
+    status = dict(engine._states.get(world_id, {}))
+    reloaded = graph_store.GraphStore(world_id)
+
+    assert status["status"] == "error"
+    assert status["reason"] == "snapshot failed"
+    assert status["commit_state"] == "commit_pending"
+    assert replace_called["value"] is False
+    assert reloaded.get_node_count() == 3
+
+
 def test_exact_only_events_label_current_exact_match_group(tmp_path, monkeypatch):
     world_id = "world-exact-only-anchor-label"
     _, store = _prepare_world(tmp_path, monkeypatch, world_id)
@@ -455,6 +535,35 @@ def test_exact_only_events_label_current_exact_match_group(tmp_path, monkeypatch
     events = engine.drain_sse_events(world_id)
 
     assert any(event.get("current_anchor_label") == "Current Exact Match Group" for event in events)
+
+
+def test_entity_resolution_start_rejects_world_level_audit_blockers(tmp_path, monkeypatch):
+    world_id = "world-router-blocking-issues"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(entity_resolution_router, "_load_meta", lambda _world_id: {"ingestion_status": "complete", "sources": [{"status": "complete"}]})
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(
+        entity_resolution_router,
+        "audit_ingestion_integrity",
+        lambda _world_id, **kwargs: {
+            "world": {"failed_records": 0},
+            "blocking_issues": [{"message": "Could not read the unique-node index while auditing this world."}],
+        },
+    )
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 0})
+
+    with pytest.raises(entity_resolution_router.HTTPException) as exc:
+        asyncio.run(
+            entity_resolution_router.entity_resolution_start(
+                world_id,
+                entity_resolution_router.EntityResolutionStartRequest(),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not read the unique-node index while auditing this world."
 
 
 def test_entity_resolution_router_thread_start_failure_rolls_back_run(tmp_path, monkeypatch):

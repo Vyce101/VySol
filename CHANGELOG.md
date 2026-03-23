@@ -45,6 +45,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed entity resolution commit recovery so interrupted final meta writes now preserve a truthful `commit_pending` state, staged vector snapshot failures no longer mutate the live graph first, and stale-run recovery can finish a pending committed result instead of pretending it rolled back.
+- Fixed ingest audit/progress truthfulness so unreadable vector collections now surface as explicit world blockers instead of fake missing coverage, `Re-embed All` keeps progressing through world-level unique-node rebuild and audit phases after chunk work finishes, and world-scope blockers are visible in the main progress UI instead of hiding only in the agent log.
 - Fixed entity resolution so runs stage graph and unique-node-index changes until the full run succeeds, failed chooser/combiner/provider paths surface real backend errors instead of silent degradation, and stale unique-node vectors are now treated as repairable missing coverage instead of silently counting as healthy.
 - Fixed world duplication so completed duplicates no longer inherit stale resume/checkpoint state, copied ingest logs, or source-world chunk provenance that could later make the duplicate regress into a fake `partial_failure` state.
 - Fixed world-duplication preview cards so active duplicates no longer disappear during normal polling, source cards lock the duplicate action while a copy is running, and world-card status pills/stats now keep a consistent compact layout across different worlds.

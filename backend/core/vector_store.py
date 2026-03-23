@@ -21,6 +21,10 @@ from .key_manager import classify_transient_provider_error, get_key_manager, jit
 logger = logging.getLogger(__name__)
 
 
+class VectorStoreReadError(RuntimeError):
+    """Raised when a vector collection could not be read safely."""
+
+
 class VectorStore:
     """Wraps ChromaDB PersistentClient for a single world."""
 
@@ -335,14 +339,18 @@ class VectorStore:
     def count(self) -> int:
         return self.collection.count()
 
-    def get_all_records(self, *, include_documents: bool = False) -> list[dict]:
+    def get_all_records(self, *, include_documents: bool = False, raise_on_error: bool = False) -> list[dict]:
         """Return all stored ids with optional documents and metadata."""
         include: list[str] = ["metadatas"]
         if include_documents:
             include.append("documents")
         try:
             data = self.collection.get(include=include)
-        except Exception:
+        except Exception as exc:
+            if raise_on_error:
+                raise VectorStoreReadError(
+                    f"Unable to read collection '{self.collection_name}'."
+                ) from exc
             return []
 
         ids = data.get("ids") or []
@@ -357,9 +365,9 @@ class VectorStore:
             output.append(row)
         return output
 
-    def get_all_chunk_records(self) -> list[dict]:
+    def get_all_chunk_records(self, *, raise_on_error: bool = False) -> list[dict]:
         """Return all chunk ids with metadata for ingestion audits/retries."""
-        return self.get_all_records(include_documents=False)
+        return self.get_all_records(include_documents=False, raise_on_error=raise_on_error)
 
     def has_chunk(self, chunk_id: str) -> bool:
         """Check whether a specific chunk id exists in the vector collection."""

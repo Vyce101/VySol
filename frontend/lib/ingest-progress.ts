@@ -1,5 +1,6 @@
-export type IngestProgressPhase = "extracting" | "embedding" | "aborting" | "idle";
+export type IngestProgressPhase = "extracting" | "chunk_embedding" | "unique_node_rebuild" | "audit_finalization" | "aborting" | "idle";
 export type IngestWaitState = "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key";
+export type IngestProgressScope = "source" | "world";
 
 export interface IngestStageCounters {
     expected_chunks?: number;
@@ -8,6 +9,7 @@ export interface IngestStageCounters {
     current_unique_nodes?: number;
     embedded_unique_nodes?: number;
     failed_records?: number;
+    blocking_issues?: number;
     sources_total?: number;
     sources_complete?: number;
     sources_partial_failure?: number;
@@ -16,8 +18,12 @@ export interface IngestStageCounters {
 export interface IngestProgressPayload {
     active_operation?: string;
     progress_phase?: IngestProgressPhase;
+    progress_scope?: IngestProgressScope;
     completed_chunks_current_phase?: number;
     total_chunks_current_phase?: number;
+    completed_work_units?: number;
+    total_work_units?: number;
+    overall_percent?: number;
     chunks_total?: number;
     chunk_index?: number;
     stage_counters?: IngestStageCounters;
@@ -42,11 +48,13 @@ export interface StableIngestRow {
 export interface StableIngestProgress {
     operation: string;
     phase: IngestProgressPhase;
+    progressScope: IngestProgressScope;
     expectedChunks: number;
     extractedChunks: number;
     embeddedChunks: number;
     currentUniqueNodes: number;
     embeddedUniqueNodes: number;
+    blockingIssues: number;
     completedWorkUnits: number;
     totalWorkUnits: number;
     overallPercent: number;
@@ -100,7 +108,7 @@ function fallbackExtractedChunks(payload: IngestProgressPayload, expectedChunks:
     if (phase === "extracting") {
         return phaseCompleted;
     }
-    if (phase === "embedding" || phase === "aborting") {
+    if (phase === "chunk_embedding" || phase === "aborting") {
         return expectedChunks > 0 ? expectedChunks : phaseCompleted;
     }
     return phaseCompleted;
@@ -115,7 +123,7 @@ function fallbackEmbeddedChunks(payload: IngestProgressPayload): number {
         asCount(payload.completed_chunks_current_phase),
         asCount(payload.chunk_index),
     );
-    if (phase === "embedding" || phase === "aborting") {
+    if (phase === "chunk_embedding" || phase === "aborting") {
         return phaseCompleted;
     }
     return 0;
@@ -129,9 +137,14 @@ function fallbackEmbeddedUniqueNodes(payload: IngestProgressPayload): number {
     return asCount(payload.stage_counters?.embedded_unique_nodes);
 }
 
+function fallbackBlockingIssues(payload: IngestProgressPayload): number {
+    return asCount(payload.stage_counters?.blocking_issues);
+}
+
 export function resolveStableIngestProgress(payload?: IngestProgressPayload | null): StableIngestProgress {
     const operation = String(payload?.active_operation ?? "default");
     const phase = payload?.progress_phase ?? "idle";
+    const progressScope = payload?.progress_scope ?? ((phase === "unique_node_rebuild" || phase === "audit_finalization") ? "world" : "source");
     const expectedChunks = fallbackExpectedChunks(payload ?? {});
     const extractedChunks = Math.min(expectedChunks || Number.MAX_SAFE_INTEGER, fallbackExtractedChunks(payload ?? {}, expectedChunks));
     const embeddedChunks = Math.min(expectedChunks || Number.MAX_SAFE_INTEGER, fallbackEmbeddedChunks(payload ?? {}));
@@ -140,12 +153,41 @@ export function resolveStableIngestProgress(payload?: IngestProgressPayload | nu
         currentUniqueNodes || Number.MAX_SAFE_INTEGER,
         fallbackEmbeddedUniqueNodes(payload ?? {}),
     );
+    const blockingIssues = fallbackBlockingIssues(payload ?? {});
     const isReembedAll = operation === "reembed_all";
     const isAborting = phase === "aborting";
 
-    const completedWorkUnits = isReembedAll ? embeddedChunks : extractedChunks + embeddedChunks;
-    const totalWorkUnits = isReembedAll ? expectedChunks : expectedChunks * 2;
-    const overallPercent = totalWorkUnits > 0 ? clampPercent((completedWorkUnits / totalWorkUnits) * 100) : 0;
+    const explicitCompletedWorkUnits = asCount(payload?.completed_work_units);
+    const explicitTotalWorkUnits = asCount(payload?.total_work_units);
+    let completedWorkUnits = explicitCompletedWorkUnits;
+    let totalWorkUnits = explicitTotalWorkUnits;
+
+    if (totalWorkUnits <= 0) {
+        if (isReembedAll) {
+            totalWorkUnits = expectedChunks + currentUniqueNodes + 1;
+            if (phase === "unique_node_rebuild") {
+                completedWorkUnits = expectedChunks + asCount(payload?.completed_chunks_current_phase);
+            } else if (phase === "audit_finalization") {
+                completedWorkUnits = expectedChunks + currentUniqueNodes;
+            } else {
+                completedWorkUnits = embeddedChunks;
+            }
+        } else {
+            totalWorkUnits = expectedChunks * 2 + 1;
+            if (phase === "extracting") {
+                completedWorkUnits = extractedChunks;
+            } else if (phase === "audit_finalization") {
+                completedWorkUnits = expectedChunks * 2;
+            } else {
+                completedWorkUnits = expectedChunks + embeddedChunks;
+            }
+        }
+    }
+
+    completedWorkUnits = Math.min(totalWorkUnits || Number.MAX_SAFE_INTEGER, completedWorkUnits);
+    const overallPercent = totalWorkUnits > 0
+        ? clampPercent((completedWorkUnits / totalWorkUnits) * 100)
+        : clampPercent(Number(payload?.overall_percent ?? 0));
 
     const rows: StableIngestRow[] = isReembedAll
         ? [
@@ -209,11 +251,13 @@ export function resolveStableIngestProgress(payload?: IngestProgressPayload | nu
     return {
         operation,
         phase,
+        progressScope,
         expectedChunks,
         extractedChunks,
         embeddedChunks,
         currentUniqueNodes,
         embeddedUniqueNodes,
+        blockingIssues,
         completedWorkUnits,
         totalWorkUnits,
         overallPercent,
@@ -245,12 +289,22 @@ function formatRetryAfterSuffix(seconds?: number | null): string | null {
     return `(~${Math.max(1, Math.ceil(Number(seconds)))}s)`;
 }
 
+function formatWorldPhaseLabel(progress: StableIngestProgress): string | null {
+    if (progress.phase === "unique_node_rebuild") {
+        return "Rebuilding unique node index";
+    }
+    if (progress.phase === "audit_finalization") {
+        return "Finalizing ingestion audit";
+    }
+    return null;
+}
+
 export function buildIngestActivityLabel(
     progress: StableIngestProgress,
     options?: { fallbackSourceDisplayName?: string | null },
 ): string | null {
     const pieces: string[] = [];
-    if (typeof progress.progressSourceBookNumber === "number" && Number.isFinite(progress.progressSourceBookNumber)) {
+    if (progress.progressScope !== "world" && typeof progress.progressSourceBookNumber === "number" && Number.isFinite(progress.progressSourceBookNumber)) {
         pieces.push(`Book ${progress.progressSourceBookNumber}`);
     }
 
@@ -259,8 +313,10 @@ export function buildIngestActivityLabel(
         ?? options?.fallbackSourceDisplayName
         ?? "",
     ).trim();
-    if (sourceName) {
+    if (progress.progressScope !== "world" && sourceName) {
         pieces.push(sourceName);
+    } else if (progress.progressScope === "world") {
+        pieces.push("World");
     }
 
     let activity = "";
@@ -270,7 +326,7 @@ export function buildIngestActivityLabel(
         const retryAfter = formatRetryAfterSuffix(progress.waitRetryAfterSeconds);
         activity = retryAfter ? `${progress.waitLabel} ${retryAfter}` : progress.waitLabel;
     } else {
-        activity = formatIngestAgentLabel(progress.activeAgent) ?? "";
+        activity = formatWorldPhaseLabel(progress) ?? formatIngestAgentLabel(progress.activeAgent) ?? "";
     }
 
     if (activity) {

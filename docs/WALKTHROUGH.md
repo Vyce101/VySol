@@ -218,6 +218,8 @@ Reading the ingest progress header:
 - `Chunks Embedded` means chunks whose chunk vectors have been durably written
 - `Unique Graph Nodes` means the current unique nodes in the saved graph
 - `Embedded Unique Nodes` means how many current unique graph nodes still have matching embeddings in the unique-node index
+- After chunk work finishes, world-level progress can continue through `unique_node_rebuild` and `audit_finalization` before the run is actually done
+- `World Blockers` highlights graph/vector audit problems that are not tied to a single chunk and therefore do not belong under `Failed Records`
 
 Important note about node counts:
 
@@ -251,6 +253,8 @@ Entity-resolution controls:
 
 - `Resolution mode` chooses whether the run stops after exact normalized matching or continues into chooser/combiner review
 - Exact-only still rebuilds the unique-node index before it reports success
+- `Complete` now means the merge result and the unique-node index refresh both committed successfully
+- If entity resolution fails, the run now reports the backend reason instead of a generic stream disconnect and avoids keeping partial live merges
 - `Top K candidates` is used only for `Exact + chooser/combiner`
 - `Embedding batch size` controls unique-node embedding rebuild batch size for that entity-resolution run
 - `Embedding delay (seconds)` adds a per-batch cooldown to that same unique-node embedding rebuild step
@@ -283,6 +287,7 @@ Use the rebuild and retry actions based on what went wrong:
 - Retries both failed extraction and failed embedding work
 - Also skips unresolved Safety Review Queue chunks and leaves those to the review flow
 - Only appears when the world is idle and `Failed Records` is greater than `0`
+- World-level blockers are shown separately, so a missing `Retry All Failures` button does not mean the world is automatically healthy if the header still shows `World Blockers`
 
 Important behavior:
 

@@ -40,6 +40,7 @@ _UNIQUE_NODE_REBUILD_COOLDOWN_SECONDS = 0.0
 _META_STAGE_GRAPH_PATH = "entity_resolution_staging_graph_path"
 _META_STAGE_COLLECTION_SUFFIX = "entity_resolution_staging_collection_suffix"
 _META_COMMIT_PENDING = "entity_resolution_commit_pending"
+_META_COMMIT_STATE = "entity_resolution_commit_state"
 _META_CURRENT_ANCHOR_LABEL = "entity_resolution_current_anchor_label"
 
 EntityResolutionMode = Literal["exact_only", "exact_then_ai", "ai_only"]
@@ -84,6 +85,17 @@ def _mode_uses_ai_pass(resolution_mode: EntityResolutionMode) -> bool:
 
 def _current_anchor_label_for_mode(resolution_mode: EntityResolutionMode) -> str:
     return "Current Exact Match Group" if resolution_mode == "exact_only" else "Current Anchor"
+
+
+def _normalize_commit_state(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"staging", "commit_pending", "committed"}:
+        return normalized
+    return None
+
+
+def _is_commit_pending_state(state: dict[str, Any]) -> bool:
+    return bool(state.get("commit_pending")) or _normalize_commit_state(state.get("commit_state")) == "commit_pending"
 
 
 def _is_stale_in_progress(state: dict[str, Any]) -> bool:
@@ -209,9 +221,10 @@ def _recover_stale_run(world_id: str) -> dict[str, Any]:
     stage_suffix = str(meta.get(_META_STAGE_COLLECTION_SUFFIX) or "").strip()
     stage_graph_path = str(meta.get(_META_STAGE_GRAPH_PATH) or "").strip()
     commit_pending = bool(meta.get(_META_COMMIT_PENDING))
+    commit_state = _normalize_commit_state(meta.get(_META_COMMIT_STATE))
 
     try:
-        if commit_pending and stage_suffix and stage_graph_path:
+        if (commit_pending or commit_state == "commit_pending") and stage_suffix and stage_graph_path:
             live_graph_store = GraphStore(world_id)
             state = _set_state(
                 world_id,
@@ -219,6 +232,7 @@ def _recover_stale_run(world_id: str) -> dict[str, Any]:
                 phase="commit_recovery",
                 message="Recovering an interrupted entity-resolution commit.",
                 reason="stale_run_commit_recovery",
+                commit_state="commit_pending",
             )
             _update_meta_from_state(world_id, state, live_graph_store)
             _finalize_resolution_commit(
@@ -231,6 +245,7 @@ def _recover_stale_run(world_id: str) -> dict[str, Any]:
                     "phase": "complete",
                     "message": "Recovered and finalized the interrupted entity-resolution run.",
                     "reason": None,
+                    "commit_state": "committed",
                 },
                 push_terminal_event=False,
             )
@@ -254,6 +269,7 @@ def _recover_stale_run(world_id: str) -> dict[str, Any]:
             staging_collection_suffix=None,
             staging_graph_path=None,
             commit_pending=False,
+            commit_state=None,
         )
         _update_meta_from_state(world_id, state)
         push_sse_event(world_id, {"event": "error", **state, "recovered": True})
@@ -272,6 +288,7 @@ def _recover_stale_run(world_id: str) -> dict[str, Any]:
         staging_collection_suffix=None,
         staging_graph_path=None,
         commit_pending=False,
+        commit_state=None,
     )
     _update_meta_from_state(world_id, state)
     push_sse_event(world_id, {"event": "aborted", **state, "recovered": True})
@@ -283,6 +300,8 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
         current = dict(_states.get(world_id, {}))
 
     if current:
+        if world_id not in _active_runs and _is_commit_pending_state(current):
+            return _recover_stale_run(world_id)
         if world_id not in _active_runs and _is_stale_in_progress(current):
             return _recover_stale_run(world_id)
         return _with_new_node_summary(world_id, current)
@@ -294,7 +313,11 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
     meta_like_state = {
         "status": meta.get("entity_resolution_status"),
         "updated_at": meta.get("entity_resolution_updated_at"),
+        "commit_pending": meta.get(_META_COMMIT_PENDING),
+        "commit_state": meta.get(_META_COMMIT_STATE),
     }
+    if world_id not in _active_runs and _is_commit_pending_state(meta_like_state):
+        return _recover_stale_run(world_id)
     if world_id not in _active_runs and _is_stale_in_progress(meta_like_state):
         return _recover_stale_run(world_id)
     settings = load_settings()
@@ -325,6 +348,7 @@ def get_resolution_status(world_id: str) -> dict[str, Any]:
             "include_normalized_exact_pass": _mode_uses_exact_pass(resolution_mode),
             "can_resume": False,
             "current_anchor_label": meta.get(_META_CURRENT_ANCHOR_LABEL),
+            "commit_state": _normalize_commit_state(meta.get(_META_COMMIT_STATE)),
         },
         meta,
     )
@@ -373,6 +397,7 @@ def fail_entity_resolution_startup(
         staging_collection_suffix=None,
         staging_graph_path=None,
         commit_pending=False,
+        commit_state=None,
     )
     _update_meta_from_state(world_id, state, graph_store)
     push_sse_event(world_id, {"event": "error", **state})
@@ -420,6 +445,7 @@ def begin_entity_resolution_run(
         staging_collection_suffix=None,
         staging_graph_path=None,
         commit_pending=False,
+        commit_state="staging",
     )
     _update_meta_from_state(world_id, state)
     return state
@@ -924,6 +950,12 @@ def _update_meta_from_state(world_id: str, state: dict[str, Any], graph_store: G
     if not meta[_META_COMMIT_PENDING]:
         meta.pop(_META_COMMIT_PENDING, None)
 
+    commit_state = _normalize_commit_state(state.get("commit_state"))
+    if commit_state:
+        meta[_META_COMMIT_STATE] = commit_state
+    else:
+        meta.pop(_META_COMMIT_STATE, None)
+
     if graph_store is not None:
         current_total_nodes = graph_store.get_node_count()
         meta["total_nodes"] = current_total_nodes
@@ -976,8 +1008,10 @@ def _normalize_embedding_rows(value: Any) -> list[list[float]]:
 def _snapshot_vector_store_records(vector_store: VectorStore) -> list[dict[str, Any]]:
     try:
         data = vector_store.collection.get(include=["documents", "metadatas", "embeddings"])
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to snapshot staged collection '{vector_store.collection_name}' during entity resolution commit."
+        ) from exc
 
     ids = [str(record_id) for record_id in _as_sequence(data.get("ids")) if str(record_id).strip()]
     documents = _as_sequence(data.get("documents"))
@@ -1026,14 +1060,30 @@ def _finalize_resolution_commit(
     push_terminal_event: bool = True,
 ) -> dict[str, Any]:
     staged_graph_store = _load_staged_graph_store(world_id, stage_graph_path)
+    staged_vector_store = _get_unique_node_vector_store(world_id, collection_suffix=stage_suffix)
+    staged_records = _snapshot_vector_store_records(staged_vector_store)
+
     live_graph_store.graph = staged_graph_store.graph.copy(as_view=False)
     live_graph_store.save()
 
-    staged_vector_store = _get_unique_node_vector_store(world_id, collection_suffix=stage_suffix)
-    staged_records = _snapshot_vector_store_records(staged_vector_store)
     live_unique_node_store = _get_unique_node_vector_store(world_id)
     _replace_vector_store_records(live_unique_node_store, staged_records)
 
+    state_payload = dict(_states.get(world_id, {}))
+    state_payload.update(
+        {
+            "current_anchor": None,
+            "current_candidates": [],
+            "current_anchor_label": None,
+            "staging_collection_suffix": None,
+            "staging_graph_path": None,
+            "commit_pending": False,
+            **final_state_updates,
+        }
+    )
+    state_payload["updated_at"] = _now_iso()
+    _update_meta_from_state(world_id, state_payload, live_graph_store)
+    state = _set_state(world_id, **state_payload)
     _cleanup_staging_artifacts(
         world_id,
         {
@@ -1041,18 +1091,6 @@ def _finalize_resolution_commit(
             _META_STAGE_GRAPH_PATH: str(stage_graph_path),
         },
     )
-
-    state = _set_state(
-        world_id,
-        current_anchor=None,
-        current_candidates=[],
-        current_anchor_label=None,
-        staging_collection_suffix=None,
-        staging_graph_path=None,
-        commit_pending=False,
-        **final_state_updates,
-    )
-    _update_meta_from_state(world_id, state, live_graph_store)
     if push_terminal_event:
         terminal_event = "complete" if state.get("status") == "complete" else str(state.get("status") or "status")
         push_sse_event(world_id, {"event": terminal_event, **state})
@@ -1118,6 +1156,7 @@ async def start_entity_resolution(
             staging_collection_suffix=stage_suffix,
             staging_graph_path=str(_staging_graph_path(world_id)),
             commit_pending=False,
+            commit_state="staging",
             can_resume=False,
         )
         _update_meta_from_state(world_id, state, live_graph_store)
@@ -1146,6 +1185,7 @@ async def start_entity_resolution(
                     "resolved_entities": 0,
                     "unresolved_entities": 0,
                     "auto_resolved_pairs": 0,
+                    "commit_state": "committed",
                 },
             )
             return
@@ -1227,6 +1267,7 @@ async def start_entity_resolution(
                 staging_collection_suffix=stage_suffix,
                 staging_graph_path=str(working_graph_store.path),
                 commit_pending=True,
+                commit_state="commit_pending",
             )
             _update_meta_from_state(world_id, state, live_graph_store)
             push_sse_event(world_id, {"event": "progress", **state})
@@ -1250,6 +1291,7 @@ async def start_entity_resolution(
                     "resolved_entities": processed_count,
                     "unresolved_entities": len(remaining_ids),
                     "auto_resolved_pairs": auto_resolved_pairs,
+                    "commit_state": "committed",
                 },
             )
             return
@@ -1429,6 +1471,7 @@ async def start_entity_resolution(
             staging_collection_suffix=stage_suffix,
             staging_graph_path=str(working_graph_store.path),
             commit_pending=True,
+            commit_state="commit_pending",
         )
         _update_meta_from_state(world_id, state, live_graph_store)
         push_sse_event(world_id, {"event": "progress", **state})
@@ -1453,6 +1496,7 @@ async def start_entity_resolution(
                 "resolved_entities": initial_total,
                 "unresolved_entities": 0,
                 "auto_resolved_pairs": auto_resolved_pairs,
+                "commit_state": "committed",
             },
         )
     except asyncio.CancelledError:
@@ -1476,12 +1520,14 @@ async def start_entity_resolution(
             staging_collection_suffix=None,
             staging_graph_path=None,
             commit_pending=False,
+            commit_state=None,
         )
         _update_meta_from_state(world_id, state, live_graph_store)
         push_sse_event(world_id, {"event": "aborted", **state})
     except Exception as exc:
         logger.exception("Entity resolution failed for %s", world_id)
-        if stage_suffix:
+        current_state = dict(_states.get(world_id, {}))
+        if stage_suffix and not _is_commit_pending_state(current_state):
             _cleanup_staging_artifacts(
                 world_id,
                 {
@@ -1489,12 +1535,33 @@ async def start_entity_resolution(
                     _META_STAGE_GRAPH_PATH: str(_staging_graph_path(world_id)),
                 },
             )
-        fail_entity_resolution_startup(
-            world_id,
-            _resolution_failure_message("Entity resolution failed."),
-            reason=str(exc),
-            graph_store=live_graph_store,
-        )
+        if _is_commit_pending_state(current_state):
+            state = _set_state(
+                world_id,
+                status="error",
+                phase="commit_pending",
+                message="Entity-resolution commit finalization was interrupted. Recovery will verify the committed result.",
+                reason=str(exc),
+                current_anchor=None,
+                current_candidates=[],
+                current_anchor_label=None,
+                staging_collection_suffix=stage_suffix,
+                staging_graph_path=str(_staging_graph_path(world_id)) if stage_suffix else None,
+                commit_pending=True,
+                commit_state="commit_pending",
+            )
+            try:
+                _update_meta_from_state(world_id, state, live_graph_store)
+            except Exception:
+                logger.warning("Failed to persist commit-pending entity-resolution recovery state for %s", world_id, exc_info=True)
+            push_sse_event(world_id, {"event": "error", **state})
+        else:
+            fail_entity_resolution_startup(
+                world_id,
+                _resolution_failure_message("Entity resolution failed."),
+                reason=str(exc),
+                graph_store=live_graph_store,
+            )
     finally:
         _active_runs.discard(world_id)
         if _abort_events.get(world_id) is abort_event:

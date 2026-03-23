@@ -42,6 +42,8 @@ Important behavior:
 
 - Exact-only runs never enter candidate search, chooser, or combiner phases
 - Both run modes still need a successful unique-node index refresh before their results are finalized
+- Entity resolution now stages graph and unique-node-index changes first and only commits them live after the full run succeeds
+- If a chooser, combiner, embedding, or finalization step fails, the run now reports a real error instead of silently degrading or leaving partial live merges behind
 - Exact + chooser/combiner runs still preserve temporal graph edges while merging entities
 - Older data that predates the new run-mode field still maps safely to the previous behavior
 - Every run now also exposes unique-node embedding batch and delay controls for the index rebuild step used by entity resolution
@@ -136,6 +138,8 @@ Important behavior:
 - `Chunks Embedded` tracks chunks whose chunk-vector embedding has been durably written
 - `Unique Graph Nodes` tracks the current unique nodes in the saved graph
 - `Embedded Unique Nodes` tracks how many current unique graph nodes still have matching embeddings in the unique-node index
+- World-level vector rebuild work now has its own progress phases, so `Re-embed All` can continue through `unique_node_rebuild` and `audit_finalization` after chunk work reaches 100%
+- World-scope blockers now surface separately from per-chunk `Failed Records`, instead of hiding only in the live agent log
 - The node counters reflect the current merged graph state, not raw per-chunk extraction totals
 - Because of that, node counts can change after entity resolution merges duplicate entities and refreshes unique-node embeddings
 - If a node id exists in the index but its stored document no longer matches the current merged node text, it is treated as stale until repaired

@@ -48,10 +48,10 @@ class DummyVectorStore:
         self._records = records
         self.collection_suffix = collection_suffix
 
-    def get_all_chunk_records(self):
+    def get_all_chunk_records(self, *, raise_on_error: bool = False):
         return list(self._records)
 
-    def get_all_records(self, *, include_documents: bool = False):
+    def get_all_records(self, *, include_documents: bool = False, raise_on_error: bool = False):
         if include_documents:
             return list(self._records)
         return [
@@ -248,6 +248,60 @@ def test_audit_detects_stale_unique_node_vectors(monkeypatch):
     node_failures = [row for row in source["stage_failures"] if row.get("scope") == "node"]
     assert len(node_failures) == 1
     assert node_failures[0]["error_type"] == "stale_vector"
+
+
+def test_audit_reports_unique_node_store_read_failure_as_blocker(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "complete",
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 1,
+                "status": "complete",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0],
+                "embedded_chunks": [0],
+            }
+        ],
+        "embedded_unique_nodes": 1,
+    }
+    saved = {}
+
+    class UnreadableUniqueNodeStore(DummyVectorStore):
+        def get_all_records(self, *, include_documents: bool = False, raise_on_error: bool = False):
+            if raise_on_error:
+                raise ingestion_engine.VectorStoreReadError("Unable to read collection 'world_1_unique_nodes'.")
+            return super().get_all_records(include_documents=include_documents, raise_on_error=raise_on_error)
+
+    monkeypatch.setattr(ingestion_engine, "_load_meta", lambda world_id: meta)
+    monkeypatch.setattr(ingestion_engine, "_save_meta", lambda world_id, payload: saved.setdefault("meta", payload))
+    monkeypatch.setattr(ingestion_engine, "GraphStore", lambda world_id: DummyGraphStore(world_id, ["chunk_world-1_source-a_0"]))
+    monkeypatch.setattr(
+        ingestion_engine,
+        "VectorStore",
+        lambda world_id, collection_suffix="", **kwargs: (
+            UnreadableUniqueNodeStore(world_id, [], collection_suffix=collection_suffix)
+            if collection_suffix == "unique_nodes"
+            else DummyVectorStore(
+                world_id,
+                [{"id": "chunk_world-1_source-a_0", "metadata": {"source_id": "source-a", "chunk_index": 0}}],
+                collection_suffix=collection_suffix,
+            )
+        ),
+    )
+
+    summary = ingestion_engine.audit_ingestion_integrity("world-1", synthesize_failures=True, persist=True)
+
+    assert summary["world"]["blocking_issues"] == 1
+    assert summary["world"]["failed_records"] == 0
+    assert summary["blocking_issues"][0]["code"] == "unique_node_vector_store_unreadable"
+    assert saved["meta"]["ingestion_status"] == "partial_failure"
+    assert saved["meta"]["sources"][0]["stage_failures"] == []
+    assert saved["meta"]["embedded_unique_nodes"] == 1
 
 
 def test_audit_clears_out_of_range_failures_when_current_coverage_is_complete(monkeypatch):
@@ -478,6 +532,59 @@ def test_checkpoint_ignores_stale_failures_after_audit(monkeypatch):
     assert checkpoint["chunks_total"] == 0
     assert checkpoint["failures"] == []
     assert checkpoint["stage_counters"]["failed_records"] == 0
+
+
+def test_checkpoint_includes_blocking_issues_without_fake_failures(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "partial_failure",
+        "embedded_unique_nodes": 1,
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 1,
+                "status": "complete",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [0],
+                "embedded_chunks": [0],
+            }
+        ],
+    }
+    holder = _patch_meta_store(monkeypatch, meta)
+
+    class UnreadableUniqueNodeStore(DummyVectorStore):
+        def get_all_records(self, *, include_documents: bool = False, raise_on_error: bool = False):
+            if raise_on_error:
+                raise ingestion_engine.VectorStoreReadError("Unable to read collection 'world_1_unique_nodes'.")
+            return super().get_all_records(include_documents=include_documents, raise_on_error=raise_on_error)
+
+    monkeypatch.setattr(ingestion_engine, "recover_stale_ingestion", lambda world_id: holder["meta"])
+    monkeypatch.setattr(ingestion_engine, "_load_checkpoint", lambda world_id: None)
+    monkeypatch.setattr(ingestion_engine, "has_active_ingestion_run", lambda world_id: False)
+    monkeypatch.setattr(ingestion_engine, "get_safety_review_summary", lambda world_id: {"unresolved_reviews": 0})
+    monkeypatch.setattr(ingestion_engine, "GraphStore", lambda world_id: DummyGraphStore(world_id, ["chunk_world-1_source-a_0"]))
+    monkeypatch.setattr(
+        ingestion_engine,
+        "VectorStore",
+        lambda world_id, collection_suffix="", **kwargs: (
+            UnreadableUniqueNodeStore(world_id, [], collection_suffix=collection_suffix)
+            if collection_suffix == "unique_nodes"
+            else DummyVectorStore(
+                world_id,
+                [{"id": "chunk_world-1_source-a_0", "metadata": {"source_id": "source-a", "chunk_index": 0}}],
+                collection_suffix=collection_suffix,
+            )
+        ),
+    )
+
+    checkpoint = ingestion_engine.get_checkpoint_info("world-1")
+
+    assert checkpoint["stage_counters"]["blocking_issues"] == 1
+    assert checkpoint["stage_counters"]["failed_records"] == 0
+    assert checkpoint["blocking_issues"][0]["code"] == "unique_node_vector_store_unreadable"
 
 
 def test_retry_endpoint_rejects_when_only_stale_failures_exist(monkeypatch):
@@ -810,7 +917,7 @@ def test_active_checkpoint_reports_embedding_phase_progress_for_reembed_all(monk
 
     assert holder["meta"]["ingestion_status"] == "in_progress"
     assert checkpoint["active_ingestion_run"] is True
-    assert checkpoint["progress_phase"] == "embedding"
+    assert checkpoint["progress_phase"] == "chunk_embedding"
     assert checkpoint["completed_chunks_current_phase"] == 0
     assert checkpoint["total_chunks_current_phase"] == 3
     assert checkpoint["chunk_index"] == 0

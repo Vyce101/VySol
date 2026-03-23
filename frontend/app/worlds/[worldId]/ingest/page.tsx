@@ -50,10 +50,18 @@ interface StageCounters {
     current_unique_nodes: number;
     embedded_unique_nodes: number;
     failed_records: number;
+    blocking_issues: number;
     sources_total: number;
     sources_complete: number;
     sources_partial_failure: number;
     synthesized_failures: number;
+}
+
+interface BlockingIssue {
+    code: string;
+    stage: string;
+    scope: string;
+    message: string;
 }
 
 interface Checkpoint {
@@ -63,11 +71,16 @@ interface Checkpoint {
     reason: string | null;
     stage_counters?: StageCounters;
     failures?: StageFailure[];
+    blocking_issues?: BlockingIssue[];
     safety_review_summary?: SafetyReviewSummary;
     active_ingestion_run?: boolean;
-    progress_phase?: "extracting" | "embedding" | "aborting" | "idle";
+    progress_phase?: "extracting" | "chunk_embedding" | "unique_node_rebuild" | "audit_finalization" | "aborting" | "idle";
+    progress_scope?: "source" | "world";
     completed_chunks_current_phase?: number;
     total_chunks_current_phase?: number;
+    completed_work_units?: number;
+    total_work_units?: number;
+    overall_percent?: number;
     progress_percent?: number;
     active_operation?: string;
     wait_state?: "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key" | null;
@@ -119,9 +132,13 @@ interface LogEntry {
     error_type?: string;
     message?: string;
     book_number?: number;
-    progress_phase?: "extracting" | "embedding" | "aborting" | "idle";
+    progress_phase?: "extracting" | "chunk_embedding" | "unique_node_rebuild" | "audit_finalization" | "aborting" | "idle";
+    progress_scope?: "source" | "world";
     completed_chunks_current_phase?: number;
     total_chunks_current_phase?: number;
+    completed_work_units?: number;
+    total_work_units?: number;
+    overall_percent?: number;
     progress_percent?: number;
     active_operation?: string;
     stage_counters?: StageCounters;
@@ -136,10 +153,14 @@ interface LogEntry {
 }
 
 interface ProgressState {
-    phase: "extracting" | "embedding" | "aborting" | "idle";
+    phase: "extracting" | "chunk_embedding" | "unique_node_rebuild" | "audit_finalization" | "aborting" | "idle";
+    progressScope: "source" | "world";
     operation: string;
     activeAgent: string | null;
     stageCounters: StageCounters;
+    completedWorkUnits: number | null;
+    totalWorkUnits: number | null;
+    overallPercent: number | null;
     waitState: "queued_for_extraction_slot" | "queued_for_embedding_slot" | "waiting_for_api_key" | null;
     waitLabel: string | null;
     waitRetryAfterSeconds: number | null;
@@ -235,6 +256,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const { worldId } = use(params);
     const initialProgress: ProgressState = {
         phase: "idle",
+        progressScope: "source",
         operation: "default",
         activeAgent: null,
         stageCounters: {
@@ -244,11 +266,15 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             current_unique_nodes: 0,
             embedded_unique_nodes: 0,
             failed_records: 0,
+            blocking_issues: 0,
             sources_total: 0,
             sources_complete: 0,
             sources_partial_failure: 0,
             synthesized_failures: 0,
         },
+        completedWorkUnits: null,
+        totalWorkUnits: null,
+        overallPercent: null,
         waitState: null,
         waitLabel: null,
         waitRetryAfterSeconds: null,
@@ -302,6 +328,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             current_unique_nodes: Number(incoming.current_unique_nodes ?? previous.current_unique_nodes ?? 0),
             embedded_unique_nodes: Number(incoming.embedded_unique_nodes ?? previous.embedded_unique_nodes ?? 0),
             failed_records: Number(incoming.failed_records ?? previous.failed_records ?? 0),
+            blocking_issues: Number(incoming.blocking_issues ?? previous.blocking_issues ?? 0),
             sources_total: Math.max(Number(previous.sources_total ?? 0), Number(incoming.sources_total ?? 0)),
             sources_complete: Math.max(Number(previous.sources_complete ?? 0), Number(incoming.sources_complete ?? 0)),
             sources_partial_failure: Math.max(Number(previous.sources_partial_failure ?? 0), Number(incoming.sources_partial_failure ?? 0)),
@@ -344,17 +371,24 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             const nextStageCounters = payload.stage_counters
                 ? (liveRun ? mergeStageCounters(prev.stageCounters, payload.stage_counters) : payload.stage_counters)
                 : prev.stageCounters;
+            const hasProgressSourceId = Object.prototype.hasOwnProperty.call(payload, "progress_source_id");
+            const hasProgressSourceDisplayName = Object.prototype.hasOwnProperty.call(payload, "progress_source_display_name");
+            const hasProgressSourceBookNumber = Object.prototype.hasOwnProperty.call(payload, "progress_source_book_number");
             return {
                 phase: payload.progress_phase || prev.phase,
+                progressScope: payload.progress_scope || prev.progressScope,
                 operation: payload.active_operation || prev.operation,
                 activeAgent: payload.active_agent || payload.agent || prev.activeAgent,
                 stageCounters: nextStageCounters,
+                completedWorkUnits: payload.completed_work_units ?? prev.completedWorkUnits,
+                totalWorkUnits: payload.total_work_units ?? prev.totalWorkUnits,
+                overallPercent: payload.overall_percent ?? prev.overallPercent,
                 waitState: payload.wait_state ?? null,
                 waitLabel: payload.wait_label ?? null,
                 waitRetryAfterSeconds: payload.wait_retry_after_seconds ?? null,
-                progressSourceId: payload.progress_source_id ?? payload.source_id ?? prev.progressSourceId,
-                progressSourceDisplayName: payload.progress_source_display_name ?? prev.progressSourceDisplayName,
-                progressSourceBookNumber: payload.progress_source_book_number ?? payload.book_number ?? prev.progressSourceBookNumber,
+                progressSourceId: hasProgressSourceId ? (payload.progress_source_id ?? null) : (payload.source_id ?? prev.progressSourceId),
+                progressSourceDisplayName: hasProgressSourceDisplayName ? (payload.progress_source_display_name ?? null) : prev.progressSourceDisplayName,
+                progressSourceBookNumber: hasProgressSourceBookNumber ? (payload.progress_source_book_number ?? null) : (payload.book_number ?? prev.progressSourceBookNumber),
             };
         });
     };
@@ -901,14 +935,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const previousSettingsSummary = savedIngestSettings
         ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedIngestSettings.embedding_model}`
         : null;
-    const canResolveEntities = !ingesting && allComplete && hasAnyIngested;
-    const resolveEntitiesDisabledReason = ingesting
-        ? "Wait for ingestion to finish before starting entity resolution."
-        : canResolveEntities
-            ? null
-            : !allComplete
-                ? "Finish ingestion or retry failed chunks before resolving entities."
-                : "Entity resolution is currently unavailable for this world.";
+    const canResolveEntitiesBase = !ingesting && allComplete && hasAnyIngested;
     const showResume = Boolean(checkpoint?.can_resume) && !ingesting && (hasPending || hasRetryableFailures);
     const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
@@ -918,7 +945,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const progressSummary = resolveStableIngestProgress({
         active_operation: progress.operation,
         progress_phase: progress.phase,
+        progress_scope: progress.progressScope,
         stage_counters: progress.stageCounters,
+        completed_work_units: progress.completedWorkUnits ?? undefined,
+        total_work_units: progress.totalWorkUnits ?? undefined,
+        overall_percent: progress.overallPercent ?? undefined,
         wait_state: progress.waitState,
         wait_label: progress.waitLabel,
         wait_retry_after_seconds: progress.waitRetryAfterSeconds,
@@ -934,18 +965,33 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         ? progress.stageCounters
         : (checkpoint?.stage_counters ?? progress.stageCounters);
     const failedRecordCount = stageCounters.failed_records ?? 0;
+    const blockingIssueCount = stageCounters.blocking_issues ?? 0;
+    const blockingIssueMessage = checkpoint?.blocking_issues?.[0]?.message ?? null;
+    const hasBlockingIssues = blockingIssueCount > 0;
     const totalReviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
     const unresolvedReviewCount = safetyReviewSummary?.unresolved_reviews
         ?? safetyReviews.filter((review) => review.status !== "resolved").length;
     const hasAnySafetyQueueHistory = totalReviewCount > 0;
     const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
+    const canResolveEntities = canResolveEntitiesBase && failedRecordCount === 0 && blockingIssueCount === 0 && !hasUnresolvedSafetyQueue;
+    const resolveEntitiesDisabledReason = ingesting
+        ? "Wait for ingestion to finish before starting entity resolution."
+        : blockingIssueCount > 0
+            ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running entity resolution.")
+            : hasUnresolvedSafetyQueue
+                ? "Resolve or discard pending safety review items before running entity resolution."
+                : !allComplete || failedRecordCount > 0
+                    ? "Finish ingestion or retry failed chunks before resolving entities."
+                    : canResolveEntities
+                        ? null
+                        : "Entity resolution is currently unavailable for this world.";
     const rebuildBlockedReason = unresolvedReviewCount > 0
         ? "This world has unresolved safety review items. Resolve or discard them before running Re-ingest."
         : null;
     const hasProgress = progressSummary.totalWorkUnits > 0;
     const showProgressSummary = ingesting || hasProgress;
-    const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !showResume;
-    const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && !hasProgress;
+    const showCompletedIdleState = !ingesting && !hasPending && allComplete && !hasRetryableFailures && !hasBlockingIssues && !showResume;
+    const showIdlePlaceholder = !ingesting && logEntries.length === 0 && failureRecords.length === 0 && !hasBlockingIssues && !hasProgress;
     const progressHeaderLabel = progressSummary.isAborting
         ? "Stopping ingest..."
         : "Input Progress";
@@ -968,7 +1014,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         : hasAnySafetyQueueHistory
             ? "View resolved items"
             : "Open panel";
-    const showProgressHeaderCard = showProgressSummary || showReembedAction || failedRecordCount > 0;
+    const showProgressHeaderCard = showProgressSummary || showReembedAction || failedRecordCount > 0 || blockingIssueCount > 0;
     const handleReingestModalSubmit = async (submission: ReingestSetupSubmission) => {
         await startIngestion(false, "rechunk_reingest", submission.ingest_settings, {
             useActiveChunkOverrides: submission.use_active_chunk_overrides,
@@ -1435,6 +1481,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                         </div>
                                         <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
                                             {progressSecondaryLabel
+                                                || (blockingIssueMessage
+                                                    ? blockingIssueMessage
+                                                    : null)
                                                 || (ingesting && !hasProgress
                                                     ? "Preparing stable progress summary for this run."
                                                     : (progressSummary.isReembedAll
@@ -1488,6 +1537,17 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                             }}>
                                                 Failed Records: {failedRecordCount}
                                             </span>
+                                            <span style={{
+                                                padding: "4px 10px",
+                                                borderRadius: 9999,
+                                                fontSize: 11,
+                                                fontWeight: 700,
+                                                background: blockingIssueCount > 0 ? "var(--status-pending-bg)" : "var(--background-secondary)",
+                                                color: blockingIssueCount > 0 ? "var(--status-pending-fg)" : "var(--text-subtle)",
+                                                border: blockingIssueCount > 0 ? "1px solid var(--status-pending-bg)" : "1px solid var(--border)",
+                                            }}>
+                                                World Blockers: {blockingIssueCount}
+                                            </span>
                                             {showRetryAllButton && (
                                                 <button
                                                     onClick={() => retryFailures("all")}
@@ -1502,9 +1562,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                                 </button>
                                             )}
                                         </div>
-                                        {!ingesting && failedRecordCount === 0 && hasAnyIngested && (
+                                        {blockingIssueCount > 0 && (
+                                            <div style={{ fontSize: 11, color: "var(--status-pending-fg)", textAlign: "right", maxWidth: 340, lineHeight: 1.45 }}>
+                                                {blockingIssueMessage ?? "This world has graph or vector blockers that need attention before it can be treated as fully healthy."}
+                                            </div>
+                                        )}
+                                        {!ingesting && failedRecordCount === 0 && blockingIssueCount === 0 && hasAnyIngested && (
                                             <div style={{ fontSize: 11, color: "var(--text-subtle)", textAlign: "right", maxWidth: 260 }}>
-                                                Retry actions appear here when this world has failed records.
+                                                Retry actions appear here when this world has failed records or world-level blockers.
                                             </div>
                                         )}
                                     </div>

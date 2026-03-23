@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from .agents import AgentCallError, GraphArchitectAgent
 from .chunker import RecursiveChunker
@@ -27,7 +27,7 @@ from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
 from .key_manager import AllKeysInCooldownError, get_key_manager, jittered_delay
 from .temporal_indexer import TemporalChunk, stamp_chunks
-from .vector_store import VectorStore
+from .vector_store import VectorStore, VectorStoreReadError
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,8 @@ SafetyReviewStatus = Literal["blocked", "draft", "testing", "resolved"]
 SafetyReviewOutcome = Literal["not_tested", "still_safety_blocked", "transient_failure", "other_failure", "passed"]
 WaitState = Literal["queued_for_extraction_slot", "queued_for_embedding_slot", "waiting_for_api_key"]
 WaitStage = Literal["extracting", "embedding"]
+ProgressScope = Literal["source", "world"]
+IngestProgressPhase = Literal["extracting", "chunk_embedding", "unique_node_rebuild", "audit_finalization", "aborting", "idle"]
 _STALE_RUN_GRACE_SECONDS = 15
 _UNIQUE_NODE_VECTOR_BATCH_SIZE = 8
 _WAIT_LOG_THRESHOLD_SECONDS = 2.0
@@ -62,6 +64,7 @@ _WAIT_STATE_PRIORITY: dict[str, int] = {
     "queued_for_embedding_slot": 2,
     "waiting_for_api_key": 3,
 }
+_PROGRESS_WORLD_PHASES = {"unique_node_rebuild", "audit_finalization"}
 
 
 class ExtractionCoverageError(RuntimeError):
@@ -192,6 +195,45 @@ def _mark_ingestion_live(
         meta["ingestion_started_at"] = now
     if operation:
         meta["ingestion_operation"] = operation
+
+
+def _clear_progress_tracking(meta: dict) -> None:
+    meta.pop("ingestion_progress_phase", None)
+    meta.pop("ingestion_progress_scope", None)
+    meta.pop("ingestion_progress_completed_work_units", None)
+    meta.pop("ingestion_progress_total_work_units", None)
+    meta.pop("ingestion_unique_node_rebuild_completed", None)
+    meta.pop("ingestion_unique_node_rebuild_total", None)
+
+
+def _set_progress_tracking(
+    meta: dict,
+    *,
+    phase: IngestProgressPhase,
+    scope: ProgressScope,
+    completed_work_units: int | None = None,
+    total_work_units: int | None = None,
+    unique_node_rebuild_completed: int | None = None,
+    unique_node_rebuild_total: int | None = None,
+) -> None:
+    meta["ingestion_progress_phase"] = phase
+    meta["ingestion_progress_scope"] = scope
+    if completed_work_units is not None:
+        meta["ingestion_progress_completed_work_units"] = max(0, int(completed_work_units))
+    else:
+        meta.pop("ingestion_progress_completed_work_units", None)
+    if total_work_units is not None:
+        meta["ingestion_progress_total_work_units"] = max(0, int(total_work_units))
+    else:
+        meta.pop("ingestion_progress_total_work_units", None)
+    if unique_node_rebuild_completed is not None:
+        meta["ingestion_unique_node_rebuild_completed"] = max(0, int(unique_node_rebuild_completed))
+    else:
+        meta.pop("ingestion_unique_node_rebuild_completed", None)
+    if unique_node_rebuild_total is not None:
+        meta["ingestion_unique_node_rebuild_total"] = max(0, int(unique_node_rebuild_total))
+    else:
+        meta.pop("ingestion_unique_node_rebuild_total", None)
 
 
 def _mark_ingestion_terminal(meta: dict, status: str) -> None:
@@ -474,6 +516,7 @@ def _live_stage_counters(meta: dict) -> dict[str, int]:
             sources_partial_failure += 1
 
     failed_records = sum(len(list(source.get("stage_failures", []))) for source in sources)
+    blocking_issues = len(list(meta.get("ingestion_blocking_issues", [])))
     current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
     embedded_unique_nodes = _coerce_non_negative_int(meta.get("embedded_unique_nodes"))
     if current_unique_nodes > 0:
@@ -485,6 +528,7 @@ def _live_stage_counters(meta: dict) -> dict[str, int]:
         "current_unique_nodes": current_unique_nodes,
         "embedded_unique_nodes": embedded_unique_nodes,
         "failed_records": failed_records,
+        "blocking_issues": blocking_issues,
         "sources_total": len(sources),
         "sources_complete": sources_complete,
         "sources_partial_failure": sources_partial_failure,
@@ -505,13 +549,65 @@ def _progress_source_summary(source: dict | None) -> dict[str, Any]:
     }
 
 
-def _progress_phase_from_agent(active_agent: str | None) -> str | None:
+def _progress_phase_from_agent(active_agent: str | None) -> IngestProgressPhase | None:
     agent = str(active_agent or "").strip().lower()
     if not agent:
         return None
+    if "node_embedding_rebuild" in agent:
+        return "unique_node_rebuild"
     if any(token in agent for token in ("embed", "vector")):
-        return "embedding"
+        return "chunk_embedding"
     return "extracting"
+
+
+def _compute_world_progress_units(
+    meta: dict,
+    counters: dict[str, int],
+    *,
+    phase: IngestProgressPhase,
+) -> tuple[int, int]:
+    operation = str(meta.get("ingestion_operation") or "default")
+    expected_chunks = counters.get("expected_chunks", 0)
+    extracted_chunks = counters.get("extracted_chunks", 0)
+    embedded_chunks = counters.get("embedded_chunks", 0)
+    current_unique_nodes = max(
+        counters.get("current_unique_nodes", 0),
+        _coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_total")),
+    )
+    explicit_completed = meta.get("ingestion_progress_completed_work_units")
+    explicit_total = meta.get("ingestion_progress_total_work_units")
+    if explicit_completed is not None and explicit_total is not None:
+        total_units = max(0, int(explicit_total))
+        completed_units = max(0, min(total_units, int(explicit_completed)))
+        return completed_units, total_units
+
+    if operation == "reembed_all":
+        total_units = expected_chunks + current_unique_nodes + 1
+        if phase == "chunk_embedding":
+            completed_units = embedded_chunks
+        elif phase == "unique_node_rebuild":
+            rebuild_completed = _coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_completed"))
+            completed_units = expected_chunks + min(rebuild_completed, current_unique_nodes)
+        elif phase == "audit_finalization":
+            completed_units = expected_chunks + current_unique_nodes
+        elif str(meta.get("ingestion_status") or "").lower() in {"complete", "partial_failure"}:
+            completed_units = total_units
+        else:
+            completed_units = embedded_chunks
+        return max(0, min(total_units, completed_units)), total_units
+
+    total_units = expected_chunks * 2 + 1
+    if phase == "extracting":
+        completed_units = extracted_chunks
+    elif phase == "chunk_embedding":
+        completed_units = expected_chunks + embedded_chunks
+    elif phase == "audit_finalization":
+        completed_units = expected_chunks * 2
+    elif str(meta.get("ingestion_status") or "").lower() in {"complete", "partial_failure"}:
+        completed_units = total_units
+    else:
+        completed_units = expected_chunks + embedded_chunks
+    return max(0, min(total_units, completed_units)), total_units
 
 
 def _build_progress_snapshot(
@@ -523,39 +619,59 @@ def _build_progress_snapshot(
     total_chunks: int | None = None,
     aborting: bool = False,
 ) -> dict:
-    source = _progress_source(meta, source_id=source_id)
+    counters = _live_stage_counters(meta)
+    explicit_phase = str(meta.get("ingestion_progress_phase") or "").strip().lower()
     active_operation = str(meta.get("ingestion_operation") or "default")
+    source_scope = str(meta.get("ingestion_progress_scope") or "").strip().lower()
+    source = None if source_scope == "world" else _progress_source(meta, source_id=source_id)
     chunk_count = int(total_chunks or (source.get("chunk_count") if source else 0) or 0)
     extracted_chunks = len(_normalize_index_list((source or {}).get("extracted_chunks", [])))
     embedded_chunks = len(_normalize_index_list((source or {}).get("embedded_chunks", [])))
 
-    phase = "aborting" if aborting or meta.get("ingestion_abort_requested_at") else _progress_phase_from_agent(active_agent)
+    phase: IngestProgressPhase = "aborting" if aborting or meta.get("ingestion_abort_requested_at") else (
+        explicit_phase if explicit_phase in {"extracting", "chunk_embedding", "unique_node_rebuild", "audit_finalization", "idle"} else _progress_phase_from_agent(active_agent)
+    )
     if not phase:
         if active_operation == "reembed_all":
-            phase = "embedding"
+            phase = "chunk_embedding"
         elif chunk_count > 0 and extracted_chunks < chunk_count:
             phase = "extracting"
         elif chunk_count > 0 and embedded_chunks < chunk_count:
-            phase = "embedding"
+            phase = "chunk_embedding"
         else:
             phase = "idle"
 
+    progress_scope: ProgressScope = "world" if phase in _PROGRESS_WORLD_PHASES or source_scope == "world" else "source"
     if phase == "extracting":
         completed = extracted_chunks
-    elif phase in {"embedding", "aborting"}:
+    elif phase in {"chunk_embedding", "aborting"}:
         completed = embedded_chunks
+    elif phase == "unique_node_rebuild":
+        completed = _coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_completed"))
+        chunk_count = max(
+            counters.get("current_unique_nodes", 0),
+            _coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_total")),
+        )
+    elif phase == "audit_finalization":
+        completed = _coerce_non_negative_int(meta.get("ingestion_progress_completed_work_units"))
+        chunk_count = _coerce_non_negative_int(meta.get("ingestion_progress_total_work_units"))
     else:
         completed = embedded_chunks if chunk_count > 0 else extracted_chunks
 
     completed = max(0, min(completed, chunk_count)) if chunk_count > 0 else 0
     percent = (completed / chunk_count * 100.0) if chunk_count > 0 else 0.0
     wait_fields = _wait_fields_from_meta(meta)
+    completed_work_units, total_work_units = _compute_world_progress_units(meta, counters, phase=phase)
 
     return {
         "progress_phase": phase,
+        "progress_scope": progress_scope,
         "completed_chunks_current_phase": completed,
         "total_chunks_current_phase": chunk_count,
         "progress_percent": percent,
+        "completed_work_units": completed_work_units,
+        "total_work_units": total_work_units,
+        "overall_percent": (completed_work_units / total_work_units * 100.0) if total_work_units > 0 else 0.0,
         "active_operation": active_operation,
         **wait_fields,
     }
@@ -581,7 +697,10 @@ def _build_progress_event(
     payload["ingestion_status"] = meta.get("ingestion_status")
     payload["active_ingestion_run"] = has_active_ingestion_run(world_id)
     payload["stage_counters"] = _live_stage_counters(meta)
-    payload.update(_progress_source_summary(_progress_source(meta, source_id=source_id)))
+    if payload.get("progress_scope") == "world":
+        payload.update(_progress_source_summary(None))
+    else:
+        payload.update(_progress_source_summary(_progress_source(meta, source_id=source_id)))
     return payload
 
 
@@ -1492,6 +1611,7 @@ async def _upsert_unique_node_vectors(
     batch_size: int = _UNIQUE_NODE_VECTOR_BATCH_SIZE,
     vector_lock: asyncio.Lock | None = None,
     abort_check: Callable[[], None] | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
 ) -> int:
     document_ids: list[str] = []
     texts: list[str] = []
@@ -1518,6 +1638,12 @@ async def _upsert_unique_node_vectors(
 
     total_written = 0
     step = max(1, int(batch_size))
+    total_documents = len(document_ids)
+
+    if progress_callback is not None:
+        progress_result = progress_callback(0, total_documents)
+        if progress_result is not None:
+            await progress_result
 
     for start in range(0, len(document_ids), step):
         if abort_check:
@@ -1562,6 +1688,11 @@ async def _upsert_unique_node_vectors(
 
         total_written += len(batch_document_ids)
 
+        if progress_callback is not None:
+            progress_result = progress_callback(total_written, total_documents)
+            if progress_result is not None:
+                await progress_result
+
         if abort_check:
             abort_check()
 
@@ -1575,6 +1706,7 @@ async def _rebuild_unique_node_vectors(
     *,
     vector_lock: asyncio.Lock | None = None,
     abort_check: Callable[[], None] | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
 ) -> int:
     node_records = []
     for node_id in sorted(graph_store.graph.nodes()):
@@ -1593,6 +1725,7 @@ async def _rebuild_unique_node_vectors(
         api_key,
         vector_lock=vector_lock,
         abort_check=abort_check,
+        progress_callback=progress_callback,
     )
 
 
@@ -2099,7 +2232,11 @@ def _collect_extracted_coverage(world_id: str, graph_store: GraphStore) -> dict[
 
 def _collect_embedded_coverage(world_id: str, vector_store: VectorStore) -> dict[str, set[int]]:
     by_source: dict[str, set[int]] = {}
-    for rec in vector_store.get_all_chunk_records():
+    try:
+        records = vector_store.get_all_chunk_records(raise_on_error=True)  # type: ignore[call-arg]
+    except TypeError:
+        records = vector_store.get_all_chunk_records()
+    for rec in records:
         metadata = rec.get("metadata", {}) or {}
         source_id = metadata.get("source_id")
         chunk_index = metadata.get("chunk_index")
@@ -2178,9 +2315,15 @@ def _collect_unique_node_embedding_records(unique_node_vector_store: VectorStore
     records: dict[str, dict[str, Any]] = {}
     raw_records: list[dict[str, Any]]
     if hasattr(unique_node_vector_store, "get_all_records"):
-        raw_records = unique_node_vector_store.get_all_records(include_documents=True)
+        try:
+            raw_records = unique_node_vector_store.get_all_records(include_documents=True, raise_on_error=True)  # type: ignore[call-arg]
+        except TypeError:
+            raw_records = unique_node_vector_store.get_all_records(include_documents=True)
     elif hasattr(unique_node_vector_store, "get_all_chunk_records"):
-        raw_records = unique_node_vector_store.get_all_chunk_records()
+        try:
+            raw_records = unique_node_vector_store.get_all_chunk_records(raise_on_error=True)  # type: ignore[call-arg]
+        except TypeError:
+            raw_records = unique_node_vector_store.get_all_chunk_records()
     else:
         raw_records = []
 
@@ -2238,12 +2381,39 @@ def audit_ingestion_integrity(
     graph_store = GraphStore(world_id)
     vector_store = VectorStore(world_id)
     unique_node_vector_store = VectorStore(world_id, collection_suffix="unique_nodes")
+    blocking_issues: list[dict] = []
 
     extracted_by_source = _collect_extracted_coverage(world_id, graph_store)
-    embedded_by_source = _collect_embedded_coverage(world_id, vector_store)
+    try:
+        embedded_by_source = _collect_embedded_coverage(world_id, vector_store)
+        chunk_vector_audit_error: str | None = None
+    except VectorStoreReadError as exc:
+        embedded_by_source = {}
+        chunk_vector_audit_error = str(exc)
+        blocking_issues.append(
+            {
+                "code": "chunk_vector_store_unreadable",
+                "stage": "embedding",
+                "scope": "world",
+                "message": f"Could not read the chunk vector store while auditing this world: {chunk_vector_audit_error}",
+            }
+        )
     expected_nodes_by_source = _collect_expected_node_records_by_source(world_id, graph_store)
     canonical_node_documents = _collect_canonical_unique_node_documents(graph_store)
-    embedded_unique_node_records = _collect_unique_node_embedding_records(unique_node_vector_store)
+    try:
+        embedded_unique_node_records = _collect_unique_node_embedding_records(unique_node_vector_store)
+        unique_node_audit_error: str | None = None
+    except VectorStoreReadError as exc:
+        embedded_unique_node_records = {}
+        unique_node_audit_error = str(exc)
+        blocking_issues.append(
+            {
+                "code": "unique_node_vector_store_unreadable",
+                "stage": "embedding",
+                "scope": "world",
+                "message": f"Could not read the unique-node index while auditing this world: {unique_node_audit_error}",
+            }
+        )
     orphan_graph_nodes = _collect_orphan_graph_nodes(world_id, graph_store)
     graph_node_ids = {str(node_id) for node_id in graph_store.graph.nodes()}
 
@@ -2252,11 +2422,14 @@ def audit_ingestion_integrity(
     expected_total = 0
     extracted_total = 0
     embedded_total = 0
+    can_audit_chunk_vectors = chunk_vector_audit_error is None
+    can_audit_unique_node_vectors = unique_node_audit_error is None
     expected_node_total = len(graph_node_ids)
     fresh_unique_node_ids = {
         node_id
         for node_id, document in canonical_node_documents.items()
-        if node_id in embedded_unique_node_records
+        if can_audit_unique_node_vectors
+        and node_id in embedded_unique_node_records
         and (
             not embedded_unique_node_records.get(node_id, {}).get("has_document")
             or str(embedded_unique_node_records.get(node_id, {}).get("document") or "") == str(document)
@@ -2265,11 +2438,12 @@ def audit_ingestion_integrity(
     stale_unique_node_ids = {
         node_id
         for node_id, document in canonical_node_documents.items()
-        if node_id in embedded_unique_node_records
+        if can_audit_unique_node_vectors
+        and node_id in embedded_unique_node_records
         and embedded_unique_node_records.get(node_id, {}).get("has_document")
         and str(embedded_unique_node_records.get(node_id, {}).get("document") or "") != str(document)
     }
-    embedded_node_total = len(fresh_unique_node_ids)
+    embedded_node_total = len(fresh_unique_node_ids) if can_audit_unique_node_vectors else _coerce_non_negative_int(meta.get("embedded_unique_nodes"))
     failed_total = 0
     complete_sources = 0
     partial_sources = 0
@@ -2285,12 +2459,15 @@ def audit_ingestion_integrity(
         expected_range = set(range(expected))
 
         extracted_set = set(extracted_by_source.get(source_id, set()))
-        embedded_set = set(embedded_by_source.get(source_id, set()))
+        embedded_set = set(embedded_by_source.get(source_id, set())) if can_audit_chunk_vectors else set(
+            _normalize_index_list(source.get("embedded_chunks", []))
+        )
         extracted_in_range = sorted(i for i in extracted_set if i in expected_range)
         embedded_in_range = sorted(i for i in embedded_set if i in expected_range)
 
         source["extracted_chunks"] = extracted_in_range
-        source["embedded_chunks"] = embedded_in_range
+        if can_audit_chunk_vectors:
+            source["embedded_chunks"] = embedded_in_range
 
         retained_failures = []
         for rec in source.get("stage_failures", []):
@@ -2317,7 +2494,7 @@ def audit_ingestion_integrity(
                         or str(record.get("document") or "") == str(expected_node.get("canonical_document") or "")
                     ):
                         continue
-                elif idx in embedded_set:
+                elif can_audit_chunk_vectors and idx in embedded_set:
                     continue
             retained_failures.append(rec)
         source["stage_failures"] = retained_failures
@@ -2379,7 +2556,7 @@ def audit_ingestion_integrity(
                     existing_chunk_failure_keys.add(("extraction", idx, "chunk"))
                     synthesized_total += 1
 
-                if idx not in embedded_set and ("embedding", idx, "chunk") not in existing_chunk_failure_keys:
+                if can_audit_chunk_vectors and idx not in embedded_set and ("embedding", idx, "chunk") not in existing_chunk_failure_keys:
                     source["stage_failures"].append(
                         {
                             "stage": "embedding",
@@ -2402,6 +2579,8 @@ def audit_ingestion_integrity(
 
         if synthesize_failures:
             for node in expected_nodes:
+                if not can_audit_unique_node_vectors:
+                    break
                 idx = int(node["chunk_index"])
                 if node["id"] in fresh_node_ids or ("embedding", idx, node["id"]) in existing_node_failure_keys:
                     continue
@@ -2437,6 +2616,8 @@ def audit_ingestion_integrity(
                 "node_id": node["id"],
                 "node_display_name": node.get("display_name", ""),
             }
+            if not can_audit_unique_node_vectors:
+                continue
             if node["id"] in stale_node_ids:
                 stale_node_vectors.append(row)
             else:
@@ -2479,8 +2660,6 @@ def audit_ingestion_integrity(
             failure_row["display_name"] = source.get("display_name")
             summary_failures.append(failure_row)
 
-    blocking_issues: list[dict] = []
-
     any_failures = any(bool(s.get("stage_failures")) for s in meta.get("sources", []))
     all_complete = bool(meta.get("sources")) and all(s.get("status") == "complete" for s in meta.get("sources", []))
     if meta.get("ingestion_status") != "in_progress":
@@ -2492,7 +2671,9 @@ def audit_ingestion_integrity(
     meta["total_chunks"] = sum(int(s.get("chunk_count") or 0) for s in meta.get("sources", []))
     meta["total_nodes"] = graph_store.get_node_count()
     meta["total_edges"] = graph_store.get_edge_count()
-    meta["embedded_unique_nodes"] = embedded_node_total
+    if can_audit_unique_node_vectors:
+        meta["embedded_unique_nodes"] = embedded_node_total
+    meta["ingestion_blocking_issues"] = blocking_issues
 
     summary = {
         "world": {
@@ -2644,6 +2825,8 @@ async def start_ingestion(
         allow_active_chunk_overrides = is_full_rebuild and bool(use_active_chunk_overrides)
         meta.pop("ingestion_abort_requested_at", None)
         meta.pop("ingestion_wait", None)
+        meta.pop("ingestion_blocking_issues", None)
+        _clear_progress_tracking(meta)
 
         if is_full_rebuild or is_reembed_all:
             review_guard = get_safety_review_rebuild_guard(
@@ -2675,6 +2858,7 @@ async def start_ingestion(
             for source in meta.get("sources", []):
                 _reset_source_tracking_for_full_rebuild(source)
             _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            _clear_progress_tracking(meta)
             meta["total_chunks"] = 0
             meta["total_nodes"] = 0
             meta["embedded_unique_nodes"] = 0
@@ -2707,6 +2891,7 @@ async def start_ingestion(
                 if str(source.get("source_id") or "") in eligible_source_ids:
                     _prepare_source_for_reembed(source)
             _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            _clear_progress_tracking(meta)
             meta["embedded_unique_nodes"] = 0
             _save_meta(world_id, meta)
         else:
@@ -2717,6 +2902,7 @@ async def start_ingestion(
             world_ingest_settings = _resolve_world_ingest_settings(meta, None)
             _apply_world_ingest_settings(meta, world_ingest_settings, lock=False)
             _mark_ingestion_live(meta, operation=operation_norm, started=True)
+            _clear_progress_tracking(meta)
             _save_meta(world_id, meta)
 
         sources = (
@@ -2762,6 +2948,42 @@ async def start_ingestion(
         graph_lock = _get_async_lock(world_id, _graph_locks)
         vector_lock = _get_async_lock(world_id, _vector_locks)
         meta_lock = _get_async_lock(world_id, _meta_locks)
+
+        async def set_world_progress_phase(
+            phase: IngestProgressPhase,
+            *,
+            completed_work_units: int | None = None,
+            total_work_units: int | None = None,
+            unique_node_rebuild_completed: int | None = None,
+            unique_node_rebuild_total: int | None = None,
+            emit_event: bool = True,
+            active_agent: str | None = None,
+        ) -> None:
+            async with meta_lock:
+                _mark_ingestion_live(meta, operation=operation_norm)
+                _set_progress_tracking(
+                    meta,
+                    phase=phase,
+                    scope="world",
+                    completed_work_units=completed_work_units,
+                    total_work_units=total_work_units,
+                    unique_node_rebuild_completed=unique_node_rebuild_completed,
+                    unique_node_rebuild_total=unique_node_rebuild_total,
+                )
+                _save_meta(world_id, meta)
+            if emit_event:
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "progress",
+                        "active_agent": active_agent,
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            active_agent=active_agent,
+                        ),
+                    },
+                )
 
         async def acquire_stage_slot(
             scheduler: _StageScheduler,
@@ -3379,6 +3601,23 @@ async def start_ingestion(
         is_current = _is_current_run(world_id, my_event)
         if not my_event.is_set() and is_current:
             if is_reembed_all:
+                unique_node_total = graph_store.get_node_count()
+                await set_world_progress_phase(
+                    "unique_node_rebuild",
+                    unique_node_rebuild_completed=0,
+                    unique_node_rebuild_total=unique_node_total,
+                    active_agent="node_embedding_rebuild",
+                )
+
+                async def _report_unique_node_rebuild_progress(completed: int, total: int) -> None:
+                    await set_world_progress_phase(
+                        "unique_node_rebuild",
+                        unique_node_rebuild_completed=completed,
+                        unique_node_rebuild_total=total,
+                        emit_event=True,
+                        active_agent="node_embedding_rebuild",
+                    )
+
                 api_key, _ = await acquire_gemini_key(
                     source_id=None,
                     book_number=None,
@@ -3391,11 +3630,38 @@ async def start_ingestion(
                     api_key,
                     vector_lock=vector_lock,
                     abort_check=lambda: _ensure_not_aborted(world_id, my_event),
+                    progress_callback=_report_unique_node_rebuild_progress,
                 )
+            current_counters = _live_stage_counters(meta)
+            audit_completed_work_units, audit_total_work_units = _compute_world_progress_units(
+                meta,
+                current_counters,
+                phase="audit_finalization",
+            )
+            await set_world_progress_phase(
+                "audit_finalization",
+                completed_work_units=audit_completed_work_units,
+                total_work_units=audit_total_work_units,
+                unique_node_rebuild_completed=_coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_completed")),
+                unique_node_rebuild_total=_coerce_non_negative_int(meta.get("ingestion_unique_node_rebuild_total")),
+                active_agent="audit_finalization",
+            )
             audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
             refreshed = _load_meta(world_id)
-            has_failures = audit["world"]["failed_records"] > 0
+            has_failures = (
+                int(audit["world"].get("failed_records", 0) or 0) > 0
+                or len(list(audit.get("blocking_issues", []))) > 0
+            )
             _clear_active_waits(world_id)
+            _set_progress_tracking(
+                refreshed,
+                phase="audit_finalization",
+                scope="world",
+                completed_work_units=audit_total_work_units,
+                total_work_units=audit_total_work_units,
+                unique_node_rebuild_completed=_coerce_non_negative_int(refreshed.get("ingestion_unique_node_rebuild_completed")),
+                unique_node_rebuild_total=_coerce_non_negative_int(refreshed.get("ingestion_unique_node_rebuild_total")),
+            )
             _mark_ingestion_terminal(refreshed, "complete" if not has_failures else "partial_failure")
             _save_meta(world_id, refreshed)
             if not has_failures:
@@ -3455,6 +3721,16 @@ async def start_ingestion(
         if _is_current_run(world_id, my_event):
             meta = _load_meta(world_id)
             _clear_active_waits(world_id)
+            existing_issues = list(meta.get("ingestion_blocking_issues", []))
+            existing_issues.append(
+                {
+                    "code": "ingestion_runtime_error",
+                    "stage": str(meta.get("ingestion_progress_phase") or "embedding"),
+                    "scope": "world",
+                    "message": str(exc),
+                }
+            )
+            meta["ingestion_blocking_issues"] = existing_issues
             _mark_ingestion_terminal(meta, "error")
             _save_meta(world_id, meta)
             push_sse_event(
@@ -3463,6 +3739,8 @@ async def start_ingestion(
                     "event": "error",
                     "message": str(exc),
                     "safety_review_summary": get_safety_review_summary(world_id),
+                    "stage_counters": _live_stage_counters(meta),
+                    **_build_progress_event(world_id, meta),
                 },
             )
     finally:
@@ -3554,6 +3832,7 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": None,
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "blocking_issues": audit.get("blocking_issues", []),
             "safety_review_summary": safety_review_summary,
             **progress_payload,
         }
@@ -3579,6 +3858,7 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": reason,
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "blocking_issues": audit.get("blocking_issues", []),
             "safety_review_summary": safety_review_summary,
             **progress_payload,
         }
@@ -3594,6 +3874,7 @@ def get_checkpoint_info(world_id: str) -> dict:
             "reason": "checkpoint_corrupted",
             "stage_counters": audit["world"],
             "failures": audit["failures"],
+            "blocking_issues": audit.get("blocking_issues", []),
             "safety_review_summary": safety_review_summary,
             **progress_payload,
         }

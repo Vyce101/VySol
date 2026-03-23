@@ -86,6 +86,11 @@ async def entity_resolution_start(world_id: str, req: EntityResolutionStartReque
         raise HTTPException(status_code=409, detail="Ingest at least one complete source before resolving entities.")
     if any(str(source.get("status") or "").lower() != "complete" for source in sources):
         raise HTTPException(status_code=409, detail="Finish ingestion and repair source failures before resolving entities.")
+    blocking_issues = list(audit.get("blocking_issues", []))
+    if blocking_issues:
+        first_issue = blocking_issues[0] if isinstance(blocking_issues[0], dict) else {}
+        detail = str(first_issue.get("message") or "Resolve world-level graph/vector audit blockers before running entity resolution.")
+        raise HTTPException(status_code=409, detail=detail)
     if int(audit.get("world", {}).get("failed_records", 0) or 0) > 0 or str(meta.get("ingestion_status") or "").lower() == "partial_failure":
         raise HTTPException(status_code=409, detail="Resolve retryable ingest failures before running entity resolution.")
     safety_review_summary = get_safety_review_summary(world_id)
