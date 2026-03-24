@@ -442,6 +442,7 @@ def _load_collection_entries(world_id: str) -> list[dict[str, Any]]:
         entries.append(
             {
                 "collection_key": str(collection_key),
+                "embedding_provider": str(entry.get("embedding_provider") or ""),
                 "embedding_model": str(entry.get("embedding_model") or ""),
                 "collection_name": str(entry.get("collection_name") or ""),
             }
@@ -566,6 +567,7 @@ def _clone_vector_collections(
     source_world_id: str,
     target_world_id: str,
     *,
+    default_embedding_provider: str,
     default_embedding_model: str,
     run_id: str,
     completed_offset: int,
@@ -578,6 +580,7 @@ def _clone_vector_collections(
     source_client = chromadb.PersistentClient(path=str(world_dir(source_world_id) / "chroma"))
     for entry in entries:
         collection_key = entry["collection_key"]
+        embedding_provider = entry["embedding_provider"] or default_embedding_provider
         embedding_model = entry["embedding_model"] or default_embedding_model
         collection_name = entry["collection_name"]
         if not collection_name:
@@ -592,7 +595,12 @@ def _clone_vector_collections(
                 source_world_id,
             )
             continue
-        target_store = VectorStore(target_world_id, embedding_model=embedding_model, collection_suffix=suffix)
+        target_store = VectorStore(
+            target_world_id,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            collection_suffix=suffix,
+        )
         collection_count = source_collection.count()
         if collection_count <= 0:
             continue
@@ -691,6 +699,7 @@ def _run_world_duplication(
         completed_units = _clone_vector_collections(
             source_world_id,
             target_world_id,
+            default_embedding_provider=str(source_meta_snapshot.get("embedding_provider") or "gemini"),
             default_embedding_model=str(source_meta_snapshot.get("embedding_model") or ""),
             run_id=run_id,
             completed_offset=completed_units,

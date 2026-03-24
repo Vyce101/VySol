@@ -52,9 +52,23 @@ Important behavior:
 - The entity-resolution panel now shows `Embedded N / N` while the unique-node index rebuild is running, using the post-merge unique-node total instead of the raw pre-merge extraction count
 - Exact-only result summaries now label unresolved exact-pass leftovers as `Left Unchanged`
 
-## Gemini Thinking Controls
+## Provider Presets And Key Library
 
-VySol now exposes per-model Gemini thinking controls for the non-embedding Gemini model slots in Settings.
+VySol now separates global settings into a preset-backed `Configuration` tab and a shared `Key Library`.
+
+Important behavior:
+
+- The shipped `Default` preset is locked and acts as the baseline global setup
+- `Save As New Preset` clones the active Configuration into a new editable preset
+- Switching presets applies immediately
+- Provider credentials are shared globally per provider and are not copied into each preset
+- Gemini and Groq pool enabled API keys from `Key Library`
+- IntenseRP Next uses a shared stored base URL from `Key Library`
+- Provider-backed Configuration rows show a status dot so missing keys, missing URLs, or unsupported slot/provider combinations are visible before a run starts
+
+## Provider-Scoped Model Controls
+
+VySol now exposes provider-specific advanced controls per model slot instead of pretending every provider supports the same options.
 
 Shipped defaults:
 
@@ -62,9 +76,10 @@ Shipped defaults:
 - Chat Model: `gemini-3-flash-preview` with `high` thinking
 - Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
 - Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Default Embedding Provider: `Google (Gemini)`
 - Default Embedding Model: `gemini-embedding-2-preview`
 
-Built-in dropdown behavior:
+Gemini behavior:
 
 - If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown for that slot
 - `Gemini 3.1 Pro` supports `low`, `medium`, and `high`
@@ -83,13 +98,28 @@ Manual fallback behavior:
 - Good examples: `high`, `minimal`, `1024`
 - Bad examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingBudget": 1024 }`
 
-Chat thought visibility:
+Groq behavior:
+
+- `OpenAI-compatible > Groq` can be selected for chat, graph extraction, entity chooser, and entity combiner
+- Groq rows use `Reasoning Effort` instead of Gemini thinking controls
+- Chat exposes a Groq-only `Include Reasoning` toggle
+- If Groq returns reasoning, VySol stores it with the message after completion instead of pretending it streamed Gemini-style thought tokens
+- Groq does not show Gemini-only safety controls
+
+Chat thought and reasoning visibility:
 
 - Chat has a Gemini-only `Send Thinking` toggle
 - The shipped default has `Send Thinking` enabled
 - When enabled, VySol asks Gemini to return thought content when that model/provider path supports it
 - Thought content is saved with the message and shown in a collapsible `Model Thinking` block above the normal answer text
-- `IntenseRP Next` does not use this toggle or thought-block rendering
+- Chat has a Groq-only `Include Reasoning` toggle when Groq is selected
+- `IntenseRP Next` uses neither toggle
+
+Embedding provider readiness:
+
+- Embedding settings are now provider-aware globally and per world
+- This build still only enables Gemini embeddings
+- If you choose `OpenAI-compatible > Groq` for embeddings, the UI stays truthful and blocks ingest or `Re-embed All` until a real Groq embedding adapter exists
 
 ## Context X-Ray
 

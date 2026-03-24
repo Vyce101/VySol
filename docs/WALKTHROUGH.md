@@ -4,29 +4,47 @@
 
 Open the settings sidebar from the home screen before you ingest your first world.
 
-### API Keys
+### Configuration And Key Library
 
-- Only Gemini API keys are supported in VySol's built-in key management flow
-- Click the `+` button to add each key
-- Saved keys stay stored in Settings even when you toggle them off
-- Only active saved keys participate in key rotation
-- If every saved key is inactive, VySol can still fall back to `GEMINI_API_KEY` from your local environment
+The global settings drawer now has two top-level tabs:
+
+- `Configuration`: preset-backed global behavior
+- `Key Library`: shared provider credentials for the whole app
+
+Presets:
+
+- The shipped `Default` preset is locked
+- Locked means it stays the baseline preset name and cannot be renamed
+- `Save As New Preset` clones the current Configuration into a new editable preset
+- Switching the preset dropdown applies immediately
+- Edits in `Configuration` auto-save into the active preset
+- `Key Library` is not part of presets
+
+Key Library:
+
+- Use the provider dropdown to manage Gemini, Groq, IntenseRP Next, and any future providers the app knows about
+- Credential entries are shared across all presets for that provider
+- Gemini and Groq entries store API keys
+- IntenseRP Next stores a base URL instead of an API key
+- Saved entries stay stored even when you toggle them off
+- Only enabled and fully filled entries join the live provider pool
+
+Fallback behavior:
+
+- If no ready Gemini library entry is enabled, VySol can still fall back to `GEMINI_API_KEY`
+- If no ready Groq library entry is enabled, VySol can still fall back to `GROQ_API_KEY`
+- If no ready IntenseRP entry is enabled, VySol can still fall back to `INTENSERP_BASE_URL`
 
 Key Rotation Mode:
 
-- `Fail Over`: keeps using the current key until it hits a rate limit, then moves to the next one
-- `Round Robin`: rotates across keys to spread load more evenly
+- `Fail Over`: keeps using the current provider key until it hits a rate limit, then moves to the next one
+- `Round Robin`: rotates across that provider's enabled keys to spread load more evenly
 
-Per-key toggle behavior:
+Provider status dots:
 
-- `ON` means the key is active and eligible for rotation
-- `OFF` means the key stays saved on disk but is skipped by `Fail Over` and `Round Robin`
-- The Settings sidebar shows how many keys are active versus how many are stored
-
-Cooldown behavior:
-
-- If all active Gemini keys are temporarily cooling down, VySol can wait and continue when a key becomes available again instead of always failing immediately
-- During ingest, this appears as `Waiting for API key cooldown`
+- Each provider-backed row in `Configuration` shows a status dot
+- A red dot means the selected provider is missing required shared credentials or is not supported for that slot
+- Hovering the dot explains the exact problem, such as missing Groq keys or an unsupported embedding backend
 
 Need help getting a Google AI Studio key?
 
@@ -59,7 +77,28 @@ Shipped defaults:
 - Chat Model: `gemini-3-flash-preview` with `high` thinking
 - Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
 - Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Default Embedding Provider: `Google (Gemini)`
 - Default Embedding Model: `gemini-embedding-2-preview`
+
+Provider family rows:
+
+- Graph Architect, Chat, Entity Chooser, Entity Combiner, and Default Embeddings each have their own provider row
+- `Google (Gemini)` is available for all shipped text slots and embeddings
+- `OpenAI-compatible` opens a second provider dropdown underneath it; `Groq` is the only implementation provider in this build
+- `IntenseRP Next` remains a separate chat-only provider option
+
+What Groq supports right now:
+
+- Chat
+- Graph Architect
+- Entity Chooser
+- Entity Combiner
+
+What Groq does not support in this build:
+
+- Embeddings
+- Gemini-only safety controls
+- Gemini-only thinking controls
 
 Graph Architect Model:
 
@@ -67,7 +106,7 @@ Graph Architect Model:
 - Lighter, faster models usually work best here because ingestion can make many calls
 - A Gemini Flash-class model is a good fit for most users
 
-Thinking:
+Gemini thinking:
 
 - Gemini model rows now show a `Thinking` control next to the model field
 - If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown instead of a free-text field
@@ -76,18 +115,26 @@ Thinking:
 - `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
 - Leaving the dropdown blank means `use the model's provider default`
 
-Chat Provider:
+Groq reasoning:
 
-- `Google (Gemini)` uses the normal Gemini chat model field (uses API keys from Google AI Studio)
+- Groq model rows show a `Reasoning Effort` dropdown instead of Gemini thinking
+- The setting is stored per Groq-backed slot
+- Chat also gets a Groq-only `Include Reasoning` toggle
+- VySol does not fake live thought-token streaming for Groq; if reasoning is returned, it is attached after the reply completes
+
+Chat providers:
+
+- `Google (Gemini)` uses the normal Gemini chat model field and Gemini key pool
+- `OpenAI-compatible > Groq` uses the Groq key pool from `Key Library`
 - `IntenseRP Next` lets you point chat at a local IntenseRP-compatible endpoint instead
 
 IntenseRP Next:
 
 - GitHub: [LyubomirT/intense-rp-next](https://github.com/LyubomirT/intense-rp-next)
 - This path is optional
-- You must enter the endpoint URL yourself
-- No API key management is built into VySol for this provider path
-- Extraction, entity resolution, and embeddings still follow the Gemini-side model and key flow
+- You add the endpoint URL in `Key Library`
+- No API key is required by VySol for this provider path
+- Extraction, entity resolution, and embeddings do not use IntenseRP Next
 - Using IntenseRP Next and any provider behind it is subject to that provider's own terms of service
 
 Chat Model:
@@ -105,8 +152,10 @@ Entity Combiner Model:
 
 Default Embedding Model:
 
-- This is the default embedding model for new worlds
+- This is the default embedding model for new worlds when the embedding provider is `Google (Gemini)`
 - The shipped default is `gemini-embedding-2-preview`
+- VySol also stores an embedding provider, both globally and per world
+- If you switch embeddings to `OpenAI-compatible > Groq`, the UI tells the truth and blocks ingest/re-embed because Groq embeddings are not available in this build
 
 Unsupported Gemini models and manual thinking entry:
 
@@ -119,11 +168,13 @@ Unsupported Gemini models and manual thinking entry:
 - Good manual examples: `high`, `medium`, `minimal`, `1024`
 - Bad manual examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingLevel": "high" }`
 - If you are unsure what values a custom Gemini model accepts, check that model family's provider docs first and then enter only the final raw value VySol should send
-- The default embedding model does not support thinking controls in VySol
+- The embedding slot does not use Gemini thinking controls in VySol
 
-Disable Safety Filters:
+Gemini safety:
 
-- This relaxes Gemini content moderation behavior for creative or edge-case writing workflows
+- `Disable Safety Filters` is Gemini-only
+- It appears only when one of the selected model rows is using Gemini
+- Groq and IntenseRP do not show a fake safety toggle in Configuration
 
 ## Creating A World
 
@@ -168,6 +219,7 @@ That popup lets you change:
 
 - Chunk size
 - Chunk overlap
+- World embedding provider
 - World embedding model
 - Graph Architect glean amount
 
@@ -175,6 +227,7 @@ Shipped defaults:
 
 - Chunk size: `4000`
 - Chunk overlap: `150`
+- World embedding provider: `Google (Gemini)`
 - World embedding model: `gemini-embedding-2-preview`
 - Graph Architect glean amount: `1`
 
@@ -184,6 +237,8 @@ What they mean:
   How much text goes into each chunk before ingestion splits it
 - Chunk Overlap:
   How much trailing context is carried into the next chunk to solve pronoun/entity name problems
+- World Embedding Provider:
+  Which provider family and implementation provider new vectors should use for that world
 - World Embedding Model:
   The embedding model used for that world's vectors
 - Graph Architect Glean Amount:
@@ -195,6 +250,7 @@ Important behavior:
 - Once a world has resumable or completed ingest history, the main page returns to a read-only snapshot of the world's saved settings and effective prompts
 - Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup popup for rebuilds
 - Starting either the first ingest or `Re-ingest` with edited values saves those settings as the world's new defaults
+- If the selected world embedding provider is not actually available yet, such as `OpenAI-compatible > Groq` in this build, ingest and `Re-embed All` are blocked with a truthful explanation instead of pretending the provider works
 
 ## Prompt Snapshot
 
@@ -313,13 +369,13 @@ Use the rebuild and retry actions based on what went wrong:
 - Is blocked if an older ingested source is missing, changed, partial, failed, or comes from an older world that never recorded source snapshots
 - Uses active repaired chunk bodies when the locked source snapshot and chunk map still match
 - Is blocked while this world still has unresolved safety-review work, because the rebuild would otherwise operate on incomplete repair state
-- Use this when you change only the world embedding model or need to rebuild vectors without re-extracting the graph
+- Use this when you change only the world embedding provider/model or need to rebuild vectors without re-extracting the graph
 
 `Re-ingest`
 
 - Fully rebuilds chunks, extraction, graph data, and vectors using the world's currently saved ingest settings and world-specific prompt overrides
 - The main `Re-ingest` button uses the saved settings exactly as shown in the read-only snapshot on the ingest page
-- The small settings icon next to `Re-ingest` opens a popup where you can edit chunk settings, glean amount, embedding model, and the world-local ingest/entity-resolution prompts before starting the rebuild
+- The small settings icon next to `Re-ingest` opens a popup where you can edit chunk settings, embedding provider/model, glean amount, and the world-local ingest/entity-resolution prompts before starting the rebuild
 - Each prompt in that popup opens in its own collapsible section so you can expand only the prompt you want to edit
 - Starting `Re-ingest` from that popup saves those values as the world's new saved settings and prompt overrides
 - If this world has repaired chunk overrides, `Re-ingest` can optionally reuse them when chunk size and overlap stay the same
@@ -353,14 +409,16 @@ The retrieval sidebar is grouped into collapsible sections. All sections start c
 
 `General Settings`
 
-`Send Thinking`
+`Provider-specific extras`
 
-- This toggle appears only when the chat provider is `Google (Gemini)`
+- `Send Thinking` appears only when the chat provider is `Google (Gemini)`
 - It is `on` by default in the shipped app defaults
 - Turning it on asks Gemini to include thought content when the chosen model and provider path support it
 - When Gemini returns thought content, VySol saves it with the message and renders a collapsible `Model Thinking` block above the normal reply text
-- Turning it off keeps normal replies and skips requesting thought content from Gemini
-- This toggle does not affect `IntenseRP Next`
+- `Include Reasoning` appears only when the chat provider is `OpenAI-compatible > Groq`
+- Turning it on asks Groq for reasoning when that model/provider path supports it
+- Groq reasoning, when returned, is attached after the reply instead of streaming as live thought tokens
+- `IntenseRP Next` shows neither of these provider-specific toggles
 
 `Vector Query (Msgs)`
 

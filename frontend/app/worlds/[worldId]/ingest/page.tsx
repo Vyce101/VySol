@@ -13,6 +13,7 @@ import WorldReingestSetupContent, {
 import { apiFetch, apiUpload, apiStreamGet } from "@/lib/api";
 import { buildIngestActivityLabel, resolveStableIngestProgress } from "@/lib/ingest-progress";
 import {
+    formatEmbeddingProviderLabel,
     formatPromptSourceLabel,
     WORLD_INGEST_PROMPT_FIELDS,
     type WorldIngestConfigResponse,
@@ -1098,8 +1099,14 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const initialIngestSubmitDisabledReason = hasPending
         ? null
         : "Add at least one pending .txt file before starting ingestion.";
+    const savedEmbeddingProviderLabel = savedIngestSettings
+        ? formatEmbeddingProviderLabel(
+            savedIngestSettings.embedding_provider,
+            savedIngestSettings.embedding_openai_compatible_provider,
+        )
+        : "-";
     const previousSettingsSummary = savedIngestSettings
-        ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedIngestSettings.embedding_model}`
+        ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedEmbeddingProviderLabel} | ${savedIngestSettings.embedding_model}`
         : null;
     const canResolveEntitiesBase = !ingesting && allComplete && hasAnyIngested;
     const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
@@ -1612,7 +1619,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                                 lineHeight: 1.5,
                             }}>
                                 {savedIngestSettings?.locked_at
-                                    ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest popup if you want to change chunk settings, prompts, or the embedding model before starting a full rebuild.`
+                                    ? `Locked for this world since ${new Date(savedIngestSettings.locked_at).toLocaleString()}. Use the Re-ingest popup if you want to change chunk settings, prompts, or the embedding provider/model before starting a full rebuild.`
                                     : "This world has not locked ingest settings yet. The snapshot below shows what will be used the next time you start or re-ingest this world."}
                             </div>
                             {previousSettingsSummary && (
@@ -1631,6 +1638,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                             )}
                             <ReadOnlySettingRow label="Chunk Size (chars)" value={savedIngestSettings?.chunk_size_chars?.toLocaleString() ?? "-"} />
                             <ReadOnlySettingRow label="Chunk Overlap (chars)" value={savedIngestSettings?.chunk_overlap_chars?.toLocaleString() ?? "-"} />
+                            <ReadOnlySettingRow label="Embedding Provider" value={savedEmbeddingProviderLabel} />
                             <ReadOnlySettingRow label="World Embedding Model" value={savedIngestSettings?.embedding_model ?? "-"} mono />
                             <ReadOnlySettingRow label="Graph Architect Glean Amount" value={savedIngestSettings?.glean_amount?.toLocaleString() ?? "-"} />
                         </CollapsibleSection>

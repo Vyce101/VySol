@@ -731,8 +731,10 @@ interface ChatSettingsSidebarProps {
     entryTopK: number;
     hops: number;
     maxNodes: number;
-    chatProvider: string;
     sendThinking: boolean;
+    thinkingToggleLabel: string;
+    thinkingToggleHelp: string;
+    showThinkingToggle: boolean;
     chatPrompt: string;
     promptSource: string;
     searchContextMsgs: number;
@@ -756,8 +758,10 @@ function ChatSettingsSidebar({
     entryTopK,
     hops,
     maxNodes,
-    chatProvider,
     sendThinking,
+    thinkingToggleLabel,
+    thinkingToggleHelp,
+    showThinkingToggle,
     chatPrompt,
     promptSource,
     searchContextMsgs,
@@ -786,13 +790,13 @@ function ChatSettingsSidebar({
 
             <Accordion.Root type="multiple" value={openSections} onValueChange={(value) => onOpenSectionsChange(value as SettingsSectionId[])} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <SettingsAccordionSection value="general" title="General Settings" isOpen={openSections.includes("general")}>
-                    {chatProvider === "gemini" && (
+                    {showThinkingToggle && (
                         <div style={{ marginBottom: 14 }}>
                             <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                                 <div>
-                                    <div style={{ fontSize: 13, fontWeight: 500 }}>Send Thinking</div>
+                                    <div style={{ fontSize: 13, fontWeight: 500 }}>{thinkingToggleLabel}</div>
                                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                                        Show Gemini thought blocks in the reply when the model returns them.
+                                        {thinkingToggleHelp}
                                     </div>
                                 </div>
                                 <input
@@ -1048,8 +1052,14 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             }
             if (data.retrieval_graph_hops !== undefined) setHops(data.retrieval_graph_hops);
             if (data.retrieval_max_nodes !== undefined) setMaxNodes(data.retrieval_max_nodes);
-            if (data.chat_provider !== undefined) setChatProvider(data.chat_provider || "gemini");
-            if (data.gemini_chat_send_thinking !== undefined) setSendThinking(parseBooleanSetting(data.gemini_chat_send_thinking));
+                if (data.chat_provider !== undefined) setChatProvider(data.chat_provider || "gemini");
+                if ((data.chat_provider || "gemini") === "groq") {
+                    if (data.groq_chat_include_reasoning !== undefined) {
+                        setSendThinking(parseBooleanSetting(data.groq_chat_include_reasoning));
+                    }
+                } else if (data.gemini_chat_send_thinking !== undefined) {
+                    setSendThinking(parseBooleanSetting(data.gemini_chat_send_thinking));
+                }
             if (data.retrieval_context_messages !== undefined) setSearchContextMsgs(data.retrieval_context_messages);
             if (data.chat_history_messages !== undefined) setChatHistoryMsgs(data.chat_history_messages);
         } catch { /* ignore */ }
@@ -1815,8 +1825,12 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     entryTopK={entryTopK}
                     hops={hops}
                     maxNodes={maxNodes}
-                    chatProvider={chatProvider}
                     sendThinking={sendThinking}
+                    thinkingToggleLabel={chatProvider === "groq" ? "Include Reasoning" : "Send Thinking"}
+                    thinkingToggleHelp={chatProvider === "groq"
+                        ? "Request Groq reasoning and show it after completion when supported."
+                        : "Show Gemini thought blocks in the reply when the model returns them."}
+                    showThinkingToggle={chatProvider === "groq" || chatProvider === "gemini"}
                     chatPrompt={chatPrompt}
                     promptSource={promptSource}
                     searchContextMsgs={searchContextMsgs}
@@ -1841,7 +1855,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     }}
                     onSendThinkingChange={(value) => {
                         setSendThinking(value);
-                        saveRetrievalSettings({ gemini_chat_send_thinking: value });
+                        saveRetrievalSettings(chatProvider === "groq"
+                            ? { groq_chat_include_reasoning: value }
+                            : { gemini_chat_send_thinking: value });
                     }}
                     onSearchContextMsgsChange={(value) => {
                         setSearchContextMsgs(value);

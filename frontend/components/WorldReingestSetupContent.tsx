@@ -28,6 +28,8 @@ export type WorldIngestSetupLayout = "inline" | "modal" | "page";
 export interface WorldIngestSetupDraft {
     chunkSize: string;
     chunkOverlap: string;
+    embeddingProvider: string;
+    embeddingOpenAiProvider: string;
     embeddingModel: string;
     gleanAmount: string;
     prompts: Record<WorldIngestPromptKey, string>;
@@ -57,6 +59,8 @@ export function createWorldIngestSetupDraft(config: WorldIngestConfigResponse): 
     return {
         chunkSize: String(config.ingest_settings.chunk_size_chars),
         chunkOverlap: String(config.ingest_settings.chunk_overlap_chars),
+        embeddingProvider: config.ingest_settings.embedding_provider,
+        embeddingOpenAiProvider: config.ingest_settings.embedding_openai_compatible_provider,
         embeddingModel: config.ingest_settings.embedding_model,
         gleanAmount: String(config.ingest_settings.glean_amount),
         prompts: {
@@ -88,6 +92,8 @@ export function buildIngestSetupSubmission(draft: WorldIngestSetupDraft): Reinge
         ingest_settings: {
             chunk_size_chars: normalizedChunkSize,
             chunk_overlap_chars: normalizedChunkOverlap,
+            embedding_provider: draft.embeddingProvider,
+            embedding_openai_compatible_provider: draft.embeddingOpenAiProvider,
             embedding_model: draft.embeddingModel.trim(),
             glean_amount: normalizedGleanAmount,
         },
@@ -154,6 +160,8 @@ export function WorldIngestSetupForm({
     const isInline = layout === "inline";
     const isInitialIngest = variant === "initial_ingest";
     const showReuseToggle = variant === "reingest" && draft.hasActiveChunkOverrides;
+    const embeddingProviderUnsupported = draft.embeddingProvider === "openai_compatible";
+    const embeddingProviderUnsupportedReason = "OpenAI-compatible > Groq is not available for embeddings yet in this build.";
 
     useEffect(() => {
         if (reuseToggleDisabled && draft.reuseActiveChunkOverrides) {
@@ -286,8 +294,32 @@ export function WorldIngestSetupForm({
                         <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text-primary)" }}>Ingestion Settings</div>
                         <NumberField label="Chunk Size (chars)" value={draft.chunkSize} onChange={(next) => updateDraft({ chunkSize: next })} min={1} />
                         <NumberField label="Chunk Overlap (chars)" value={draft.chunkOverlap} onChange={(next) => updateDraft({ chunkOverlap: next })} min={0} />
+                        <SelectField
+                            label="Embedding Provider"
+                            value={draft.embeddingProvider}
+                            options={[
+                                { value: "gemini", label: "Google (Gemini)" },
+                                { value: "openai_compatible", label: "OpenAI-compatible" },
+                            ]}
+                            onChange={(next) => updateDraft({ embeddingProvider: next })}
+                        />
+                        {draft.embeddingProvider === "openai_compatible" ? (
+                            <SelectField
+                                label="OpenAI-compatible Provider"
+                                value={draft.embeddingOpenAiProvider}
+                                options={[
+                                    { value: "groq", label: "Groq" },
+                                ]}
+                                onChange={(next) => updateDraft({ embeddingOpenAiProvider: next })}
+                            />
+                        ) : null}
                         <TextField label="World Embedding Model" value={draft.embeddingModel} onChange={(next) => updateDraft({ embeddingModel: next })} mono />
                         <NumberField label="Graph Architect Glean Amount" value={draft.gleanAmount} onChange={(next) => updateDraft({ gleanAmount: next })} min={0} />
+                        {embeddingProviderUnsupported ? (
+                            <div style={{ fontSize: 12, color: "var(--error)", lineHeight: 1.45 }}>
+                                {embeddingProviderUnsupportedReason}
+                            </div>
+                        ) : null}
 
                         {showReuseToggle && (
                             <label style={{
@@ -461,8 +493,8 @@ export function WorldIngestSetupForm({
                     ))}
                     <button
                         onClick={onSubmit}
-                        disabled={submitting || submitDisabled}
-                        title={submitDisabled && submitDisabledReason ? submitDisabledReason : undefined}
+                        disabled={submitting || submitDisabled || embeddingProviderUnsupported}
+                        title={submitDisabled && submitDisabledReason ? submitDisabledReason : embeddingProviderUnsupported ? embeddingProviderUnsupportedReason : undefined}
                         style={{
                             display: "inline-flex",
                             alignItems: "center",
@@ -475,17 +507,17 @@ export function WorldIngestSetupForm({
                             color: "var(--primary-contrast)",
                             fontSize: 13,
                             fontWeight: 700,
-                            opacity: submitting || submitDisabled ? 0.7 : 1,
-                            cursor: submitting || submitDisabled ? "not-allowed" : "pointer",
+                            opacity: submitting || submitDisabled || embeddingProviderUnsupported ? 0.7 : 1,
+                            cursor: submitting || submitDisabled || embeddingProviderUnsupported ? "not-allowed" : "pointer",
                             width: isInline ? "100%" : undefined,
                         }}
                     >
                         {submitting && <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} />}
                         {resolvedSubmitLabel}
                     </button>
-                    {isInline && submitDisabled && submitDisabledReason && (
+                    {isInline && ((submitDisabled && submitDisabledReason) || embeddingProviderUnsupported) && (
                         <div style={{ fontSize: 12, color: "var(--text-subtle)", lineHeight: 1.45 }}>
-                            {submitDisabledReason}
+                            {embeddingProviderUnsupported ? embeddingProviderUnsupportedReason : submitDisabledReason}
                         </div>
                     )}
                 </div>
@@ -506,6 +538,8 @@ export default function WorldReingestSetupContent({
     const [draft, setDraft] = useState<WorldIngestSetupDraft>({
         chunkSize: "4000",
         chunkOverlap: "150",
+        embeddingProvider: "gemini",
+        embeddingOpenAiProvider: "groq",
         embeddingModel: "gemini-embedding-2-preview",
         gleanAmount: "1",
         prompts: { ...EMPTY_PROMPTS },
@@ -670,6 +704,41 @@ function TextField({
                     fontFamily: mono ? "monospace" : undefined,
                 }}
             />
+        </div>
+    );
+}
+
+function SelectField({
+    label,
+    value,
+    options,
+    onChange,
+}: {
+    label: string;
+    value: string;
+    options: Array<{ value: string; label: string }>;
+    onChange: (next: string) => void;
+}) {
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={{ fontSize: 12, color: "var(--text-subtle)" }}>{label}</label>
+            <select
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+                style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--background-secondary)",
+                    color: "var(--text-primary)",
+                    fontSize: 13,
+                }}
+            >
+                {options.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+            </select>
         </div>
     );
 }

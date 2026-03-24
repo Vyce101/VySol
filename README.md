@@ -16,6 +16,8 @@ You can ingest plain-text source material, control how the graph is built, resol
 
 Entity resolution supports a fast `Exact only` cleanup pass or a fuller `Exact + chooser/combiner` workflow after ingestion, plus per-run unique-node embedding batch and delay controls.
 
+Global settings now split into a preset-backed `Configuration` tab and a shared `Key Library`. Gemini and Groq can be selected per text-model slot, IntenseRP Next stays chat-only, and embedding settings are provider-aware even though this build still only enables Gemini embeddings.
+
 This project is licensed under the GNU AGPLv3. Companies requiring a commercial license should see [COMMERCIAL.md](COMMERCIAL.md).
 
 ## Supported OS
@@ -33,6 +35,7 @@ It gives you one place to:
 - Extract entities and relationships into a graph
 - Rebuild vectors or fully rebuild ingests when needed
 - Resolve duplicate entities after ingestion
+- Switch between saved global configuration presets while reusing one shared per-provider credential library
 - Repair blocked chunks with the Safety Review Queue and reusable chunk-body overrides
 - Chat against chunk retrieval and graph context together
 - Trace every graph edge back to its source document and chunk, useful for chronological documents

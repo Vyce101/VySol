@@ -4,8 +4,11 @@
 
 1. Run [VySol.bat](../VySol.bat). It will launch backend/frontend and open a browser tab automatically.
 2. On the home page, click the top-right settings icon.
-3. Add your Gemini API keys.
-4. Leave model defaults as-is for your first run (listed below).
+3. Open `Key Library` and add the provider credentials you plan to use:
+   - Gemini API keys for Gemini-backed chat/extraction/entity-resolution/embeddings
+   - Groq API keys for Groq-backed chat/extraction/entity-resolution
+   - An IntenseRP base URL if you want chat to use IntenseRP Next
+4. Go back to `Configuration`. Leave the locked `Default` preset as-is for your first run, or save a new preset later if you want multiple global setups.
 5. Create a world.
 6. Upload any `.txt` document.
 7. Start ingestion and wait until it shows complete.
@@ -13,11 +16,14 @@
 
 After ingestion, you can optionally run Entity Resolution with either `Exact only` or `Exact + chooser/combiner`, and tune its unique-node embedding batch and delay controls per run.
 
-API key note:
+Credential note:
 
 - Limits are tied to project context.
 - Multiple keys from the same project share that project's limits.
 - Splitting keys across projects can help isolate limits, but abusive or policy-violating traffic can still trigger enforcement across your usage.
+- `Configuration` presets are separate from the shared `Key Library`.
+- The locked `Default` preset is the baseline global configuration.
+- Keys and base URLs stored in `Key Library` are shared across every preset for that provider.
 
 Default models (current):
 
@@ -25,8 +31,10 @@ Default models (current):
 - Chat Model: `gemini-3-flash-preview` with `high` thinking
 - Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
 - Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
+- Default Embedding Provider: `Google (Gemini)`
 - Default Embedding Model: `gemini-embedding-2-preview`
 - Gemini `Send Thinking`: `on` by default
+- Groq `Include Reasoning`: `off` by default when Groq chat is selected
 
 Default chat settings (current):
 
@@ -94,5 +102,15 @@ The repo now includes `frontend/.env.local.example` with that default value for 
 
 - `settings/settings.json` is created automatically when the backend first needs a live settings file
 - Local worlds, graphs, vectors, and chat history are stored under `saved_worlds/`
-- Gemini API keys added in the app are stored locally in `settings/settings.json`
+- Provider credentials added in `Key Library` are stored locally in `settings/settings.json`
+- Gemini and Groq can be selected per text-model slot in `Configuration`
+- Gemini-only controls such as `Disable Safety Filters` only appear when a Gemini slot is selected
+- Groq-only controls such as reasoning effort and chat `Include Reasoning` only appear when Groq is selected
+- Embedding provider settings exist globally and per world, but this build still blocks `OpenAI-compatible > Groq` for embeddings until a real embedding adapter exists
 - This public repo does not ship with live secrets, saved worlds, imported corpora, or personal runtime data
+
+Environment fallbacks:
+
+- `GEMINI_API_KEY` can still act as a local Gemini fallback if no ready Gemini library entry is enabled
+- `GROQ_API_KEY` can still act as a local Groq fallback if no ready Groq library entry is enabled
+- `INTENSERP_BASE_URL` can still act as a local IntenseRP endpoint fallback

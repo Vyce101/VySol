@@ -12,13 +12,23 @@ from google import genai
 
 from .config import (
     get_world_embedding_model,
+    get_world_embedding_provider,
     load_settings,
+    resolve_slot_provider,
     set_world_embedding_model,
+    set_world_ingest_settings,
     world_chroma_dir,
 )
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
 
 logger = logging.getLogger(__name__)
+
+
+def _get_provider_key_manager(provider: str):
+    try:
+        return get_key_manager(provider)
+    except TypeError:
+        return get_key_manager()
 
 
 class VectorStoreReadError(RuntimeError):
@@ -32,9 +42,11 @@ class VectorStore:
         self,
         world_id: str,
         embedding_model: str | None = None,
+        embedding_provider: str | None = None,
         collection_suffix: str | None = None,
     ):
         self.world_id = world_id
+        self.embedding_provider = embedding_provider or get_world_embedding_provider(world_id)
         self.embedding_model = embedding_model or get_world_embedding_model(world_id)
         self.collection_suffix = collection_suffix
         self.collection_key = str(collection_suffix or "chunks")
@@ -93,10 +105,16 @@ class VectorStore:
         model = entry.get("embedding_model")
         return str(model) if model else None
 
+    def recorded_embedding_provider(self) -> str | None:
+        entry = self._get_manifest_entry()
+        provider = entry.get("embedding_provider")
+        return str(provider) if provider else None
+
     def _set_recorded_embedding_model(self, embedding_model: str) -> None:
         manifest = self._load_manifest()
         collections = manifest.setdefault("collections", {})
         collections[self.collection_key] = {
+            "embedding_provider": str(self.embedding_provider),
             "embedding_model": str(embedding_model),
             "collection_name": self.collection_name,
         }
@@ -111,12 +129,15 @@ class VectorStore:
 
     def _rebuild_required_message(self) -> str:
         return (
-            f"This world's {self.collection_kind} embeddings were built with a different embedding model. "
-            "Use Re-embed All or Rechunk And Re-ingest to rebuild chunk and node vectors with the current embedding model."
+            f"This world's {self.collection_kind} embeddings were built with a different embedding model or provider. "
+            "Use Re-embed All or Rechunk And Re-ingest to rebuild chunk and node vectors with the current embedding backend."
         )
 
     def _ensure_collection_model_matches(self) -> None:
+        recorded_provider = self.recorded_embedding_provider()
         recorded_model = self.recorded_embedding_model()
+        if recorded_provider and recorded_provider != self.embedding_provider:
+            raise RuntimeError(self._rebuild_required_message())
         if recorded_model and recorded_model != self.embedding_model:
             raise RuntimeError(self._rebuild_required_message())
 
@@ -128,6 +149,8 @@ class VectorStore:
         return client
 
     def _candidate_embedding_models(self) -> list[str]:
+        if self.embedding_provider != "gemini":
+            return [self.embedding_model]
         settings_model = load_settings().get("embedding_model")
 
         candidates: list[str] = [self.embedding_model]
@@ -144,7 +167,15 @@ class VectorStore:
     def _record_effective_embedding_model(self, candidates: list[str], model_name: str) -> None:
         if model_name != self.embedding_model:
             self.embedding_model = model_name
-            set_world_embedding_model(self.world_id, model_name)
+            set_world_ingest_settings(
+                self.world_id,
+                {
+                    "embedding_provider": self.embedding_provider,
+                    "embedding_model": model_name,
+                },
+                lock=False,
+                touch=False,
+            )
             logger.warning(
                 "Switched embedding model for world %s from %s to %s",
                 self.world_id,
@@ -153,20 +184,24 @@ class VectorStore:
             )
 
     def _lookup_key_index(self, api_key: str, used_indices: set[int]) -> int | None:
-        key_manager = get_key_manager()
+        key_manager = _get_provider_key_manager(self.embedding_provider)
         for index, configured_key in enumerate(key_manager.api_keys):
             if configured_key == api_key and index not in used_indices:
                 return index
         return None
 
     def embed_texts(self, texts: list[str], api_key: str) -> list[list[float]]:
-        """Embed one or more texts using Google's embedding model."""
+        """Embed one or more texts using the configured embedding provider."""
         if not texts:
             return []
+        if self.embedding_provider != "gemini":
+            raise RuntimeError(
+                f"{self.embedding_provider} is selected for embeddings, but this build only supports Gemini embeddings right now."
+            )
 
         candidates = self._candidate_embedding_models()
         last_error: Exception | None = None
-        key_manager = get_key_manager()
+        key_manager = _get_provider_key_manager(self.embedding_provider)
         current_api_key = api_key
         current_key_index = self._lookup_key_index(current_api_key, set())
         used_key_indices: set[int] = set()

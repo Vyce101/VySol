@@ -12,8 +12,11 @@ from pydantic import BaseModel
 from typing import Literal
 
 from core.config import (
+    PROVIDER_REGISTRY,
+    SLOT_EMBEDDING,
     get_world_ingest_prompt_states,
     get_world_ingest_settings,
+    resolve_slot_provider,
     set_world_ingest_prompt_overrides,
     set_world_ingest_settings,
 )
@@ -75,7 +78,7 @@ def _merge_requested_ingest_settings(current: dict, override: dict | None) -> di
     merged = dict(current)
     if not isinstance(override, dict):
         return merged
-    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_model", "glean_amount"):
+    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider", "embedding_openai_compatible_provider", "embedding_model", "glean_amount"):
         value = override.get(key)
         if value in (None, ""):
             continue
@@ -87,6 +90,16 @@ def _merge_requested_ingest_settings(current: dict, override: dict | None) -> di
         else:
             merged[key] = str(value)
     return merged
+
+
+def _ensure_supported_embedding_backend(ingest_settings: dict) -> None:
+    provider = resolve_slot_provider(ingest_settings, SLOT_EMBEDDING)
+    provider_info = PROVIDER_REGISTRY.get(provider, {})
+    if not provider_info.get("supports_embedding", False):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{provider_info.get('display_name', provider)} is not available for embeddings yet. Choose a supported embedding provider first.",
+        )
 
 
 def _same_chunk_map(left: dict, right: dict) -> bool:
@@ -118,6 +131,7 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
     operation = req.operation
     current_world_settings = get_world_ingest_settings(meta=meta)
     requested_world_settings = _merge_requested_ingest_settings(current_world_settings, req.ingest_settings)
+    _ensure_supported_embedding_backend(requested_world_settings)
     has_active_chunk_overrides = int(get_safety_review_summary(world_id).get("active_override_reviews", 0) or 0) > 0
     allow_active_chunk_overrides = bool(req.use_active_chunk_overrides) and has_active_chunk_overrides
 
@@ -152,15 +166,21 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
 
         locked_settings = get_world_ingest_settings(meta=meta)
         if req.ingest_settings:
-            for key in ("chunk_size_chars", "chunk_overlap_chars"):
+            for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider", "embedding_openai_compatible_provider"):
                 value = req.ingest_settings.get(key)
                 if value in (None, ""):
                     continue
                 try:
-                    if int(value) != int(locked_settings.get(key)):
+                    if key in {"chunk_size_chars", "chunk_overlap_chars"}:
+                        if int(value) != int(locked_settings.get(key)):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Re-embed All uses this world's locked chunk settings. Run Re-ingest to change chunk settings.",
+                            )
+                    elif str(value) != str(locked_settings.get(key)):
                         raise HTTPException(
                             status_code=400,
-                            detail="Re-embed All uses this world's locked chunk settings. Run Re-ingest to change chunk settings.",
+                            detail="Re-embed All uses this world's locked embedding provider. Run Re-ingest to change embedding backends.",
                         )
                 except (TypeError, ValueError):
                     raise HTTPException(

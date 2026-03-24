@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 import threading
 import time
@@ -83,18 +82,18 @@ def classify_transient_provider_error(exc: Exception | str) -> str | None:
 class KeyManager:
     """Manages multiple API keys with rotation and cooldown."""
 
-    def __init__(self, api_keys: list[str] | None = None, mode: str = "FAIL_OVER"):
-        from .config import get_enabled_api_keys, load_settings
+    def __init__(self, api_keys: list[str] | None = None, mode: str = "FAIL_OVER", provider: str = "gemini"):
+        from .config import get_provider_pool, load_settings
 
+        self.provider = provider
         if api_keys is None:
             settings = load_settings()
-            api_keys = get_enabled_api_keys(settings)
+            api_keys = [
+                str(entry.get("api_key") or "")
+                for entry in get_provider_pool(provider)
+                if str(entry.get("api_key") or "").strip()
+            ]
             mode = settings.get("key_rotation_mode", "FAIL_OVER")
-
-        if not api_keys:
-            env_key = os.environ.get("GEMINI_API_KEY", "")
-            if env_key and env_key != "your_key_here":
-                api_keys = [env_key]
 
         self.api_keys: list[str] = api_keys
         self.mode: str = mode
@@ -129,7 +128,7 @@ class KeyManager:
         """Return (key, index). Raises AllKeysInCooldownError if all keys are cooling down."""
         with self._lock:
             if not self.api_keys:
-                raise RuntimeError("No API keys configured. Add keys in Settings or set GEMINI_API_KEY env var.")
+                raise RuntimeError(f"No API keys configured for {self.provider}. Add keys in Key Library.")
 
             key_count = len(self.api_keys)
 
@@ -182,12 +181,17 @@ class KeyManager:
         )
 
 
+_key_managers: dict[str, KeyManager] = {}
 _key_manager: KeyManager | None = None
 
 
-def get_key_manager(force_reload: bool = False) -> KeyManager:
-    """Get or create the global KeyManager singleton."""
-    global _key_manager
-    if _key_manager is None or force_reload:
-        _key_manager = KeyManager()
-    return _key_manager
+def get_key_manager(provider: str = "gemini", force_reload: bool = False) -> KeyManager:
+    """Get or create the provider-specific KeyManager singleton."""
+    global _key_managers, _key_manager
+    if provider == "gemini" and _key_manager is None:
+        _key_managers.pop("gemini", None)
+    if force_reload or provider not in _key_managers:
+        _key_managers[provider] = KeyManager(provider=provider)
+        if provider == "gemini":
+            _key_manager = _key_managers[provider]
+    return _key_managers[provider]

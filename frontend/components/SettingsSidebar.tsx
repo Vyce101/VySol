@@ -1,47 +1,137 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { X, Plus, Trash2, KeyRound, Pencil, Info } from "lucide-react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
+import { Info, KeyRound, Plus, Trash2, X } from "lucide-react";
+
 import { apiFetch } from "@/lib/api";
 import { applyTheme, normalizeTheme, type UITheme } from "@/lib/theme";
 
-interface KeyEntry {
+type SlotKey = "flash" | "chat" | "entity_chooser" | "entity_combiner" | "embedding";
+
+interface ProviderFamilyOption {
     value: string;
-    enabled: boolean;
+    label: string;
+}
+
+interface ProviderFieldMeta {
+    name: string;
+    label: string;
+    secret?: boolean;
+    multiline?: boolean;
+}
+
+interface ProviderMeta {
+    id: string;
+    display_name: string;
+    family: string;
+    supported_slots: string[];
+    required_credential_fields: string[];
+    credential_fields: ProviderFieldMeta[];
+    supports_embedding: boolean;
+    supports_gemini_safety: boolean;
+    supports_gemini_thinking: boolean;
+    supports_groq_reasoning: boolean;
+}
+
+interface ProviderCapabilities {
+    providers: Record<string, ProviderMeta>;
+    families: Record<string, { default: string; options: ProviderFamilyOption[] }>;
+    openai_compatible_providers: Array<{ value: string; label: string }>;
+}
+
+interface ProviderStatus {
+    slot: SlotKey;
+    provider: string;
+    provider_family: string;
+    ok: boolean;
+    severity: "ok" | "error";
+    message: string;
+    supports_gemini_safety: boolean;
+    supports_gemini_thinking: boolean;
+    supports_groq_reasoning: boolean;
+}
+
+interface PresetSummary {
+    id: string;
+    name: string;
+    locked?: boolean;
 }
 
 interface SettingsData {
-    api_keys: KeyEntry[];
-    api_key_count: number;
-    api_key_active_count: number;
     key_rotation_mode: string;
     default_model_flash: string;
+    default_model_flash_provider: string;
+    default_model_flash_openai_compatible_provider: string;
     default_model_flash_thinking_level: string;
     default_model_flash_thinking_manual: string;
+    default_model_flash_groq_reasoning_effort: string;
     default_model_chat: string;
+    default_model_chat_provider: string;
+    default_model_chat_openai_compatible_provider: string;
     default_model_chat_thinking_level: string;
     default_model_chat_thinking_manual: string;
+    default_model_chat_groq_reasoning_effort: string;
     default_model_entity_chooser: string;
+    default_model_entity_chooser_provider: string;
+    default_model_entity_chooser_openai_compatible_provider: string;
     default_model_entity_chooser_thinking_level: string;
     default_model_entity_chooser_thinking_manual: string;
+    default_model_entity_chooser_groq_reasoning_effort: string;
     default_model_entity_combiner: string;
+    default_model_entity_combiner_provider: string;
+    default_model_entity_combiner_openai_compatible_provider: string;
     default_model_entity_combiner_thinking_level: string;
     default_model_entity_combiner_thinking_manual: string;
+    default_model_entity_combiner_groq_reasoning_effort: string;
+    embedding_provider: string;
+    embedding_openai_compatible_provider: string;
     embedding_model: string;
     chunk_size_chars: number;
     chunk_overlap_chars: number;
-    retrieval_top_k_chunks: number;
-    retrieval_graph_hops: number;
-    retrieval_max_nodes: number;
-    disable_safety_filters: boolean;
-    ui_theme: UITheme;
+    glean_amount: number;
     graph_extraction_concurrency: number;
     graph_extraction_cooldown_seconds: number;
     embedding_concurrency: number;
     embedding_cooldown_seconds: number;
-    chat_provider: string;
-    intenserp_base_url: string;
+    gemini_disable_safety_filters: boolean;
+    groq_chat_include_reasoning: boolean;
+    gemini_chat_send_thinking: boolean;
+    ui_theme: UITheme;
     intenserp_model_id: string;
+    provider_status: Record<string, ProviderStatus>;
+    provider_registry: ProviderCapabilities;
+    settings_presets: PresetSummary[];
+    active_settings_preset_id: string;
+    active_settings_preset_name: string;
+    active_settings_preset_locked?: boolean;
+}
+
+interface ProviderLibraryEntry {
+    id: string;
+    label: string;
+    enabled: boolean;
+    required_ready: boolean;
+    has_api_key?: boolean;
+    api_key_masked?: string;
+    base_url?: string;
+}
+
+interface ProviderLibraryPayload {
+    provider: string;
+    display_name: string;
+    credential_fields: ProviderFieldMeta[];
+    entries: ProviderLibraryEntry[];
+    env_fallback?: {
+        label: string;
+        enabled: boolean;
+        has_api_key?: boolean;
+        api_key_masked?: string;
+        base_url?: string;
+    } | null;
+}
+
+interface KeyLibraryResponse {
+    providers: Record<string, ProviderLibraryPayload>;
 }
 
 const GEMINI_3_THINKING_LEVELS: Array<{ prefix: string; levels: string[] }> = [
@@ -50,7 +140,13 @@ const GEMINI_3_THINKING_LEVELS: Array<{ prefix: string; levels: string[] }> = [
     { prefix: "gemini-3-flash", levels: ["minimal", "low", "medium", "high"] },
 ];
 
-const THINKING_TOOLTIP_TEXT = "Use one raw value only. Supported Gemini 3 models use the dropdown. In manual mode enter digits like 1024 for budget, or plain text like high or minimal for level. Do not type code such as thinkingLevel=high.";
+const THINKING_TOOLTIP_TEXT = "Gemini 3 models use the dropdown when supported. Manual mode accepts either a named level or a numeric budget.";
+const GROQ_REASONING_OPTIONS = [
+    { value: "", label: "Use model default" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+];
 
 function getSupportedGeminiThinkingLevels(modelName: string): string[] {
     const normalized = modelName.trim().toLowerCase();
@@ -59,619 +155,722 @@ function getSupportedGeminiThinkingLevels(modelName: string): string[] {
     return match ? [...match.levels] : [];
 }
 
+function resolveSelectedProvider(settings: SettingsData, slot: SlotKey): string {
+    if (slot === "flash") {
+        return settings.default_model_flash_provider === "openai_compatible"
+            ? settings.default_model_flash_openai_compatible_provider
+            : settings.default_model_flash_provider;
+    }
+    if (slot === "chat") {
+        return settings.default_model_chat_provider === "openai_compatible"
+            ? settings.default_model_chat_openai_compatible_provider
+            : settings.default_model_chat_provider;
+    }
+    if (slot === "entity_chooser") {
+        return settings.default_model_entity_chooser_provider === "openai_compatible"
+            ? settings.default_model_entity_chooser_openai_compatible_provider
+            : settings.default_model_entity_chooser_provider;
+    }
+    if (slot === "entity_combiner") {
+        return settings.default_model_entity_combiner_provider === "openai_compatible"
+            ? settings.default_model_entity_combiner_openai_compatible_provider
+            : settings.default_model_entity_combiner_provider;
+    }
+    return settings.embedding_provider === "openai_compatible"
+        ? settings.embedding_openai_compatible_provider
+        : settings.embedding_provider;
+}
+
+function formatSupportedSlotLabel(slot: string): string {
+    if (slot === "flash") return "Graph Architect";
+    if (slot === "chat") return "Chat";
+    if (slot === "entity_chooser") return "Entity Chooser";
+    if (slot === "entity_combiner") return "Entity Combiner";
+    if (slot === "embedding") return "Default Embeddings";
+    return slot;
+}
+
+const iconButtonStyle = {
+    background: "transparent",
+    border: "1px solid var(--border)",
+    color: "var(--text-subtle)",
+    borderRadius: 10,
+    width: 34,
+    height: 34,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+} as const;
+
+const inputStyle = {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid var(--border)",
+    background: "var(--background-secondary)",
+    color: "var(--text-primary)",
+    fontSize: 13,
+    fontFamily: "monospace",
+} as const;
+
+const selectStyle = {
+    ...inputStyle,
+    cursor: "pointer",
+} as const;
+
+const labelStyle = {
+    fontSize: 12,
+    color: "var(--text-subtle)",
+} as const;
+
+const rowCardStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid var(--border)",
+    background: "var(--background)",
+} as const;
+
 export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const [settings, setSettings] = useState<SettingsData | null>(null);
+    const [library, setLibrary] = useState<KeyLibraryResponse | null>(null);
+    const [selectedTab, setSelectedTab] = useState<"configuration" | "key_library">("configuration");
+    const [selectedProvider, setSelectedProvider] = useState("gemini");
     const [loadError, setLoadError] = useState<string | null>(null);
-    const [keys, setKeys] = useState<KeyEntry[]>([]);
-    const [newKey, setNewKey] = useState("");
-    const [rotationMode, setRotationMode] = useState("FAIL_OVER");
-    const [flashModel, setFlashModel] = useState("");
-    const [flashThinkingLevel, setFlashThinkingLevel] = useState("");
-    const [flashThinkingManual, setFlashThinkingManual] = useState("");
-    const [chatModel, setChatModel] = useState("");
-    const [chatThinkingLevel, setChatThinkingLevel] = useState("");
-    const [chatThinkingManual, setChatThinkingManual] = useState("");
-    const [chooserModel, setChooserModel] = useState("");
-    const [chooserThinkingLevel, setChooserThinkingLevel] = useState("");
-    const [chooserThinkingManual, setChooserThinkingManual] = useState("");
-    const [combinerModel, setCombinerModel] = useState("");
-    const [combinerThinkingLevel, setCombinerThinkingLevel] = useState("");
-    const [combinerThinkingManual, setCombinerThinkingManual] = useState("");
-    const [embedModel, setEmbedModel] = useState("");
-    const [disableSafety, setDisableSafety] = useState(false);
-    const [uiTheme, setUiTheme] = useState<UITheme>("dark");
-    const [graphExtractionBatchSize, setGraphExtractionBatchSize] = useState(4);
-    const [graphExtractionSlotDelay, setGraphExtractionSlotDelay] = useState(0);
-    const [embeddingBatchSize, setEmbeddingBatchSize] = useState(8);
-    const [embeddingSlotDelay, setEmbeddingSlotDelay] = useState(0);
-    const [chatProvider, setChatProvider] = useState("gemini");
-    const [intenserpUrl, setIntenserpUrl] = useState("http://127.0.0.1:7777/v1");
-    const [intenserpModelId, setIntenserpModelId] = useState("glm-chat");
     const [toast, setToast] = useState("");
+    const [newCredentialLabel, setNewCredentialLabel] = useState("");
+    const [newCredentialValues, setNewCredentialValues] = useState<Record<string, string>>({});
 
-    async function loadSettings() {
+    const showToast = (message: string) => {
+        setToast(message);
+        window.setTimeout(() => setToast(""), 2000);
+    };
+
+    const loadAll = async () => {
         try {
-            const data = await apiFetch<SettingsData>("/settings");
-            setSettings(data);
+            const [nextSettings, nextLibrary] = await Promise.all([
+                apiFetch<SettingsData>("/settings"),
+                apiFetch<KeyLibraryResponse>("/settings/key-library"),
+            ]);
+            setSettings(nextSettings);
+            setLibrary(nextLibrary);
+            setSelectedProvider((current) => nextLibrary.providers[current] ? current : Object.keys(nextLibrary.providers)[0] ?? "gemini");
             setLoadError(null);
-            setKeys(data.api_keys || []);
-            setRotationMode(data.key_rotation_mode);
-            setFlashModel(data.default_model_flash);
-            setFlashThinkingLevel(data.default_model_flash_thinking_level || "");
-            setFlashThinkingManual(data.default_model_flash_thinking_manual || "");
-            setChatModel(data.default_model_chat);
-            setChatThinkingLevel(data.default_model_chat_thinking_level || "");
-            setChatThinkingManual(data.default_model_chat_thinking_manual || "");
-            setChooserModel(data.default_model_entity_chooser);
-            setChooserThinkingLevel(data.default_model_entity_chooser_thinking_level || "");
-            setChooserThinkingManual(data.default_model_entity_chooser_thinking_manual || "");
-            setCombinerModel(data.default_model_entity_combiner);
-            setCombinerThinkingLevel(data.default_model_entity_combiner_thinking_level || "");
-            setCombinerThinkingManual(data.default_model_entity_combiner_thinking_manual || "");
-            setEmbedModel(data.embedding_model);
-            setDisableSafety(data.disable_safety_filters);
-            const nextTheme = normalizeTheme(data.ui_theme);
-            setUiTheme(nextTheme);
-            applyTheme(nextTheme);
-            setGraphExtractionBatchSize(data.graph_extraction_concurrency ?? 4);
-            setGraphExtractionSlotDelay(data.graph_extraction_cooldown_seconds ?? 0);
-            setEmbeddingBatchSize(data.embedding_concurrency ?? 8);
-            setEmbeddingSlotDelay(data.embedding_cooldown_seconds ?? 0);
-            setChatProvider(data.chat_provider || "gemini");
-            setIntenserpUrl(data.intenserp_base_url || "http://127.0.0.1:7777/v1");
-            setIntenserpModelId(data.intenserp_model_id || "glm-chat");
-        } catch (err: unknown) {
-            setLoadError((err as Error).message || "Could not load settings.");
+            applyTheme(normalizeTheme(nextSettings.ui_theme));
+        } catch (error: unknown) {
+            setLoadError((error as Error).message || "Could not load settings.");
         }
-    }
+    };
 
     /* eslint-disable react-hooks/set-state-in-effect */
     useEffect(() => {
-        void loadSettings();
+        void loadAll();
     }, []);
     /* eslint-enable react-hooks/set-state-in-effect */
 
-    const showToast = (msg: string) => {
-        setToast(msg);
-        setTimeout(() => setToast(""), 2000);
-    };
-
     const saveField = async (updates: Record<string, unknown>) => {
         try {
-            await apiFetch("/settings", {
+            const nextSettings = await apiFetch<SettingsData>("/settings", {
                 method: "POST",
                 body: JSON.stringify(updates),
             });
+            setSettings(nextSettings);
+            applyTheme(normalizeTheme(nextSettings.ui_theme));
             showToast("Saved");
-            if ("api_keys" in updates && Array.isArray(updates.api_keys)) {
-                const nextKeys = updates.api_keys as KeyEntry[];
-                setSettings((current) => current ? {
-                    ...current,
-                    api_key_count: nextKeys.length,
-                    api_key_active_count: nextKeys.filter((entry) => entry.enabled).length,
-                } : current);
-            }
         } catch {
             showToast("Save failed");
         }
     };
 
-    const addKey = async () => {
-        if (!newKey.trim()) return;
-        const updated = [...keys, { value: newKey.trim(), enabled: true }];
-        setKeys(updated);
-        setNewKey("");
-        await saveField({ api_keys: updated });
+    const refreshKeyLibrary = async () => {
+        const nextLibrary = await apiFetch<KeyLibraryResponse>("/settings/key-library");
+        setLibrary(nextLibrary);
     };
 
-    const removeKey = async (idx: number) => {
-        const updated = keys.filter((_, i) => i !== idx);
-        setKeys(updated);
-        await saveField({ api_keys: updated });
+    const handlePresetSwitch = async (presetId: string) => {
+        await apiFetch(`/settings/presets/${presetId}/activate`, { method: "POST" });
+        await loadAll();
+        showToast("Preset applied");
     };
 
-    const toggleKey = async (idx: number) => {
-        const updated = keys.map((key, i) => (
-            i === idx ? { ...key, enabled: !key.enabled } : key
-        ));
-        setKeys(updated);
-        await saveField({ api_keys: updated });
+    const handlePresetSaveAs = async () => {
+        const name = window.prompt("New preset name", `${settings?.active_settings_preset_name ?? "Preset"} Copy`);
+        if (!name?.trim()) return;
+        await apiFetch("/settings/presets", {
+            method: "POST",
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        await loadAll();
+        showToast("Preset saved");
     };
+
+    const handlePresetRename = async () => {
+        if (!settings) return;
+        const name = window.prompt("Rename preset", settings.active_settings_preset_name);
+        if (!name?.trim()) return;
+        await apiFetch(`/settings/presets/${settings.active_settings_preset_id}/rename`, {
+            method: "POST",
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        await loadAll();
+        showToast("Preset renamed");
+    };
+
+    const selectedLibrary = library?.providers[selectedProvider] ?? null;
+    const selectedProviderMeta = settings?.provider_registry.providers[selectedProvider];
+
+    const addCredential = async () => {
+        if (!selectedLibrary) return;
+        const body: Record<string, unknown> = {
+            label: newCredentialLabel.trim() || undefined,
+            enabled: true,
+        };
+        for (const field of selectedLibrary.credential_fields) {
+            const value = newCredentialValues[field.name]?.trim();
+            if (value) body[field.name] = value;
+        }
+        await apiFetch(`/settings/key-library/${selectedProvider}`, {
+            method: "POST",
+            body: JSON.stringify(body),
+        });
+        setNewCredentialLabel("");
+        setNewCredentialValues({});
+        await Promise.all([loadAll(), refreshKeyLibrary()]);
+        showToast("Credential saved");
+    };
+
+    const toggleCredential = async (credentialId: string, enabled: boolean) => {
+        await apiFetch(`/settings/key-library/${selectedProvider}/${credentialId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ enabled }),
+        });
+        await Promise.all([loadAll(), refreshKeyLibrary()]);
+    };
+
+    const deleteCredential = async (credentialId: string) => {
+        await apiFetch(`/settings/key-library/${selectedProvider}/${credentialId}`, { method: "DELETE" });
+        await Promise.all([loadAll(), refreshKeyLibrary()]);
+    };
+
+    const anyGeminiSelected = useMemo(() => {
+        if (!settings) return false;
+        return (["flash", "chat", "entity_chooser", "entity_combiner"] as SlotKey[]).some(
+            (slot) => resolveSelectedProvider(settings, slot) === "gemini"
+        );
+    }, [settings]);
+
+    if (!settings && loadError) {
+        return (
+            <Overlay onClose={onClose}>
+                <div style={{ color: "var(--text-primary)" }}>{loadError}</div>
+            </Overlay>
+        );
+    }
 
     return (
-        <div
-            style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", justifyContent: "flex-end" }}
-            onClick={onClose}
-        >
-            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)" }} />
-            <div
-                onClick={(e) => e.stopPropagation()}
-                className="animate-slide-in"
-                style={{
-                    position: "relative", width: 480, height: "100vh", background: "var(--card)",
-                    borderLeft: "1px solid var(--border)", overflowY: "auto", padding: 24,
-                }}
-            >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-                    <h2 style={{ fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
-                        <KeyRound size={20} style={{ color: "var(--primary)" }} /> Settings
-                    </h2>
-                    <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-subtle)", cursor: "pointer" }}>
-                        <X size={20} />
-                    </button>
-                </div>
-
-                {!settings && loadError ? (
-                    <div
-                        style={{
-                            display: "grid",
-                            gap: 12,
-                            background: "var(--background-secondary)",
-                            border: "1px solid var(--border)",
-                            borderRadius: "var(--radius)",
-                            padding: 16,
-                        }}
-                    >
-                        <div style={{ display: "grid", gap: 6 }}>
-                            <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)", margin: 0 }}>
-                                Could not load settings
-                            </h3>
-                            <p style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text-subtle)", margin: 0 }}>
-                                {loadError}
-                            </p>
-                            <p style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)", margin: 0 }}>
-                                Your saved settings may still exist on disk, but the app cannot confirm that until the backend responds.
-                            </p>
-                        </div>
-                        <div>
-                            <button
-                                onClick={() => void loadSettings()}
-                                style={{
-                                    border: "1px solid var(--border)",
-                                    borderRadius: "var(--radius)",
-                                    background: "var(--card)",
-                                    color: "var(--text-primary)",
-                                    padding: "10px 14px",
-                                    cursor: "pointer",
-                                    fontWeight: 600,
-                                }}
-                            >
-                                Retry
-                            </button>
-                        </div>
-                    </div>
-                ) : null}
-
-                {!settings && !loadError ? (
-                    <div style={{ fontSize: 13, color: "var(--text-subtle)", marginBottom: 16 }}>
-                        Loading settings...
-                    </div>
-                ) : null}
-
-                {settings ? (
-                <>
-                <Section title="API Keys">
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
-                        Add Gemini API keys. Keys are stored in settings.json on disk. {settings && `(${settings.api_key_active_count} active / ${settings.api_key_count} stored)`}
-                    </p>
-
-                    {keys.map((key, i) => (
-                        <div
-                            key={i}
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                                marginBottom: 8,
-                                opacity: key.enabled ? 1 : 0.6,
-                            }}
-                        >
-                            <input
-                                value={`********${key.value.slice(-4)}`}
-                                readOnly
-                                style={{
-                                    flex: 1,
-                                    fontFamily: "monospace",
-                                    fontSize: 13,
-                                    background: key.enabled ? "var(--background-secondary)" : "var(--overlay)",
-                                }}
-                            />
-                            <button
-                                onClick={() => toggleKey(i)}
-                                style={{
-                                    minWidth: 58,
-                                    padding: "6px 10px",
-                                    borderRadius: "var(--radius)",
-                                    border: `1px solid ${key.enabled ? "var(--primary)" : "var(--border)"}`,
-                                    background: key.enabled ? "var(--primary-soft-strong)" : "transparent",
-                                    color: key.enabled ? "var(--primary-light)" : "var(--text-subtle)",
-                                    cursor: "pointer",
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    letterSpacing: "0.04em",
-                                }}
-                            >
-                                {key.enabled ? "ON" : "OFF"}
-                            </button>
-                            <button
-                                onClick={() => removeKey(i)}
-                                style={{ background: "none", border: "none", color: "var(--error)", cursor: "pointer", padding: 4 }}
-                            >
-                                <Trash2 size={14} />
-                            </button>
-                        </div>
-                    ))}
-
-                    <div style={{ display: "flex", gap: 8 }}>
-                        <input
-                            value={newKey}
-                            onChange={(e) => setNewKey(e.target.value)}
-                            placeholder="Paste API key..."
-                            style={{ flex: 1, fontFamily: "monospace", fontSize: 13 }}
-                        />
-                        <button
-                            onClick={addKey}
-                            disabled={!newKey.trim()}
-                            style={{
-                                background: "var(--primary)", color: "var(--primary-contrast)", border: "none",
-                                borderRadius: "var(--radius)", padding: "8px 12px", cursor: "pointer",
-                                opacity: !newKey.trim() ? 0.5 : 1,
-                            }}
-                        >
-                            <Plus size={14} />
-                        </button>
-                    </div>
-
-                    <div style={{ marginTop: 16 }}>
-                        <label style={{ fontSize: 13, color: "var(--text-subtle)", marginBottom: 8, display: "block" }}>Key Rotation Mode</label>
-                        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                            {["FAIL_OVER", "ROUND_ROBIN"].map((mode) => (
-                                <button
-                                    key={mode}
-                                    onClick={() => { setRotationMode(mode); saveField({ key_rotation_mode: mode }); }}
-                                    style={{
-                                        flex: 1, padding: "8px 12px", borderRadius: "var(--radius)",
-                                        border: `1px solid ${rotationMode === mode ? "var(--primary)" : "var(--border)"}`,
-                                        background: rotationMode === mode ? "var(--primary-soft-strong)" : "transparent",
-                                        color: rotationMode === mode ? "var(--primary-light)" : "var(--text-subtle)",
-                                        cursor: "pointer", fontSize: 13, fontWeight: 500,
-                                        transition: "all 0.2s",
-                                    }}
-                                >
-                                    {mode.replace("_", " ")}
-                                </button>
-                            ))}
-                        </div>
-                        <div style={{ padding: 12, borderRadius: "var(--radius)", background: "var(--overlay)", fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
-                            {rotationMode === "FAIL_OVER" ? (
-                                <p><strong>Failover:</strong> Uses the first key until it hits a rate limit (429), then switches to the next one. Best for maximizing a high-tier key.</p>
-                            ) : (
-                                <p><strong>Round Robin:</strong> Cycles through each key for every request. Best for distributing load evenly across multiple free-tier keys.</p>
-                            )}
-                        </div>
-                    </div>
-                </Section>
-
-                <Section title="Theme">
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
-                        Choose the global app theme. Dark keeps the current look. Light uses the VySol blue, white, and navy brand palette.
-                    </p>
-                    <div style={{ display: "flex", gap: 8 }}>
-                        {(["dark", "light"] as UITheme[]).map((mode) => (
-                            <button
-                                key={mode}
-                                onClick={() => {
-                                    setUiTheme(mode);
-                                    applyTheme(mode);
-                                    saveField({ ui_theme: mode });
-                                }}
-                                style={{
-                                    flex: 1,
-                                    padding: "10px 12px",
-                                    borderRadius: "var(--radius)",
-                                    border: `1px solid ${uiTheme === mode ? "var(--primary)" : "var(--border)"}`,
-                                    background: uiTheme === mode ? "var(--primary-soft-strong)" : "transparent",
-                                    color: uiTheme === mode ? "var(--primary-light)" : "var(--text-subtle)",
-                                    cursor: "pointer",
-                                    fontSize: 13,
-                                    fontWeight: 600,
-                                    textTransform: "capitalize",
-                                    transition: "all 0.2s",
-                                }}
-                            >
-                                {mode}
-                            </button>
-                        ))}
-                    </div>
-                </Section>
-
-                <Section title="Ingestion Performance">
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
-                        Batch size means the number of parallel slots for that stage, not a wait-for-all batch barrier.
-                        Slot delay is per slot and starts the moment that slot finishes its current item.
-                    </p>
-                    <NumberInput
-                        label="Graph Extraction Batch Size"
-                        value={graphExtractionBatchSize}
-                        min={1}
-                        step={1}
-                        onChange={setGraphExtractionBatchSize}
-                        onBlur={() => saveField({ graph_extraction_concurrency: graphExtractionBatchSize })}
-                    />
-                    <NumberInput
-                        label="Graph Extraction Slot Delay (seconds)"
-                        value={graphExtractionSlotDelay}
-                        min={0}
-                        step={1}
-                        onChange={setGraphExtractionSlotDelay}
-                        onBlur={() => saveField({ graph_extraction_cooldown_seconds: graphExtractionSlotDelay })}
-                    />
-                    <NumberInput
-                        label="Embedding Batch Size"
-                        value={embeddingBatchSize}
-                        min={1}
-                        step={1}
-                        onChange={setEmbeddingBatchSize}
-                        onBlur={() => saveField({ embedding_concurrency: embeddingBatchSize })}
-                    />
-                    <NumberInput
-                        label="Embedding Slot Delay (seconds)"
-                        value={embeddingSlotDelay}
-                        min={0}
-                        step={1}
-                        onChange={setEmbeddingSlotDelay}
-                        onBlur={() => saveField({ embedding_cooldown_seconds: embeddingSlotDelay })}
-                    />
-                </Section>
-
-                <Section title="AI Models">
-                    <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
-                        Type the exact model name. Changes auto-save. Embedding model here is only the default for new worlds.
-                    </p>
-                    <div style={{ display: "grid", gap: 12 }}>
-                        <SettingsCard
-                            eyebrow="Ingest"
-                            title="Graph Architect"
-                            description="Used for chunk extraction. Faster Flash-class models are usually the best fit here."
-                        >
-                            <ModelInput label="Model" value={flashModel} onChange={setFlashModel}
-                                onBlur={() => saveField({ default_model_flash: flashModel })} />
-                            <ThinkingControl
-                                modelName={flashModel}
-                                levelValue={flashThinkingLevel}
-                                manualValue={flashThinkingManual}
-                                onLevelChange={setFlashThinkingLevel}
-                                onManualChange={setFlashThinkingManual}
-                                onSave={(updates) => saveField(updates)}
-                                levelKey="default_model_flash_thinking_level"
-                                manualKey="default_model_flash_thinking_manual"
-                            />
-                        </SettingsCard>
-
-                        <SettingsCard
-                            eyebrow="Chat"
-                            title="Provider And Model"
-                            description="Choose whether chat uses Gemini directly or a local IntenseRP-compatible endpoint."
-                        >
-                            <div style={{ marginBottom: 12 }}>
-                                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
-                                    Chat Provider
-                                </label>
-                                <select
-                                    value={chatProvider}
-                                    onChange={(e) => {
-                                        const val = e.target.value;
-                                        setChatProvider(val);
-                                        saveField({ chat_provider: val });
-                                    }}
-                                    style={{
-                                        width: "100%", fontFamily: "monospace", fontSize: 13,
-                                        padding: "6px 8px", borderRadius: "var(--radius)",
-                                        border: "1px solid var(--border)", background: "var(--background-secondary)",
-                                        color: "var(--text-primary)", cursor: "pointer",
-                                    }}
-                                >
-                                    <option value="gemini">Google (Gemini)</option>
-                                    <option value="intenserp">IntenseRP Next (GLM / others)</option>
-                                </select>
-                            </div>
-
-                            {chatProvider === "gemini" ? (
-                                <>
-                                    <ModelInput label="Model" value={chatModel} onChange={setChatModel}
-                                        onBlur={() => saveField({ default_model_chat: chatModel })} />
-                                    <ThinkingControl
-                                        modelName={chatModel}
-                                        levelValue={chatThinkingLevel}
-                                        manualValue={chatThinkingManual}
-                                        onLevelChange={setChatThinkingLevel}
-                                        onManualChange={setChatThinkingManual}
-                                        onSave={(updates) => saveField(updates)}
-                                        levelKey="default_model_chat_thinking_level"
-                                        manualKey="default_model_chat_thinking_manual"
-                                    />
-                                </>
-                            ) : (
-                                <div style={{ padding: 12, borderRadius: "var(--radius)", border: "1px solid var(--border)", background: "var(--background)" }}>
-                                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-                                        IntenseRP Next must be running locally. Start it, log in to GLM, and leave it running.
-                                    </p>
-                                    <ModelInput label="Endpoint URL" value={intenserpUrl} onChange={setIntenserpUrl}
-                                        onBlur={() => saveField({ intenserp_base_url: intenserpUrl })} />
-                                    <ModelInput label="Model ID" value={intenserpModelId} onChange={setIntenserpModelId}
-                                        onBlur={() => saveField({ intenserp_model_id: intenserpModelId })} />
-                                </div>
-                            )}
-                        </SettingsCard>
-
-                        <SettingsCard
-                            eyebrow="Entity Resolution"
-                            title="Entity Chooser"
-                            description="Used during candidate selection in Exact + chooser/combiner runs."
-                        >
-                            <ModelInput label="Model" value={chooserModel} onChange={setChooserModel}
-                                onBlur={() => saveField({ default_model_entity_chooser: chooserModel })} />
-                            <ThinkingControl
-                                modelName={chooserModel}
-                                levelValue={chooserThinkingLevel}
-                                manualValue={chooserThinkingManual}
-                                onLevelChange={setChooserThinkingLevel}
-                                onManualChange={setChooserThinkingManual}
-                                onSave={(updates) => saveField(updates)}
-                                levelKey="default_model_entity_chooser_thinking_level"
-                                manualKey="default_model_entity_chooser_thinking_manual"
-                            />
-                        </SettingsCard>
-
-                        <SettingsCard
-                            eyebrow="Entity Resolution"
-                            title="Entity Combiner"
-                            description="Used after the chooser to write the final merged entity description."
-                        >
-                            <ModelInput label="Model" value={combinerModel} onChange={setCombinerModel}
-                                onBlur={() => saveField({ default_model_entity_combiner: combinerModel })} />
-                            <ThinkingControl
-                                modelName={combinerModel}
-                                levelValue={combinerThinkingLevel}
-                                manualValue={combinerThinkingManual}
-                                onLevelChange={setCombinerThinkingLevel}
-                                onManualChange={setCombinerThinkingManual}
-                                onSave={(updates) => saveField(updates)}
-                                levelKey="default_model_entity_combiner_thinking_level"
-                                manualKey="default_model_entity_combiner_thinking_manual"
-                            />
-                        </SettingsCard>
-
-                        <SettingsCard
-                            eyebrow="Vectors"
-                            title="Default Embedding Model"
-                            description="Used as the default embedding model for new worlds only."
-                        >
-                            <ModelInput label="Model" value={embedModel} onChange={setEmbedModel}
-                                onBlur={() => saveField({ embedding_model: embedModel })} />
-                            <div style={{ marginTop: -4, marginBottom: 4, fontSize: 11, color: "var(--text-muted)" }}>
-                                Thinking is not available for embedding models.
-                            </div>
-                        </SettingsCard>
-
-                        <SettingsCard
-                            eyebrow="Safety"
-                            title="Safety Filters"
-                            description="Relax Gemini content moderation for creative or edge-case writing workflows."
-                        >
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
-                                <div>
-                                    <label style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", display: "block" }}>Disable Safety Filters</label>
-                                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>Affects Gemini provider calls that respect the app-level safety configuration.</p>
-                                </div>
-                                <input
-                                    type="checkbox"
-                                    checked={disableSafety}
-                                    onChange={(e) => {
-                                        const val = e.target.checked;
-                                        setDisableSafety(val);
-                                        saveField({ disable_safety_filters: val });
-                                    }}
-                                    style={{ width: 20, height: 20, cursor: "pointer", flexShrink: 0 }}
-                                />
-                            </div>
-                        </SettingsCard>
-                    </div>
-                </Section>
-
-                {toast && (
-                    <div className="toast toast-success">{toast}</div>
-                )}
-                </>
-                ) : null}
+        <Overlay onClose={onClose}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <h2 style={{ fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+                    <KeyRound size={20} style={{ color: "var(--primary)" }} />
+                    Settings
+                </h2>
+                <button onClick={onClose} style={iconButtonStyle}>
+                    <X size={18} />
+                </button>
             </div>
-        </div>
+
+            {!settings ? <div style={{ color: "var(--text-subtle)", fontSize: 13 }}>Loading settings...</div> : (
+                <>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                        <TabButton active={selectedTab === "configuration"} onClick={() => setSelectedTab("configuration")}>Configuration</TabButton>
+                        <TabButton active={selectedTab === "key_library"} onClick={() => setSelectedTab("key_library")}>Key Library</TabButton>
+                    </div>
+
+                    {selectedTab === "configuration" ? (
+                        <>
+                            <Section title="Preset">
+                                <div style={{ display: "grid", gap: 12 }}>
+                                    <select
+                                        value={settings.active_settings_preset_id}
+                                        onChange={(event) => { void handlePresetSwitch(event.target.value); }}
+                                        style={selectStyle}
+                                    >
+                                        {settings.settings_presets.map((preset) => (
+                                            <option key={preset.id} value={preset.id}>{preset.locked ? `${preset.name} (Locked)` : preset.name}</option>
+                                        ))}
+                                    </select>
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                        <ActionButton onClick={() => { void handlePresetSaveAs(); }}>Save As New Preset</ActionButton>
+                                        <ActionButton
+                                            disabled={Boolean(settings.active_settings_preset_locked)}
+                                            onClick={() => { if (!settings.active_settings_preset_locked) void handlePresetRename(); }}
+                                        >
+                                            Rename Preset
+                                        </ActionButton>
+                                    </div>
+                                </div>
+                            </Section>
+
+                            <Section title="App">
+                                <Card title="Theme" description="Theme stays preset-backed in Configuration so each preset can carry its own feel.">
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                        {(["dark", "light"] as UITheme[]).map((theme) => (
+                                            <ActionButton
+                                                key={theme}
+                                                active={settings.ui_theme === theme}
+                                                onClick={() => {
+                                                    applyTheme(theme);
+                                                    void saveField({ ui_theme: theme });
+                                                }}
+                                            >
+                                                {theme}
+                                            </ActionButton>
+                                        ))}
+                                    </div>
+                                </Card>
+
+                                <Card title="Key Rotation" description="Provider-backed model calls pool from the active provider’s enabled library entries.">
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                        {["FAIL_OVER", "ROUND_ROBIN"].map((mode) => (
+                                            <ActionButton
+                                                key={mode}
+                                                active={settings.key_rotation_mode === mode}
+                                                onClick={() => { void saveField({ key_rotation_mode: mode }); }}
+                                            >
+                                                {mode.replace("_", " ")}
+                                            </ActionButton>
+                                        ))}
+                                    </div>
+                                </Card>
+                            </Section>
+
+                            <Section title="Ingestion">
+                                <Card title="Chunking Defaults" description="These stay global defaults for new worlds until a world locks its own ingest snapshot.">
+                                    <NumberField label="Chunk Size (chars)" value={settings.chunk_size_chars} onSave={(value) => saveField({ chunk_size_chars: value })} />
+                                    <NumberField label="Chunk Overlap (chars)" value={settings.chunk_overlap_chars} onSave={(value) => saveField({ chunk_overlap_chars: value })} />
+                                    <NumberField label="Graph Architect Glean Amount" value={settings.glean_amount} onSave={(value) => saveField({ glean_amount: value })} />
+                                </Card>
+
+                                <Card title="Concurrency" description="These limits control how many extraction and embedding jobs run at once per preset.">
+                                    <NumberField label="Graph Extraction Concurrency" value={settings.graph_extraction_concurrency} onSave={(value) => saveField({ graph_extraction_concurrency: value })} />
+                                    <NumberField label="Graph Extraction Cooldown Seconds" value={settings.graph_extraction_cooldown_seconds} step={0.1} onSave={(value) => saveField({ graph_extraction_cooldown_seconds: value })} />
+                                    <NumberField label="Embedding Concurrency" value={settings.embedding_concurrency} onSave={(value) => saveField({ embedding_concurrency: value })} />
+                                    <NumberField label="Embedding Cooldown Seconds" value={settings.embedding_cooldown_seconds} step={0.1} onSave={(value) => saveField({ embedding_cooldown_seconds: value })} />
+                                </Card>
+                            </Section>
+
+                            <Section title="Providers">
+                                <ModelCard
+                                    settings={settings}
+                                    slot="flash"
+                                    title="Graph Architect"
+                                    description="Chunk extraction model and provider."
+                                    modelValue={settings.default_model_flash}
+                                    onModelSave={(value) => saveField({ default_model_flash: value })}
+                                    familyValue={settings.default_model_flash_provider}
+                                    onFamilySave={(value) => saveField({ default_model_flash_provider: value })}
+                                    openAiValue={settings.default_model_flash_openai_compatible_provider}
+                                    onOpenAiSave={(value) => saveField({ default_model_flash_openai_compatible_provider: value })}
+                                    geminiThinkingLevel={settings.default_model_flash_thinking_level}
+                                    geminiThinkingManual={settings.default_model_flash_thinking_manual}
+                                    onGeminiThinkingSave={(updates) => saveField(updates)}
+                                    groqReasoningValue={settings.default_model_flash_groq_reasoning_effort}
+                                    onGroqReasoningSave={(value) => saveField({ default_model_flash_groq_reasoning_effort: value })}
+                                />
+                                <ModelCard
+                                    settings={settings}
+                                    slot="chat"
+                                    title="Chat"
+                                    description="Provider and model for normal chat generation."
+                                    modelValue={settings.default_model_chat}
+                                    onModelSave={(value) => saveField({ default_model_chat: value })}
+                                    familyValue={settings.default_model_chat_provider}
+                                    onFamilySave={(value) => saveField({ default_model_chat_provider: value })}
+                                    openAiValue={settings.default_model_chat_openai_compatible_provider}
+                                    onOpenAiSave={(value) => saveField({ default_model_chat_openai_compatible_provider: value })}
+                                    geminiThinkingLevel={settings.default_model_chat_thinking_level}
+                                    geminiThinkingManual={settings.default_model_chat_thinking_manual}
+                                    onGeminiThinkingSave={(updates) => saveField(updates)}
+                                    groqReasoningValue={settings.default_model_chat_groq_reasoning_effort}
+                                    onGroqReasoningSave={(value) => saveField({ default_model_chat_groq_reasoning_effort: value })}
+                                    extra={resolveSelectedProvider(settings, "chat") === "groq" ? (
+                                        <CheckboxRow
+                                            label="Include Reasoning"
+                                            help="When enabled, the app asks Groq for reasoning and shows it after completion instead of pretending it streams live."
+                                            checked={settings.groq_chat_include_reasoning}
+                                            onChange={(checked) => { void saveField({ groq_chat_include_reasoning: checked }); }}
+                                        />
+                                    ) : resolveSelectedProvider(settings, "chat") === "gemini" ? (
+                                        <CheckboxRow
+                                            label="Send Thinking"
+                                            help="Gemini-only thought token support for chat."
+                                            checked={settings.gemini_chat_send_thinking}
+                                            onChange={(checked) => { void saveField({ gemini_chat_send_thinking: checked }); }}
+                                        />
+                                    ) : (
+                                        <TextField label="IntenseRP Model ID" value={settings.intenserp_model_id} onSave={(value) => saveField({ intenserp_model_id: value })} />
+                                    )}
+                                />
+                                <ModelCard
+                                    settings={settings}
+                                    slot="entity_chooser"
+                                    title="Entity Chooser"
+                                    description="AI pass for candidate selection in entity resolution."
+                                    modelValue={settings.default_model_entity_chooser}
+                                    onModelSave={(value) => saveField({ default_model_entity_chooser: value })}
+                                    familyValue={settings.default_model_entity_chooser_provider}
+                                    onFamilySave={(value) => saveField({ default_model_entity_chooser_provider: value })}
+                                    openAiValue={settings.default_model_entity_chooser_openai_compatible_provider}
+                                    onOpenAiSave={(value) => saveField({ default_model_entity_chooser_openai_compatible_provider: value })}
+                                    geminiThinkingLevel={settings.default_model_entity_chooser_thinking_level}
+                                    geminiThinkingManual={settings.default_model_entity_chooser_thinking_manual}
+                                    onGeminiThinkingSave={(updates) => saveField(updates)}
+                                    groqReasoningValue={settings.default_model_entity_chooser_groq_reasoning_effort}
+                                    onGroqReasoningSave={(value) => saveField({ default_model_entity_chooser_groq_reasoning_effort: value })}
+                                />
+                                <ModelCard
+                                    settings={settings}
+                                    slot="entity_combiner"
+                                    title="Entity Combiner"
+                                    description="AI pass that writes the merged entity name and description."
+                                    modelValue={settings.default_model_entity_combiner}
+                                    onModelSave={(value) => saveField({ default_model_entity_combiner: value })}
+                                    familyValue={settings.default_model_entity_combiner_provider}
+                                    onFamilySave={(value) => saveField({ default_model_entity_combiner_provider: value })}
+                                    openAiValue={settings.default_model_entity_combiner_openai_compatible_provider}
+                                    onOpenAiSave={(value) => saveField({ default_model_entity_combiner_openai_compatible_provider: value })}
+                                    geminiThinkingLevel={settings.default_model_entity_combiner_thinking_level}
+                                    geminiThinkingManual={settings.default_model_entity_combiner_thinking_manual}
+                                    onGeminiThinkingSave={(updates) => saveField(updates)}
+                                    groqReasoningValue={settings.default_model_entity_combiner_groq_reasoning_effort}
+                                    onGroqReasoningSave={(value) => saveField({ default_model_entity_combiner_groq_reasoning_effort: value })}
+                                />
+                                <ModelCard
+                                    settings={settings}
+                                    slot="embedding"
+                                    title="Default Embeddings"
+                                    description="Provider and model used as the default embedding backend for new worlds."
+                                    modelValue={settings.embedding_model}
+                                    onModelSave={(value) => saveField({ embedding_model: value })}
+                                    familyValue={settings.embedding_provider}
+                                    onFamilySave={(value) => saveField({ embedding_provider: value })}
+                                    openAiValue={settings.embedding_openai_compatible_provider}
+                                    onOpenAiSave={(value) => saveField({ embedding_openai_compatible_provider: value })}
+                                />
+                            </Section>
+
+                            {anyGeminiSelected ? (
+                                <Section title="Gemini Safety">
+                                    <Card title="Safety Filters" description="This only appears while a selected slot uses Gemini. Unsupported providers do not get fake safety toggles.">
+                                        <CheckboxRow
+                                            label="Disable Safety Filters"
+                                            help="Affects Gemini-backed text generation paths that honor app-level safety settings."
+                                            checked={settings.gemini_disable_safety_filters}
+                                            onChange={(checked) => { void saveField({ gemini_disable_safety_filters: checked }); }}
+                                        />
+                                    </Card>
+                                </Section>
+                            ) : null}
+                        </>
+                    ) : (
+                        <Section title="Key Library">
+                            <Card title="Shared Provider Credentials" description="These entries are shared globally across all presets. Configuration presets only choose which providers/models to use.">
+                                <div style={{ display: "grid", gap: 12 }}>
+                                    <select value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value)} style={selectStyle}>
+                                        {Object.values(settings.provider_registry.providers).map((provider) => (
+                                            <option key={provider.id} value={provider.id}>{provider.display_name}</option>
+                                        ))}
+                                    </select>
+                                    {selectedLibrary?.entries.map((entry) => (
+                                        <div key={entry.id} style={rowCardStyle}>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{entry.label}</div>
+                                                {entry.has_api_key ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{entry.api_key_masked}</div> : null}
+                                                {entry.base_url ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{entry.base_url}</div> : null}
+                                                {!entry.required_ready ? <div style={{ fontSize: 11, color: "var(--error)" }}>Missing required fields for this provider.</div> : null}
+                                            </div>
+                                            <ActionButton active={entry.enabled} onClick={() => { void toggleCredential(entry.id, !entry.enabled); }}>
+                                                {entry.enabled ? "Enabled" : "Disabled"}
+                                            </ActionButton>
+                                            <button onClick={() => { void deleteCredential(entry.id); }} style={iconButtonStyle}>
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    {selectedLibrary?.env_fallback ? (
+                                        <div style={{ ...rowCardStyle, opacity: 0.8 }}>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{selectedLibrary.env_fallback.label}</div>
+                                                {selectedLibrary.env_fallback.api_key_masked ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{selectedLibrary.env_fallback.api_key_masked}</div> : null}
+                                                {selectedLibrary.env_fallback.base_url ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{selectedLibrary.env_fallback.base_url}</div> : null}
+                                            </div>
+                                            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Fallback</span>
+                                        </div>
+                                    ) : null}
+                                    <div style={{ ...rowCardStyle, flexDirection: "column", alignItems: "stretch" }}>
+                                        <TextField label="Label" value={newCredentialLabel} onChange={setNewCredentialLabel} />
+                                        {selectedLibrary?.credential_fields.map((field) => (
+                                            <TextField
+                                                key={field.name}
+                                                label={field.label}
+                                                value={newCredentialValues[field.name] ?? ""}
+                                                secret={field.secret}
+                                                onChange={(value) => setNewCredentialValues((current) => ({ ...current, [field.name]: value }))}
+                                            />
+                                        ))}
+                                        <ActionButton onClick={() => { void addCredential(); }}>
+                                            <Plus size={14} /> Add Credential
+                                        </ActionButton>
+                                    </div>
+                                    {selectedProviderMeta ? (
+                                        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                                            {selectedProviderMeta.display_name} supports: {selectedProviderMeta.supported_slots.map(formatSupportedSlotLabel).join(", ")}.
+                                        </div>
+                                    ) : null}
+                                </div>
+                            </Card>
+                        </Section>
+                    )}
+                </>
+            )}
+
+            {toast ? <div className="toast toast-success">{toast}</div> : null}
+        </Overlay>
     );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-    return (
-        <div style={{ marginBottom: 28, paddingBottom: 20, borderBottom: "1px solid var(--border)" }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-subtle)" }}>
-                {title}
-            </h3>
-            {children}
-        </div>
-    );
-}
-
-function SettingsCard({
-    eyebrow,
+function ModelCard({
+    settings,
+    slot,
     title,
     description,
-    children,
+    modelValue,
+    onModelSave,
+    familyValue,
+    onFamilySave,
+    openAiValue,
+    onOpenAiSave,
+    geminiThinkingLevel,
+    geminiThinkingManual,
+    onGeminiThinkingSave,
+    groqReasoningValue,
+    onGroqReasoningSave,
+    extra,
 }: {
-    eyebrow: string;
+    settings: SettingsData;
+    slot: SlotKey;
     title: string;
     description: string;
-    children: React.ReactNode;
+    modelValue: string;
+    onModelSave: (value: string) => void | Promise<void>;
+    familyValue: string;
+    onFamilySave: (value: string) => void | Promise<void>;
+    openAiValue: string;
+    onOpenAiSave: (value: string) => void | Promise<void>;
+    geminiThinkingLevel?: string;
+    geminiThinkingManual?: string;
+    onGeminiThinkingSave?: (updates: Record<string, unknown>) => void | Promise<void>;
+    groqReasoningValue?: string;
+    onGroqReasoningSave?: (value: string) => void | Promise<void>;
+    extra?: ReactNode;
 }) {
+    const status = settings.provider_status[slot];
+    const resolvedProvider = resolveSelectedProvider(settings, slot);
+    const providerOptions = settings.provider_registry.families[slot]?.options ?? [];
+    const supportsGeminiThinking = settings.provider_registry.providers[resolvedProvider]?.supports_gemini_thinking;
+    const supportsGroqReasoning = settings.provider_registry.providers[resolvedProvider]?.supports_groq_reasoning;
+    const showGenericModelField = !(slot === "chat" && resolvedProvider === "intenserp");
+    const prefix = slot === "flash"
+        ? "default_model_flash"
+        : slot === "chat"
+            ? "default_model_chat"
+            : slot === "entity_chooser"
+                ? "default_model_entity_chooser"
+                : "default_model_entity_combiner";
+
     return (
-        <div
-            style={{
-                padding: 16,
-                borderRadius: 14,
-                border: "1px solid var(--border)",
-                background: "linear-gradient(180deg, var(--overlay) 0%, var(--card) 100%)",
-                boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
-            }}
+        <Card
+            title={title}
+            description={description}
+            badge={status && !status.ok ? <StatusDot message={status.message} /> : null}
         >
-            <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--primary)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>
-                    {eyebrow}
+            <div style={{ display: "grid", gap: 12 }}>
+                <div>
+                    <label style={labelStyle}>Provider</label>
+                    <select value={familyValue} onChange={(event) => { void onFamilySave(event.target.value); }} style={selectStyle}>
+                        {providerOptions.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
                 </div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
-                    {title}
+                {familyValue === "openai_compatible" ? (
+                    <div>
+                        <label style={labelStyle}>OpenAI-compatible Provider</label>
+                        <select value={openAiValue} onChange={(event) => { void onOpenAiSave(event.target.value); }} style={selectStyle}>
+                            {settings.provider_registry.openai_compatible_providers.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
                 </div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
-                    {description}
+                ) : null}
+                {showGenericModelField ? <TextField label="Model" value={modelValue} onSave={onModelSave} /> : null}
+                {supportsGeminiThinking && geminiThinkingLevel !== undefined && geminiThinkingManual !== undefined && onGeminiThinkingSave ? (
+                    <ThinkingControl
+                        modelName={modelValue}
+                        levelValue={geminiThinkingLevel}
+                        manualValue={geminiThinkingManual}
+                        onSave={onGeminiThinkingSave}
+                        levelKey={`${prefix}_thinking_level`}
+                        manualKey={`${prefix}_thinking_manual`}
+                    />
+                ) : null}
+                {supportsGroqReasoning && groqReasoningValue !== undefined && onGroqReasoningSave ? (
+                    <div>
+                        <label style={labelStyle}>Reasoning Effort</label>
+                        <select value={groqReasoningValue} onChange={(event) => { void onGroqReasoningSave(event.target.value); }} style={selectStyle}>
+                            {GROQ_REASONING_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                ) : null}
+                {extra}
+            </div>
+        </Card>
+    );
+}
+
+function Overlay({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+    return (
+        <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", justifyContent: "flex-end" }} onClick={onClose}>
+            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)" }} />
+            <div
+                onClick={(event) => event.stopPropagation()}
+                className="animate-slide-in"
+                style={{ position: "relative", width: 520, height: "100vh", background: "var(--card)", borderLeft: "1px solid var(--border)", overflowY: "auto", padding: 24 }}
+            >
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+    return (
+        <div style={{ marginBottom: 28 }}>
+            <h3 style={{ fontSize: 13, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--text-subtle)", marginBottom: 12 }}>{title}</h3>
+            <div style={{ display: "grid", gap: 12 }}>{children}</div>
+        </div>
+    );
+}
+
+function Card({ title, description, children, badge }: { title: string; description: string; children: ReactNode; badge?: ReactNode }) {
+    return (
+        <div style={{ padding: 16, borderRadius: 14, border: "1px solid var(--border)", background: "linear-gradient(180deg, var(--overlay) 0%, var(--card) 100%)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+                <div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)" }}>{title}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 4 }}>{description}</div>
                 </div>
+                {badge}
             </div>
             {children}
         </div>
     );
 }
 
-function LabelWithTooltip({ label, tooltip }: { label: string; tooltip?: string }) {
+function StatusDot({ message }: { message: string }) {
     return (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <span>{label}</span>
-            {tooltip ? (
-                <span
-                    title={tooltip}
-                    aria-label={tooltip}
-                    style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: 16,
-                        height: 16,
-                        borderRadius: "999px",
-                        color: "var(--text-muted)",
-                        cursor: "help",
-                    }}
-                >
-                    <Info size={12} />
-                </span>
-            ) : null}
-        </span>
+        <span title={message} style={{ width: 12, height: 12, borderRadius: "999px", background: "#ef4444", boxShadow: "0 0 0 2px rgba(239,68,68,0.18)", flexShrink: 0 }} />
     );
 }
 
-function ModelInput({ label, value, onChange, onBlur }: { label: string; value: string; onChange: (v: string) => void; onBlur: () => void }) {
+function TabButton({ active, children, onClick }: { active: boolean; children: ReactNode; onClick: () => void }) {
+    return <ActionButton active={active} onClick={onClick}>{children}</ActionButton>;
+}
+
+function ActionButton({ children, active = false, disabled = false, onClick }: { children: ReactNode; active?: boolean; disabled?: boolean; onClick: () => void }) {
     return (
-        <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>{label}</label>
+        <button
+            onClick={onClick}
+            disabled={disabled}
+            style={{
+                border: `1px solid ${active ? "var(--primary)" : "var(--border)"}`,
+                background: active ? "var(--primary-soft-strong)" : "var(--background)",
+                color: active ? "var(--primary-light)" : "var(--text-primary)",
+                borderRadius: 10,
+                padding: "10px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: disabled ? "not-allowed" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+                opacity: disabled ? 0.6 : 1,
+            }}
+        >
+            {children}
+        </button>
+    );
+}
+
+function CheckboxRow({ label, help, checked, onChange }: { label: string; help: string; checked: boolean; onChange: (checked: boolean) => void }) {
+    return (
+        <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: 12, borderRadius: 12, background: "var(--background)", border: "1px solid var(--border)" }}>
+            <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{label}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 4 }}>{help}</div>
+            </div>
+            <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+        </label>
+    );
+}
+
+function TextField({
+    label,
+    value,
+    onSave,
+    onChange,
+    secret = false,
+}: {
+    label: string;
+    value: string;
+    onSave?: (value: string) => void | Promise<void>;
+    onChange?: (value: string) => void;
+    secret?: boolean;
+}) {
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={labelStyle}>{label}</label>
             <input
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                onBlur={onBlur}
-                style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }}
+                key={`${label}-${value}`}
+                type={secret ? "password" : "text"}
+                defaultValue={value}
+                onChange={(event) => {
+                    onChange?.(event.target.value);
+                }}
+                onBlur={(event) => { if (onSave) void onSave(event.target.value); }}
+                style={inputStyle}
+            />
+        </div>
+    );
+}
+
+function NumberField({ label, value, onSave, step = 1 }: { label: string; value: number; onSave: (value: number) => void | Promise<void>; step?: number }) {
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={labelStyle}>{label}</label>
+            <input
+                key={`${label}-${value}`}
+                type="number"
+                defaultValue={String(value)}
+                step={step}
+                onBlur={(event) => { void onSave(Number(event.target.value)); }}
+                style={inputStyle}
             />
         </div>
     );
@@ -681,8 +880,6 @@ function ThinkingControl({
     modelName,
     levelValue,
     manualValue,
-    onLevelChange,
-    onManualChange,
     onSave,
     levelKey,
     manualKey,
@@ -690,148 +887,40 @@ function ThinkingControl({
     modelName: string;
     levelValue: string;
     manualValue: string;
-    onLevelChange: (value: string) => void;
-    onManualChange: (value: string) => void;
-    onSave: (updates: Record<string, unknown>) => void;
+    onSave: (updates: Record<string, unknown>) => void | Promise<void>;
     levelKey: string;
     manualKey: string;
 }) {
     const supportedLevels = getSupportedGeminiThinkingLevels(modelName);
-    const [manualMode, setManualMode] = useState(false);
-    const hasManualValue = Boolean(manualValue.trim());
-    const showManualInput = supportedLevels.length === 0 && (manualMode || hasManualValue);
 
     if (supportedLevels.length > 0) {
         return (
-            <div style={{ marginTop: -4, marginBottom: 12 }}>
-                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
-                    <LabelWithTooltip label="Thinking" tooltip={THINKING_TOOLTIP_TEXT} />
+            <div style={{ display: "grid", gap: 6 }}>
+                <label style={labelStyle}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        Thinking
+                        <span title={THINKING_TOOLTIP_TEXT} style={{ color: "var(--text-muted)", cursor: "help" }}>
+                            <Info size={12} />
+                        </span>
+                    </span>
                 </label>
                 <select
                     value={levelValue}
-                    onChange={(e) => {
-                        const nextValue = e.target.value;
-                        onLevelChange(nextValue);
-                        onSave({
-                            [levelKey]: nextValue,
-                            [manualKey]: "",
-                        });
-                    }}
-                    style={{
-                        width: "100%",
-                        fontFamily: "monospace",
-                        fontSize: 13,
-                        padding: "6px 8px",
-                        borderRadius: "var(--radius)",
-                        border: "1px solid var(--border)",
-                        background: "var(--background-secondary)",
-                        color: "var(--text-primary)",
-                    }}
+                    onChange={(event) => { void onSave({ [levelKey]: event.target.value, [manualKey]: "" }); }}
+                    style={selectStyle}
                 >
                     <option value="">Use model default</option>
-                    {supportedLevels.map((level) => (
-                        <option key={level} value={level}>
-                            {level}
-                        </option>
-                    ))}
+                    {supportedLevels.map((level) => <option key={level} value={level}>{level}</option>)}
                 </select>
             </div>
         );
     }
 
     return (
-        <div style={{ marginTop: -4, marginBottom: 12 }}>
-                <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>
-                    <LabelWithTooltip label="Thinking" tooltip={THINKING_TOOLTIP_TEXT} />
-                </label>
-            <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-                {showManualInput ? (
-                    <input
-                        value={manualValue}
-                        onChange={(e) => onManualChange(e.target.value)}
-                        onBlur={() => onSave({
-                            [levelKey]: "",
-                            [manualKey]: manualValue.trim(),
-                        })}
-                        placeholder="Enter a level name or numeric budget"
-                        style={{ flex: 1, fontFamily: "monospace", fontSize: 13 }}
-                    />
-                ) : (
-                    <div
-                        style={{
-                            flex: 1,
-                            minHeight: 34,
-                            padding: "6px 8px",
-                            borderRadius: "var(--radius)",
-                            border: "1px solid var(--border)",
-                            background: "var(--overlay)",
-                            color: "var(--text-muted)",
-                            fontSize: 12,
-                            display: "flex",
-                            alignItems: "center",
-                        }}
-                    >
-                        Built-in thinking dropdown not supported. Use the pencil to enter a manual level or numeric budget.
-                    </div>
-                )}
-                <button
-                    type="button"
-                    onClick={() => setManualMode(true)}
-                    title="Edit manual thinking value"
-                    style={{
-                        width: 36,
-                        borderRadius: "var(--radius)",
-                        border: "1px solid var(--border)",
-                        background: "var(--background)",
-                        color: "var(--text-primary)",
-                        cursor: "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                    }}
-                >
-                    <Pencil size={14} />
-                </button>
-            </div>
-            <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
-                {showManualInput || hasManualValue
-                    ? "Manual Gemini thinking accepts either a named level or a numeric budget. Leave it blank to omit thinking config."
-                    : "Manual Gemini thinking accepts either a named level or a numeric budget."}
-            </div>
-        </div>
-    );
-}
-
-function NumberInput({
-    label,
-    value,
-    min,
-    step,
-    onChange,
-    onBlur,
-}: {
-    label: string;
-    value: number;
-    min: number;
-    step: number;
-    onChange: (v: number) => void;
-    onBlur: () => void;
-}) {
-    return (
-        <div style={{ marginBottom: 12 }}>
-            <label style={{ fontSize: 12, color: "var(--text-subtle)", marginBottom: 4, display: "block" }}>{label}</label>
-            <input
-                type="number"
-                value={Number.isFinite(value) ? value : min}
-                min={min}
-                step={step}
-                onChange={(e) => {
-                    const nextValue = e.target.valueAsNumber;
-                    onChange(Number.isFinite(nextValue) ? nextValue : min);
-                }}
-                onBlur={onBlur}
-                style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }}
-            />
-        </div>
+        <TextField
+            label="Manual Thinking"
+            value={manualValue}
+            onSave={(value) => onSave({ [levelKey]: "", [manualKey]: value.trim() })}
+        />
     );
 }

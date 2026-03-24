@@ -12,6 +12,8 @@ export interface WorldPromptState {
 export interface WorldIngestSettings {
     chunk_size_chars: number;
     chunk_overlap_chars: number;
+    embedding_provider: string;
+    embedding_openai_compatible_provider: string;
     embedding_model: string;
     glean_amount: number;
     locked_at?: string | null;
@@ -37,4 +39,18 @@ export function formatPromptSourceLabel(source?: string | null): string {
     if (normalized === "world") return "world";
     if (normalized === "global") return "global";
     return "default";
+}
+
+export function formatEmbeddingProviderLabel(
+    provider?: string | null,
+    openAiCompatibleProvider?: string | null,
+): string {
+    const family = String(provider ?? "").trim().toLowerCase();
+    if (family === "gemini") return "Google (Gemini)";
+    if (family === "openai_compatible") {
+        const implementation = String(openAiCompatibleProvider ?? "").trim();
+        return implementation ? `OpenAI-compatible > ${implementation[0].toUpperCase()}${implementation.slice(1)}` : "OpenAI-compatible";
+    }
+    if (family === "intenserp") return "IntenseRP Next";
+    return String(provider ?? "").trim() || "-";
 }

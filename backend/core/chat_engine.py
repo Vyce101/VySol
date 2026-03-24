@@ -12,9 +12,10 @@ from typing import Any, Generator
 from google import genai
 from google.genai import types
 
-from .config import load_prompt, load_settings, resolve_gemini_thinking_settings
+from .config import SLOT_CHAT, load_prompt, load_settings, resolve_gemini_thinking_settings, resolve_slot_provider
 from .intenserp_provider import stream_intenserp_chat
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
+from .openai_compatible_provider import create_openai_compatible_chat_completion, stream_openai_compatible_chat
 from .retrieval_engine import RetrievalEngine
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,23 @@ def _build_gemini_debug_content(role: str, text: str, parts_payload: list[dict[s
     return {"role": gemini_role, "parts": [text]}
 
 
+def _iter_text_tokens(text: str, *, chunk_size: int = 18) -> Generator[str, None, None]:
+    if not text:
+        return
+    if len(text) <= chunk_size:
+        yield text
+        return
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + chunk_size)
+        if end < len(text):
+            next_space = text.rfind(" ", start, end)
+            if next_space > start:
+                end = next_space + 1
+        yield text[start:end]
+        start = end
+
+
 def stream_chat(
     world_id: str,
     message: str,
@@ -189,7 +207,7 @@ def stream_chat(
         system_prompt = load_prompt("chat_system_prompt")
         full_system = f"{system_prompt}\n\n{context_string}" if context_string else system_prompt
 
-        chat_provider = settings.get("chat_provider", "gemini")
+        chat_provider = resolve_slot_provider(settings, SLOT_CHAT)
 
         chat_history_msgs = settings.get("chat_history_messages", 1000)
         if isinstance(settings_override, dict) and "chat_history_messages" in settings_override:
@@ -285,6 +303,89 @@ def stream_chat(
                         except Exception:
                             pass
                 yield chunk
+            return
+
+        if chat_provider != "gemini":
+            reasoning_effort = str(settings.get("default_model_chat_groq_reasoning_effort", "") or "").strip().lower()
+            include_reasoning = bool(settings.get("groq_chat_include_reasoning"))
+            openai_context_payload = {
+                "messages": intenserp_messages_payload,
+            }
+            openai_context_meta = {
+                "schema_version": "model_context.v1",
+                "provider": chat_provider,
+                "model": model_name,
+                "captured_stage": "pre_provider_call",
+                "captured_at": captured_at,
+            }
+            if reasoning_effort:
+                openai_context_meta["reasoning_effort"] = reasoning_effort
+            if include_reasoning:
+                openai_context_meta["include_reasoning"] = True
+            if retrieval_meta:
+                openai_context_meta["retrieval"] = retrieval_meta
+            if context_graph:
+                openai_context_meta["visualization"] = {
+                    "context_graph": context_graph,
+                }
+
+            groq_payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": intenserp_messages_payload,
+                "temperature": 1.0,
+                "max_completion_tokens": 4096,
+            }
+            if reasoning_effort:
+                groq_payload["reasoning_effort"] = reasoning_effort
+            if include_reasoning:
+                groq_payload["include_reasoning"] = True
+
+            if include_reasoning:
+                response = create_openai_compatible_chat_completion(chat_provider, groq_payload)
+                choice = ((response.get("choices") or [{}])[0]) if isinstance(response, dict) else {}
+                message_payload = choice.get("message") or {}
+                content = str(message_payload.get("content") or "")
+                reasoning_text = str(
+                    message_payload.get("reasoning")
+                    or message_payload.get("reasoning_content")
+                    or choice.get("reasoning")
+                    or ""
+                )
+                for token in _iter_text_tokens(content):
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                done_payload = {
+                    "event": "done",
+                    "nodes_used": nodes_used,
+                    "context_payload": openai_context_payload,
+                    "context_meta": openai_context_meta,
+                    "thought_text": reasoning_text,
+                }
+                yield f"data: {json.dumps(done_payload)}\n\n"
+                return
+
+            content_parts: list[str] = []
+            reasoning_text = ""
+            for event in stream_openai_compatible_chat(chat_provider, groq_payload):
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                if isinstance(reasoning_delta, str) and reasoning_delta:
+                    reasoning_text += reasoning_delta
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    content_parts.append(content)
+                    yield f"data: {json.dumps({'token': content})}\n\n"
+
+            done_payload = {
+                "event": "done",
+                "nodes_used": nodes_used,
+                "context_payload": openai_context_payload,
+                "context_meta": openai_context_meta,
+                "thought_text": reasoning_text,
+            }
+            yield f"data: {json.dumps(done_payload)}\n\n"
             return
 
         disable_safety = settings.get("disable_safety_filters", False)

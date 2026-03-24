@@ -11,8 +11,17 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-from .config import load_prompt, load_settings, resolve_gemini_thinking_settings
+from .config import (
+    SLOT_ENTITY_CHOOSER,
+    SLOT_ENTITY_COMBINER,
+    SLOT_FLASH,
+    load_prompt,
+    load_settings,
+    resolve_gemini_thinking_settings,
+    resolve_slot_provider,
+)
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
+from .openai_compatible_provider import create_openai_compatible_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +90,66 @@ class ScribeOutput(BaseModel):
     merged_claims: list[ClaimOut] = []
 
 
+class EntityResolutionChooserOutput(BaseModel):
+    chosen_ids: list[str] = []
+    reasoning: str = ""
+
+
+class EntityResolutionCombinerOutput(BaseModel):
+    display_name: str
+    description: str
+
+
+def _agent_slot_for_prompt(prompt_key: str, slot_key: str | None = None) -> tuple[str | None, str | None]:
+    if slot_key == "default_model_flash":
+        return SLOT_FLASH, slot_key
+    if slot_key == "default_model_entity_chooser":
+        return SLOT_ENTITY_CHOOSER, slot_key
+    if slot_key == "default_model_entity_combiner":
+        return SLOT_ENTITY_COMBINER, slot_key
+
+    mapping = {
+        "entity_architect_prompt": (SLOT_FLASH, "default_model_flash"),
+        "relationship_architect_prompt": (SLOT_FLASH, "default_model_flash"),
+        "graph_architect_prompt": (SLOT_FLASH, "default_model_flash"),
+        "claim_architect_prompt": (SLOT_FLASH, "default_model_flash"),
+        "entity_resolution_chooser_prompt": (SLOT_ENTITY_CHOOSER, "default_model_entity_chooser"),
+        "entity_resolution_combiner_prompt": (SLOT_ENTITY_COMBINER, "default_model_entity_combiner"),
+    }
+    return mapping.get(prompt_key, (None, slot_key))
+
+
+def _output_model_for_prompt(prompt_key: str) -> type[BaseModel] | None:
+    return {
+        "entity_architect_prompt": EntityArchitectOutput,
+        "relationship_architect_prompt": RelationshipArchitectOutput,
+        "graph_architect_prompt": GraphArchitectOutput,
+        "claim_architect_prompt": ClaimArchitectOutput,
+        "entity_resolution_chooser_prompt": EntityResolutionChooserOutput,
+        "entity_resolution_combiner_prompt": EntityResolutionCombinerOutput,
+        "scribe_prompt": ScribeOutput,
+    }.get(prompt_key)
+
+
+def _message_content_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "".join(parts)
+    return str(value or "")
+
+
+def _get_provider_key_manager(provider: str):
+    try:
+        return get_key_manager(provider)
+    except TypeError:
+        return get_key_manager()
+
+
 async def _call_agent(
     prompt_key: str,
     user_content: str,
@@ -92,25 +161,16 @@ async def _call_agent(
     slot_key: str | None = None,
 ) -> tuple[dict, dict]:
     """
-    Call a Gemini agent with retry logic and key rotation.
+    Call a structured-output agent with retry logic and key rotation.
 
     Returns (parsed_json_output, usage_metadata).
     Raises AgentCallError on classified provider/runtime failures.
     """
-    km = get_key_manager()
     settings = load_settings()
-    disable_safety = settings.get("disable_safety_filters", False)
+    slot_name, resolved_slot_key = _agent_slot_for_prompt(prompt_key, slot_key)
+    provider = resolve_slot_provider(settings, slot_name) if slot_name else "gemini"
 
-    safety_settings = None
-    if disable_safety:
-        safety_settings = [
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-        ]
-
-    system_prompt = load_prompt(prompt_key, world_id=world_id)
+    system_prompt = load_prompt(prompt_key, world_id=world_id) if world_id is not None else load_prompt(prompt_key)
     if extra_system_instruction:
         system_prompt = f"{system_prompt.strip()}\n\n{extra_system_instruction.strip()}"
     backoff = [2, 4, 8]
@@ -119,77 +179,123 @@ async def _call_agent(
     for attempt in range(max_retries):
         key_idx: int | None = None
         try:
-            api_key, key_idx = await km.await_active_key()
-            client = genai.Client(api_key=api_key)
-
-            resolved_slot_key = slot_key
-            if resolved_slot_key is None:
-                resolved_slot_key = {
-                    "entity_architect_prompt": "default_model_flash",
-                    "relationship_architect_prompt": "default_model_flash",
-                    "graph_architect_prompt": "default_model_flash",
-                    "claim_architect_prompt": "default_model_flash",
-                    "entity_resolution_chooser_prompt": "default_model_entity_chooser",
-                    "entity_resolution_combiner_prompt": "default_model_entity_combiner",
-                }.get(prompt_key)
-
-            config_kwargs: dict[str, Any] = {
-                "system_instruction": system_prompt,
-                "max_output_tokens": 8192,
-                "temperature": temperature,
-                "response_mime_type": "application/json",
-                "safety_settings": safety_settings,
-            }
-            if resolved_slot_key:
-                thinking_config = resolve_gemini_thinking_settings(
-                    settings,
-                    slot_key=resolved_slot_key,
-                    model_name=model_name,
+            if provider == "gemini":
+                km = _get_provider_key_manager("gemini")
+                disable_safety = settings.get(
+                    "gemini_disable_safety_filters",
+                    settings.get("disable_safety_filters", False),
                 )
-                if thinking_config:
-                    config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_config)
 
-            config = types.GenerateContentConfig(**config_kwargs)
+                safety_settings = None
+                if disable_safety:
+                    safety_settings = [
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    ]
 
-            response = await client.aio.models.generate_content(
-                model=model_name,
-                contents=user_content,
-                config=config,
-            )
+                api_key, key_idx = await km.await_active_key()
+                client = genai.Client(api_key=api_key)
 
-            if not response.candidates or not response.candidates[0].content:
-                if response.prompt_feedback and response.prompt_feedback.block_reason:
-                    reason = response.prompt_feedback.block_reason
-                    details = []
-                    if hasattr(response.prompt_feedback, "safety_ratings"):
-                        for rating in (response.prompt_feedback.safety_ratings or []):
-                            if rating.probability != "NEGLIGIBLE":
-                                details.append(f"{rating.category}: {rating.probability}")
-                    detail_str = f" ({', '.join(details)})" if details else ""
-                    reason_text = f"{reason}{detail_str}"
-                    raise AgentCallError(
-                        "safety_block",
-                        f"Provider safety block: {reason_text}",
-                        safety_reason=reason_text,
-                        blocked_prefixed_text=user_content,
-                    )
-                raise AgentCallError("empty_response", "Provider returned an empty response.")
-
-            text = response.text.strip()
-            if text.startswith("```json"):
-                text = text.replace("```json", "", 1).replace("```", "", 1).strip()
-            elif text.startswith("```"):
-                text = text.replace("```", "", 2).strip()
-
-            parsed = json.loads(text)
-
-            usage = {}
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                usage = {
-                    "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                    "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
+                config_kwargs: dict[str, Any] = {
+                    "system_instruction": system_prompt,
+                    "max_output_tokens": 8192,
+                    "temperature": temperature,
+                    "response_mime_type": "application/json",
+                    "safety_settings": safety_settings,
                 }
+                if resolved_slot_key:
+                    thinking_config = resolve_gemini_thinking_settings(
+                        settings,
+                        slot_key=resolved_slot_key,
+                        model_name=model_name,
+                    )
+                    if thinking_config:
+                        config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_config)
 
+                config = types.GenerateContentConfig(**config_kwargs)
+
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=user_content,
+                    config=config,
+                )
+
+                if not response.candidates or not response.candidates[0].content:
+                    if response.prompt_feedback and response.prompt_feedback.block_reason:
+                        reason = response.prompt_feedback.block_reason
+                        details = []
+                        if hasattr(response.prompt_feedback, "safety_ratings"):
+                            for rating in (response.prompt_feedback.safety_ratings or []):
+                                if rating.probability != "NEGLIGIBLE":
+                                    details.append(f"{rating.category}: {rating.probability}")
+                        detail_str = f" ({', '.join(details)})" if details else ""
+                        reason_text = f"{reason}{detail_str}"
+                        raise AgentCallError(
+                            "safety_block",
+                            f"Provider safety block: {reason_text}",
+                            safety_reason=reason_text,
+                            blocked_prefixed_text=user_content,
+                        )
+                    raise AgentCallError("empty_response", "Provider returned an empty response.")
+
+                text = response.text.strip()
+                if text.startswith("```json"):
+                    text = text.replace("```json", "", 1).replace("```", "", 1).strip()
+                elif text.startswith("```"):
+                    text = text.replace("```", "", 2).strip()
+
+                parsed = json.loads(text)
+
+                usage = {}
+                if hasattr(response, "usage_metadata") and response.usage_metadata:
+                    usage = {
+                        "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
+                        "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
+                    }
+
+                return parsed, usage
+
+            schema_model = _output_model_for_prompt(prompt_key)
+            payload: dict[str, Any] = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": temperature,
+                "max_completion_tokens": 8192,
+            }
+            if schema_model is not None:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_model.__name__.lower(),
+                        "schema": schema_model.model_json_schema(),
+                    },
+                }
+            else:
+                payload["response_format"] = {"type": "json_object"}
+
+            if resolved_slot_key:
+                reasoning_key = f"{resolved_slot_key}_groq_reasoning_effort"
+                reasoning_effort = str(settings.get(reasoning_key, "") or "").strip().lower()
+                if reasoning_effort:
+                    payload["reasoning_effort"] = reasoning_effort
+
+            response = create_openai_compatible_chat_completion(provider, payload)
+            choice = ((response.get("choices") or [{}])[0]) if isinstance(response, dict) else {}
+            message_payload = choice.get("message") or {}
+            text = _message_content_to_text(message_payload.get("content")).strip()
+            if not text:
+                raise AgentCallError("empty_response", "Provider returned an empty response.")
+            parsed = json.loads(text)
+            usage_payload = response.get("usage") or {}
+            usage = {
+                "input_tokens": int(usage_payload.get("prompt_tokens") or 0),
+                "output_tokens": int(usage_payload.get("completion_tokens") or 0),
+            }
             return parsed, usage
 
         except json.JSONDecodeError as e:
@@ -202,7 +308,7 @@ async def _call_agent(
         except Exception as e:
             transient_kind = classify_transient_provider_error(e)
             if transient_kind and key_idx is not None:
-                km.report_error(key_idx, transient_kind)
+                _get_provider_key_manager(provider).report_error(key_idx, transient_kind)
                 logger.warning(
                     "Agent %s attempt %s: transient %s on key %s: %s",
                     prompt_key,

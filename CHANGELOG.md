@@ -6,6 +6,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Added
 
+- Added a provider registry with first-class Groq support for chat, graph extraction, entity chooser, and entity combiner, plus provider-aware embedding settings that stay truthful when a backend is not actually available yet.
+- Added a preset-backed global `Configuration` tab, a shared per-provider `Key Library`, and a locked baseline `Default` preset for saved global model/provider setups.
 - Initial GraphRAG backend and frontend with a resilient local launcher.
 - Split setup and usage docs into dedicated guides for setup, walkthrough, and features.
 - Added a dedicated system diagram page and linked it from the README.
@@ -23,6 +25,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Changed
 
+- Changed global settings so provider-specific controls now only appear when the selected provider actually supports them, including Gemini safety/thinking controls and Groq reasoning controls.
+- Changed world ingest settings, vector manifests, and rebuild checks to track embedding provider as well as embedding model.
 - Refreshed docs and aligned runtime defaults.
 - Corrected project branding capitalization to `VySol`.
 - Changed the README hero image to the tracked white-background social asset, and aligned backend/frontend public metadata with the `VySol` name.

@@ -13,6 +13,13 @@ from .vector_store import VectorStore
 logger = logging.getLogger(__name__)
 
 
+def _get_provider_key_manager(provider: str):
+    try:
+        return get_key_manager(provider)
+    except TypeError:
+        return get_key_manager()
+
+
 def _edge_temporal_sort_key(edge: dict) -> tuple[int, int]:
     raw_book = edge.get("source_book", 0)
     raw_chunk = edge.get("source_chunk", 0)
@@ -93,7 +100,8 @@ class RetrievalEngine:
         force_all = total_graph_nodes > 0 and entry_k >= total_graph_nodes
 
         # Step 1: Embed query once and validate retrieval health.
-        km = get_key_manager()
+        embedding_provider = getattr(self.chunk_vector_store, "embedding_provider", "gemini")
+        km = _get_provider_key_manager(embedding_provider)
         api_key, _ = km.wait_for_available_key()
         query_embedding = self.chunk_vector_store.embed_text(query, api_key)
         chunk_vector_count = self.chunk_vector_store.count()

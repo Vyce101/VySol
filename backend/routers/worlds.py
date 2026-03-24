@@ -72,6 +72,8 @@ def _save_meta(world_id: str, meta: dict) -> None:
 def _with_effective_ingest_settings(meta: dict) -> dict:
     meta["ingest_settings"] = get_world_ingest_settings(meta=meta)
     meta["embedding_model"] = meta["ingest_settings"]["embedding_model"]
+    meta["embedding_provider"] = meta["ingest_settings"]["embedding_provider"]
+    meta["embedding_openai_compatible_provider"] = meta["ingest_settings"]["embedding_openai_compatible_provider"]
     return meta
 
 
@@ -164,6 +166,8 @@ async def create_world(req: CreateWorldRequest):
         "total_nodes": 0,
         "total_edges": 0,
         "embedding_model": settings.get("embedding_model", "gemini-embedding-2-preview"),
+        "embedding_provider": settings.get("embedding_provider", "gemini"),
+        "embedding_openai_compatible_provider": settings.get("embedding_openai_compatible_provider", "groq"),
         "ingest_settings": {
             "locked_at": None,
             "last_ingest_settings_at": None,
