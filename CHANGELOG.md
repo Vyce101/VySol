@@ -4,6 +4,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-03-24
+
 ### Added
 
 - Added a provider registry with first-class Groq support for chat, graph extraction, entity chooser, and entity combiner, plus provider-aware embedding settings that stay truthful when a backend is not actually available yet.
