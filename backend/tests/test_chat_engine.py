@@ -210,6 +210,87 @@ def test_stream_chat_intenserp_emits_exact_context_payload_and_separate_meta(mon
     assert "captured_at" in done["context_meta"]
 
 
+def test_stream_chat_groq_ignores_stale_reasoning_for_known_unsupported_models(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "",
+                "graph_nodes": [],
+                "retrieval_meta": {},
+                "context_graph": None,
+            }
+
+    captured: dict[str, object] = {}
+
+    def fake_stream(provider: str, payload: dict, **kwargs):
+        captured["provider"] = provider
+        captured["payload"] = payload
+        yield {"choices": [{"delta": {"content": "hello"}}]}
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "default_model_chat": "llama-3.3-70b-versatile",
+            "default_model_chat_groq_reasoning_effort": "high",
+            "groq_chat_include_reasoning": False,
+            "chat_history_messages": 10,
+        },
+    )
+    monkeypatch.setattr(chat_engine, "resolve_slot_provider", lambda settings, slot: "groq")
+    monkeypatch.setattr(chat_engine, "stream_openai_compatible_chat", fake_stream)
+
+    events = _parse_sse_events(list(chat_engine.stream_chat("world-123", "hello")))
+
+    assert captured["provider"] == "groq"
+    assert "reasoning_effort" not in captured["payload"]
+    assert events[-1]["event"] == "done"
+
+
+def test_stream_chat_groq_preserves_reasoning_for_unknown_models(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "",
+                "graph_nodes": [],
+                "retrieval_meta": {},
+                "context_graph": None,
+            }
+
+    captured: dict[str, object] = {}
+
+    def fake_stream(provider: str, payload: dict, **kwargs):
+        captured["payload"] = payload
+        yield {"choices": [{"delta": {"content": "hello"}}]}
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "default_model_chat": "custom/groq-model",
+            "default_model_chat_groq_reasoning_effort": "medium",
+            "groq_chat_include_reasoning": False,
+            "chat_history_messages": 10,
+        },
+    )
+    monkeypatch.setattr(chat_engine, "resolve_slot_provider", lambda settings, slot: "groq")
+    monkeypatch.setattr(chat_engine, "stream_openai_compatible_chat", fake_stream)
+
+    list(chat_engine.stream_chat("world-123", "hello"))
+
+    assert captured["payload"]["reasoning_effort"] == "medium"
+
+
 def test_gemini_part_roundtrip_preserves_structured_function_call():
     part = types.Part(function_call=types.FunctionCall(name="lookup", args={"q": "x"}))
 

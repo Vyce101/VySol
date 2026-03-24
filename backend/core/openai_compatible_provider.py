@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Generator
 
@@ -119,5 +120,41 @@ def create_openai_compatible_chat_completion(
                     time.sleep(jittered_delay(backoff[attempt]))
                     continue
             raise
+
+    raise RuntimeError("OpenAI-compatible provider request failed.")
+
+
+async def async_create_openai_compatible_chat_completion(
+    provider: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 120.0,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    """Async variant of create_openai_compatible_chat_completion()."""
+    km = _get_provider_key_manager(provider)
+    base_url = _provider_base_url(provider)
+    backoff = [2, 4, 8]
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(max_retries):
+            key_idx: int | None = None
+            try:
+                api_key, key_idx = await km.await_active_key()
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=_headers(api_key),
+                    json={**payload, "stream": False},
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                transient_kind = classify_transient_provider_error(exc)
+                if transient_kind and key_idx is not None:
+                    km.report_error(key_idx, transient_kind)
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(jittered_delay(backoff[attempt]))
+                        continue
+                raise
 
     raise RuntimeError("OpenAI-compatible provider request failed.")

@@ -56,3 +56,75 @@ def test_call_agent_retries_timeout_on_next_key(monkeypatch):
     assert parsed == {"nodes": [], "edges": []}
     assert usage == {"input_tokens": 11, "output_tokens": 7}
     assert dummy_km.reported == [(0, "timeout")]
+
+
+def test_call_agent_groq_ignores_reasoning_for_known_unsupported_models(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_completion(provider: str, payload: dict, **kwargs):
+        captured["provider"] = provider
+        captured["payload"] = payload
+        return {
+            "choices": [{"message": {"content": '{"nodes": [], "edges": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+        }
+
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "high",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key: "SYSTEM")
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion", fake_completion)
+
+    parsed, usage = asyncio.run(
+        agents._call_agent(
+            prompt_key="graph_architect_prompt",
+            user_content="chunk text",
+            model_name="llama-3.3-70b-versatile",
+            temperature=0.1,
+        )
+    )
+
+    assert parsed == {"nodes": [], "edges": []}
+    assert usage == {"input_tokens": 5, "output_tokens": 3}
+    assert captured["provider"] == "groq"
+    assert "reasoning_effort" not in captured["payload"]
+
+
+def test_call_agent_groq_preserves_manual_reasoning_for_unknown_models(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_completion(provider: str, payload: dict, **kwargs):
+        captured["payload"] = payload
+        return {
+            "choices": [{"message": {"content": '{"nodes": [], "edges": []}'}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        }
+
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "medium",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key: "SYSTEM")
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion", fake_completion)
+
+    asyncio.run(
+        agents._call_agent(
+            prompt_key="graph_architect_prompt",
+            user_content="chunk text",
+            model_name="custom/groq-model",
+            temperature=0.1,
+        )
+    )
+
+    assert captured["payload"]["reasoning_effort"] == "medium"

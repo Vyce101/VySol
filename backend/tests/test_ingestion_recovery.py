@@ -542,6 +542,32 @@ def test_build_chunk_plan_skips_unresolved_safety_queue_chunks_for_retry_and_res
     assert resume_plan[3] == "full"
 
 
+def test_build_chunk_plan_resumes_extracted_but_unembedded_chunks_as_embedding_only():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [],
+        "stage_failures": [],
+        "extracted_chunks": [0, 1, 2],
+        "embedded_chunks": [0],
+    }
+
+    plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=4,
+        resume=True,
+        retry_only=False,
+        retry_stage="all",
+        checkpoint={"source_id": "source-a", "last_completed_chunk_index": 2},
+    )
+
+    assert plan == {
+        1: "embedding_only",
+        2: "embedding_only",
+        3: "full",
+    }
+
+
 def test_checkpoint_ignores_stale_failures_after_audit(monkeypatch):
     meta = {
         "world_id": "world-1",
@@ -1466,6 +1492,94 @@ def test_sleep_with_abort_cancels_promptly():
 
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(sleeper, timeout=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_await_with_abort_cancels_slow_work_promptly(monkeypatch):
+    cancelled = asyncio.Event()
+    abort_event = threading.Event()
+    monkeypatch.setattr(ingestion_engine, "_abort_events", {"world-1": abort_event})
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": abort_event})
+
+    async def slow_work():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def scenario():
+        waiter = asyncio.create_task(
+            ingestion_engine._await_with_abort("world-1", abort_event, slow_work())
+        )
+        await asyncio.sleep(0.05)
+        abort_event.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiter, timeout=0.5)
+
+        await asyncio.wait_for(cancelled.wait(), timeout=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_rebuild_unique_node_vectors_keeps_live_store_when_abort_happens_before_swap():
+    abort_event = threading.Event()
+
+    class FakeGraph:
+        def __init__(self):
+            self._nodes = {
+                "n1": {"id": "n1", "display_name": "Node 1", "normalized_id": "node-1"},
+            }
+
+        def nodes(self):
+            return list(self._nodes.keys())
+
+    class FakeGraphStore:
+        def __init__(self):
+            self.graph = FakeGraph()
+
+        def get_node(self, node_id: str):
+            return self.graph._nodes.get(node_id)
+
+    class FakeVectorStore:
+        def __init__(self, name: str, docs: dict[str, str] | None = None):
+            self.collection_name = name
+            self.docs = dict(docs or {})
+            self.deleted = False
+            self.staging_store: FakeVectorStore | None = None
+
+        def create_staging_store(self):
+            self.staging_store = FakeVectorStore(f"{self.collection_name}__staging")
+            return self.staging_store
+
+        def embed_texts(self, texts, api_key):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+        def upsert_documents_embeddings(self, *, document_ids, texts, metadatas, embeddings):
+            for document_id, text in zip(document_ids, texts):
+                self.docs[str(document_id)] = str(text)
+            abort_event.set()
+
+        def swap_staged_collection(self, staged_store):
+            self.docs = dict(staged_store.docs)
+
+        def delete_collection(self):
+            self.deleted = True
+
+    async def scenario():
+        live_store = FakeVectorStore("live", {"old-node": "old document"})
+        with pytest.raises(asyncio.CancelledError):
+            await ingestion_engine._rebuild_unique_node_vectors(
+                FakeGraphStore(),
+                live_store,
+                "test-key",
+                abort_check=lambda: (_ for _ in ()).throw(asyncio.CancelledError()) if abort_event.is_set() else None,
+            )
+        assert live_store.docs == {"old-node": "old document"}
+        assert live_store.staging_store is not None
+        assert live_store.staging_store.deleted is True
 
     asyncio.run(scenario())
 

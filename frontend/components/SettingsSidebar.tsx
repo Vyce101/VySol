@@ -1,43 +1,25 @@
 "use client";
 
-import { ReactNode, useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Info, KeyRound, Plus, Trash2, X } from "lucide-react";
 
 import { apiFetch } from "@/lib/api";
+import {
+    CUSTOM_MODEL_OPTION_VALUE,
+    getGeminiThinkingUiState,
+    getModelPickerValue,
+    getProviderEmbeddingModelOptions,
+    getProviderTextModelOptions,
+    getGroqReasoningUiState,
+    type GeminiThinkingUiState,
+    type GroqReasoningUiState,
+    type ProviderCapabilities,
+    type ProviderFieldMeta,
+    type ProviderModelOption,
+} from "@/lib/provider-models";
 import { applyTheme, normalizeTheme, type UITheme } from "@/lib/theme";
 
 type SlotKey = "flash" | "chat" | "entity_chooser" | "entity_combiner" | "embedding";
-
-interface ProviderFamilyOption {
-    value: string;
-    label: string;
-}
-
-interface ProviderFieldMeta {
-    name: string;
-    label: string;
-    secret?: boolean;
-    multiline?: boolean;
-}
-
-interface ProviderMeta {
-    id: string;
-    display_name: string;
-    family: string;
-    supported_slots: string[];
-    required_credential_fields: string[];
-    credential_fields: ProviderFieldMeta[];
-    supports_embedding: boolean;
-    supports_gemini_safety: boolean;
-    supports_gemini_thinking: boolean;
-    supports_groq_reasoning: boolean;
-}
-
-interface ProviderCapabilities {
-    providers: Record<string, ProviderMeta>;
-    families: Record<string, { default: string; options: ProviderFamilyOption[] }>;
-    openai_compatible_providers: Array<{ value: string; label: string }>;
-}
 
 interface ProviderStatus {
     slot: SlotKey;
@@ -134,26 +116,7 @@ interface KeyLibraryResponse {
     providers: Record<string, ProviderLibraryPayload>;
 }
 
-const GEMINI_3_THINKING_LEVELS: Array<{ prefix: string; levels: string[] }> = [
-    { prefix: "gemini-3.1-pro", levels: ["low", "medium", "high"] },
-    { prefix: "gemini-3.1-flash-lite", levels: ["minimal", "low", "medium", "high"] },
-    { prefix: "gemini-3-flash", levels: ["minimal", "low", "medium", "high"] },
-];
-
 const THINKING_TOOLTIP_TEXT = "Gemini 3 models use the dropdown when supported. Manual mode accepts either a named level or a numeric budget.";
-const GROQ_REASONING_OPTIONS = [
-    { value: "", label: "Use model default" },
-    { value: "low", label: "Low" },
-    { value: "medium", label: "Medium" },
-    { value: "high", label: "High" },
-];
-
-function getSupportedGeminiThinkingLevels(modelName: string): string[] {
-    const normalized = modelName.trim().toLowerCase();
-    if (!normalized) return [];
-    const match = GEMINI_3_THINKING_LEVELS.find((entry) => normalized.startsWith(entry.prefix));
-    return match ? [...match.levels] : [];
-}
 
 function resolveSelectedProvider(settings: SettingsData, slot: SlotKey): string {
     if (slot === "flash") {
@@ -683,6 +646,10 @@ function ModelCard({
     const supportsGeminiThinking = settings.provider_registry.providers[resolvedProvider]?.supports_gemini_thinking;
     const supportsGroqReasoning = settings.provider_registry.providers[resolvedProvider]?.supports_groq_reasoning;
     const showGenericModelField = !(slot === "chat" && resolvedProvider === "intenserp");
+    const modelOptions = slot === "embedding"
+        ? getProviderEmbeddingModelOptions(settings.provider_registry, resolvedProvider)
+        : getProviderTextModelOptions(settings.provider_registry, resolvedProvider);
+    const isCustomModel = getModelPickerValue(modelOptions, modelValue) === CUSTOM_MODEL_OPTION_VALUE;
     const prefix = slot === "flash"
         ? "default_model_flash"
         : slot === "chat"
@@ -690,6 +657,12 @@ function ModelCard({
             : slot === "entity_chooser"
                 ? "default_model_entity_chooser"
                 : "default_model_entity_combiner";
+    const geminiThinkingUi = supportsGeminiThinking
+        ? getGeminiThinkingUiState(settings.provider_registry, resolvedProvider, modelValue)
+        : null;
+    const groqReasoningUi = supportsGroqReasoning
+        ? getGroqReasoningUiState(settings.provider_registry, resolvedProvider, modelValue)
+        : null;
 
     return (
         <Card
@@ -716,10 +689,17 @@ function ModelCard({
                     </select>
                 </div>
                 ) : null}
-                {showGenericModelField ? <TextField label="Model" value={modelValue} onSave={onModelSave} /> : null}
+                {showGenericModelField ? (
+                    <ModelPickerField
+                        label={slot === "embedding" ? "Embedding Model" : "Model"}
+                        value={modelValue}
+                        options={modelOptions}
+                        onSave={onModelSave}
+                    />
+                ) : null}
                 {supportsGeminiThinking && geminiThinkingLevel !== undefined && geminiThinkingManual !== undefined && onGeminiThinkingSave ? (
                     <ThinkingControl
-                        modelName={modelValue}
+                        uiState={geminiThinkingUi}
                         levelValue={geminiThinkingLevel}
                         manualValue={geminiThinkingManual}
                         onSave={onGeminiThinkingSave}
@@ -728,14 +708,17 @@ function ModelCard({
                     />
                 ) : null}
                 {supportsGroqReasoning && groqReasoningValue !== undefined && onGroqReasoningSave ? (
-                    <div>
-                        <label style={labelStyle}>Reasoning Effort</label>
-                        <select value={groqReasoningValue} onChange={(event) => { void onGroqReasoningSave(event.target.value); }} style={selectStyle}>
-                            {GROQ_REASONING_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>{option.label}</option>
-                            ))}
-                        </select>
-                    </div>
+                    <GroqReasoningControl
+                        uiState={isCustomModel
+                            ? {
+                                state: "custom",
+                                option: null,
+                                supportedOptions: [],
+                            }
+                            : groqReasoningUi}
+                        value={groqReasoningValue}
+                        onSave={onGroqReasoningSave}
+                    />
                 ) : null}
                 {extra}
             </div>
@@ -836,26 +819,83 @@ function TextField({
     onSave,
     onChange,
     secret = false,
+    hideLabel = false,
 }: {
     label: string;
     value: string;
     onSave?: (value: string) => void | Promise<void>;
     onChange?: (value: string) => void;
     secret?: boolean;
+    hideLabel?: boolean;
 }) {
+    const isControlled = typeof onChange === "function";
+    const inputRef = useRef<HTMLInputElement | null>(null);
+
+    useEffect(() => {
+        if (isControlled) {
+            return;
+        }
+        const input = inputRef.current;
+        if (!input || document.activeElement === input) {
+            return;
+        }
+        if (input.value !== value) {
+            input.value = value;
+        }
+    }, [isControlled, value]);
+
     return (
         <div style={{ display: "grid", gap: 6 }}>
-            <label style={labelStyle}>{label}</label>
+            {!hideLabel ? <label style={labelStyle}>{label}</label> : null}
             <input
-                key={`${label}-${value}`}
+                ref={inputRef}
                 type={secret ? "password" : "text"}
-                defaultValue={value}
+                {...(isControlled ? { value } : { defaultValue: value })}
                 onChange={(event) => {
                     onChange?.(event.target.value);
                 }}
                 onBlur={(event) => { if (onSave) void onSave(event.target.value); }}
                 style={inputStyle}
             />
+        </div>
+    );
+}
+
+function ModelPickerField({
+    label,
+    value,
+    options,
+    onSave,
+}: {
+    label: string;
+    value: string;
+    options: ProviderModelOption[];
+    onSave: (value: string) => void | Promise<void>;
+}) {
+    const pickerValue = getModelPickerValue(options, value);
+
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={labelStyle}>{label}</label>
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "minmax(0, 1fr) 180px" }}>
+                <TextField label={label} value={value} onSave={onSave} hideLabel />
+                <select
+                    value={pickerValue}
+                    onChange={(event) => {
+                        const nextValue = event.target.value;
+                        if (nextValue === CUSTOM_MODEL_OPTION_VALUE) {
+                            return;
+                        }
+                        void onSave(nextValue);
+                    }}
+                    style={selectStyle}
+                >
+                    <option value={CUSTOM_MODEL_OPTION_VALUE}>Custom</option>
+                    {options.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                </select>
+            </div>
         </div>
     );
 }
@@ -877,22 +917,44 @@ function NumberField({ label, value, onSave, step = 1 }: { label: string; value:
 }
 
 function ThinkingControl({
-    modelName,
+    uiState,
     levelValue,
     manualValue,
     onSave,
     levelKey,
     manualKey,
 }: {
-    modelName: string;
+    uiState: GeminiThinkingUiState | null;
     levelValue: string;
     manualValue: string;
     onSave: (updates: Record<string, unknown>) => void | Promise<void>;
     levelKey: string;
     manualKey: string;
 }) {
-    const supportedLevels = getSupportedGeminiThinkingLevels(modelName);
+    if (!uiState) {
+        return null;
+    }
 
+    if (uiState.state === "unsupported") {
+        return (
+            <CapabilityNotice
+                label="Thinking"
+                message={`${uiState.option?.label ?? "This model"} does not expose Gemini thinking presets in the catalog.`}
+            />
+        );
+    }
+
+    if (uiState.state === "custom") {
+        return (
+            <TextField
+                label="Manual Thinking"
+                value={manualValue}
+                onSave={(value) => onSave({ [levelKey]: "", [manualKey]: value.trim() })}
+            />
+        );
+    }
+
+    const supportedLevels = uiState.supportedLevels;
     if (supportedLevels.length > 0) {
         return (
             <div style={{ display: "grid", gap: 6 }}>
@@ -916,11 +978,74 @@ function ThinkingControl({
         );
     }
 
+    return null;
+}
+
+function GroqReasoningControl({
+    uiState,
+    value,
+    onSave,
+}: {
+    uiState: GroqReasoningUiState | { state: "custom"; option: null; supportedOptions: [] } | null;
+    value: string;
+    onSave: (value: string) => void | Promise<void>;
+}) {
+    if (!uiState) {
+        return null;
+    }
+
+    if (uiState.state === "unsupported") {
+        return (
+            <CapabilityNotice
+                label="Reasoning Effort"
+                message={`${uiState.option?.label ?? "This model"} does not expose Groq reasoning controls in the catalog.`}
+            />
+        );
+    }
+
+    if (uiState.state === "supported") {
+        const normalizedValue = value.trim().toLowerCase();
+        const supportedValueSet = new Set(uiState.supportedOptions.map((option) => option.value));
+        const selectedValue = supportedValueSet.has(normalizedValue) ? normalizedValue : "";
+        return (
+            <div style={{ display: "grid", gap: 6 }}>
+                <label style={labelStyle}>Reasoning Effort</label>
+                <select value={selectedValue} onChange={(event) => { void onSave(event.target.value); }} style={selectStyle}>
+                    <option value="">Use model default</option>
+                    {uiState.supportedOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                </select>
+            </div>
+        );
+    }
+
     return (
         <TextField
-            label="Manual Thinking"
-            value={manualValue}
-            onSave={(value) => onSave({ [levelKey]: "", [manualKey]: value.trim() })}
+            label="Manual Reasoning Effort"
+            value={value}
+            onSave={(nextValue) => onSave(nextValue.trim())}
         />
+    );
+}
+
+function CapabilityNotice({ label, message }: { label: string; message: string }) {
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={labelStyle}>{label}</label>
+            <div
+                style={{
+                    padding: 12,
+                    borderRadius: 12,
+                    border: "1px solid var(--border)",
+                    background: "var(--background)",
+                    color: "var(--text-muted)",
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                }}
+            >
+                {message}
+            </div>
+        </div>
     );
 }

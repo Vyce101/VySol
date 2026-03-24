@@ -6,10 +6,12 @@ import json
 import logging
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import chromadb
 from google import genai
 
+from .atomic_json import dump_json_atomic
 from .config import (
     get_world_embedding_model,
     get_world_embedding_provider,
@@ -44,18 +46,26 @@ class VectorStore:
         embedding_model: str | None = None,
         embedding_provider: str | None = None,
         collection_suffix: str | None = None,
+        *,
+        collection_name_override: str | None = None,
+        manage_manifest: bool = True,
     ):
         self.world_id = world_id
         self.embedding_provider = embedding_provider or get_world_embedding_provider(world_id)
         self.embedding_model = embedding_model or get_world_embedding_model(world_id)
         self.collection_suffix = collection_suffix
+        self.manage_manifest = manage_manifest
         self.collection_key = str(collection_suffix or "chunks")
         self.collection_kind = self._infer_collection_kind(self.collection_key)
         chroma_path = str(world_chroma_dir(world_id))
         self.client = chromadb.PersistentClient(path=chroma_path)
         self._embed_clients: dict[str, genai.Client] = {}
         base_name = f"world_{world_id.replace('-', '_')}"
-        collection_name = f"{base_name}_{collection_suffix}" if collection_suffix else base_name
+        collection_name = (
+            str(collection_name_override)
+            if collection_name_override
+            else (f"{base_name}_{collection_suffix}" if collection_suffix else base_name)
+        )
         self.collection_name = collection_name
         self.collection = self.client.get_or_create_collection(name=collection_name)
 
@@ -90,10 +100,7 @@ class VectorStore:
     def _save_manifest(self, manifest: dict) -> None:
         path = self._manifest_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp.json")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-        tmp.replace(path)
+        dump_json_atomic(path, manifest)
 
     def _get_manifest_entry(self) -> dict:
         manifest = self._load_manifest()
@@ -111,6 +118,8 @@ class VectorStore:
         return str(provider) if provider else None
 
     def _set_recorded_embedding_model(self, embedding_model: str) -> None:
+        if not self.manage_manifest:
+            return
         manifest = self._load_manifest()
         collections = manifest.setdefault("collections", {})
         collections[self.collection_key] = {
@@ -121,6 +130,8 @@ class VectorStore:
         self._save_manifest(manifest)
 
     def _clear_recorded_embedding_model(self) -> None:
+        if not self.manage_manifest:
+            return
         manifest = self._load_manifest()
         collections = manifest.setdefault("collections", {})
         if self.collection_key in collections:
@@ -370,6 +381,55 @@ class VectorStore:
             pass
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
         self._clear_recorded_embedding_model()
+
+    def delete_collection(self) -> None:
+        """Delete the collection without recreating it."""
+        try:
+            self.client.delete_collection(name=self.collection_name)
+        except Exception:
+            pass
+        self._clear_recorded_embedding_model()
+
+    def create_staging_store(self) -> VectorStore:
+        """Create a temporary collection for staged rebuilds."""
+        staging_name = f"{self.collection_name}__staging_{uuid4().hex}"
+        return VectorStore(
+            self.world_id,
+            embedding_model=self.embedding_model,
+            embedding_provider=self.embedding_provider,
+            collection_suffix=self.collection_suffix,
+            collection_name_override=staging_name,
+            manage_manifest=False,
+        )
+
+    def swap_staged_collection(self, staged_store: VectorStore) -> None:
+        """Swap a fully built staging collection into the live collection name."""
+        backup_name = f"{self.collection_name}__backup_{uuid4().hex}"
+        live_name = self.collection_name
+        staged_name = staged_store.collection_name
+
+        self.collection.modify(name=backup_name)
+        self.collection_name = backup_name
+        self.collection = self.client.get_or_create_collection(name=backup_name)
+
+        try:
+            staged_store.collection.modify(name=live_name)
+            staged_store.collection_name = live_name
+            staged_store.collection = staged_store.client.get_or_create_collection(name=live_name)
+        except Exception:
+            self.collection.modify(name=live_name)
+            self.collection_name = live_name
+            self.collection = self.client.get_or_create_collection(name=live_name)
+            raise
+
+        self.collection_name = live_name
+        self.collection = self.client.get_or_create_collection(name=live_name)
+        self._set_recorded_embedding_model(staged_store.embedding_model)
+
+        try:
+            self.client.delete_collection(name=backup_name)
+        except Exception:
+            pass
 
     def count(self) -> int:
         return self.collection.count()

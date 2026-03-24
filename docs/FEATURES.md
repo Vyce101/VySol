@@ -86,6 +86,7 @@ Gemini behavior:
 - `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
 - `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
 - Leaving the dropdown blank means `use the provider default` for that model
+- Known Gemini catalog models that do not support a built-in dropdown now show a visible unsupported note instead of silently hiding the control
 
 Manual fallback behavior:
 
@@ -101,7 +102,11 @@ Manual fallback behavior:
 Groq behavior:
 
 - `OpenAI-compatible > Groq` can be selected for chat, graph extraction, entity chooser, and entity combiner
-- Groq rows use `Reasoning Effort` instead of Gemini thinking controls
+- Groq rows use `Reasoning Effort` instead of Gemini thinking controls, but only when the selected Groq model actually supports reasoning
+- `openai/gpt-oss-20b` and `openai/gpt-oss-120b` expose `low`, `medium`, and `high`
+- `qwen/qwen3-32b` exposes `none` plus `Reasoning On (provider default)`
+- Known non-reasoning Groq catalog models show a visible unsupported note instead of a fake dropdown
+- Custom or unknown Groq model ids get an advanced manual reasoning field because VySol cannot safely infer their supported presets
 - Chat exposes a Groq-only `Include Reasoning` toggle
 - If Groq returns reasoning, VySol stores it with the message after completion instead of pretending it streamed Gemini-style thought tokens
 - Groq does not show Gemini-only safety controls
@@ -193,6 +198,7 @@ Important behavior:
 - Newly added pending sources are ignored by `Re-embed All`; use `Resume` to ingest those
 - `Re-embed All` is blocked if a previously ingested source is missing, changed, partially ingested, failed, or comes from an older world that predates stored source snapshots
 - `Re-embed All` reuses active repaired chunk bodies when the locked source snapshot and chunk map still match, so repaired text stays aligned with rebuilt vectors
+- During a full unique-node rebuild, VySol stages the replacement node-vector collection and swaps it into place only after success so aborting the rebuild does not leave the live node-vector index empty or partial
 - `Re-ingest` is now the single full rebuild path for chunks, extraction, graph data, and vectors
 - Brand-new worlds now expose an inline first-run setup editor on the main ingest page so users can change chunk settings, glean amount, embedding model, and ingest/entity-resolution prompts before the first ingest starts
 - After a world has ingest history, the main ingest page keeps the current world's ingest settings and prompt values as a read-only snapshot
@@ -211,6 +217,7 @@ Important behavior:
 - `Chunks Embedded` tracks chunks whose chunk-vector embedding has been durably written
 - `Unique Graph Nodes` tracks the current unique nodes in the saved graph
 - `Embedded Unique Nodes` tracks how many current unique graph nodes still have matching embeddings in the unique-node index
+- Per-chunk embed completion now reports chunk-vector completion only; final unique-node vector totals are reported separately by the later world-level rebuild phase
 - World-level vector rebuild work now has its own progress phases, so `Re-embed All` can continue through `unique_node_rebuild` and `audit_finalization` after chunk work reaches 100%
 - World-scope blockers now surface separately from per-chunk `Failed Records`, instead of hiding only in the live agent log
 - The node counters reflect the current merged graph state, not raw per-chunk extraction totals
@@ -218,6 +225,7 @@ Important behavior:
 - If a node id exists in the index but its stored document no longer matches the current merged node text, it is treated as stale until repaired
 - Wait states such as `Queued for extraction slot`, `Queued for embedding slot`, and `Waiting for API key cooldown` are shown as secondary activity context instead of replacing the main progress summary
 - The floating global ingest panel stays compact and keeps the same calm world-level progress semantics without showing the full row set
+- `Abort` is a soft cancel, so the UI stops waiting on slow model/embed work quickly and any late provider results from that aborted run are ignored instead of mutating live ingest state
 
 ## Safety Review Queue
 

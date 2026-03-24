@@ -18,10 +18,11 @@ from .config import (
     load_prompt,
     load_settings,
     resolve_gemini_thinking_settings,
+    resolve_groq_reasoning_effort,
     resolve_slot_provider,
 )
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
-from .openai_compatible_provider import create_openai_compatible_chat_completion
+from .openai_compatible_provider import async_create_openai_compatible_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -279,12 +280,15 @@ async def _call_agent(
                 payload["response_format"] = {"type": "json_object"}
 
             if resolved_slot_key:
-                reasoning_key = f"{resolved_slot_key}_groq_reasoning_effort"
-                reasoning_effort = str(settings.get(reasoning_key, "") or "").strip().lower()
+                reasoning_effort = resolve_groq_reasoning_effort(
+                    settings,
+                    slot_key=resolved_slot_key,
+                    model_name=model_name,
+                )
                 if reasoning_effort:
                     payload["reasoning_effort"] = reasoning_effort
 
-            response = create_openai_compatible_chat_completion(provider, payload)
+            response = await async_create_openai_compatible_chat_completion(provider, payload)
             choice = ((response.get("choices") or [{}])[0]) if isinstance(response, dict) else {}
             message_payload = choice.get("message") or {}
             text = _message_content_to_text(message_payload.get("content")).strip()

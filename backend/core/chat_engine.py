@@ -12,7 +12,14 @@ from typing import Any, Generator
 from google import genai
 from google.genai import types
 
-from .config import SLOT_CHAT, load_prompt, load_settings, resolve_gemini_thinking_settings, resolve_slot_provider
+from .config import (
+    SLOT_CHAT,
+    load_prompt,
+    load_settings,
+    resolve_gemini_thinking_settings,
+    resolve_groq_reasoning_effort,
+    resolve_slot_provider,
+)
 from .intenserp_provider import stream_intenserp_chat
 from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
 from .openai_compatible_provider import create_openai_compatible_chat_completion, stream_openai_compatible_chat
@@ -306,7 +313,11 @@ def stream_chat(
             return
 
         if chat_provider != "gemini":
-            reasoning_effort = str(settings.get("default_model_chat_groq_reasoning_effort", "") or "").strip().lower()
+            reasoning_effort = resolve_groq_reasoning_effort(
+                settings,
+                slot_key="default_model_chat",
+                model_name=model_name,
+            )
             include_reasoning = bool(settings.get("groq_chat_include_reasoning"))
             openai_context_payload = {
                 "messages": intenserp_messages_payload,

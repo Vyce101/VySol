@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .atomic_json import dump_json_atomic
+
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
 SETTINGS_DIR = ROOT_DIR / "settings"
@@ -222,11 +224,74 @@ LEGACY_REMOVED_KEYS = {
     "ingestion_concurrency",
 }
 
-GEMINI_3_THINKING_LEVELS = (
-    ("gemini-3.1-pro", ("low", "medium", "high")),
-    ("gemini-3.1-flash-lite", ("minimal", "low", "medium", "high")),
-    ("gemini-3-flash", ("minimal", "low", "medium", "high")),
-)
+TEXT_MODEL_OPTIONS_BY_PROVIDER: dict[str, tuple[dict[str, Any], ...]] = {
+    PROVIDER_GEMINI: (
+        {
+            "value": "gemini-3.1-pro-preview",
+            "label": "Gemini 3.1 Pro Preview",
+            "gemini_thinking_levels": ("low", "medium", "high"),
+        },
+        {
+            "value": "gemini-3.1-flash-lite-preview",
+            "label": "Gemini 3.1 Flash-Lite Preview",
+            "gemini_thinking_levels": ("minimal", "low", "medium", "high"),
+        },
+        {
+            "value": "gemini-3-flash-preview",
+            "label": "Gemini 3 Flash Preview",
+            "gemini_thinking_levels": ("minimal", "low", "medium", "high"),
+        },
+    ),
+    PROVIDER_GROQ: (
+        {
+            "value": "openai/gpt-oss-20b",
+            "label": "OpenAI GPT-OSS 20B",
+            "groq_reasoning_options": (
+                {"value": "low", "label": "Low"},
+                {"value": "medium", "label": "Medium"},
+                {"value": "high", "label": "High"},
+            ),
+        },
+        {
+            "value": "openai/gpt-oss-120b",
+            "label": "OpenAI GPT-OSS 120B",
+            "groq_reasoning_options": (
+                {"value": "low", "label": "Low"},
+                {"value": "medium", "label": "Medium"},
+                {"value": "high", "label": "High"},
+            ),
+        },
+        {
+            "value": "qwen/qwen3-32b",
+            "label": "Qwen 3 32B",
+            "groq_reasoning_options": (
+                {"value": "none", "label": "None"},
+                {"value": "default", "label": "Reasoning On (provider default)"},
+            ),
+        },
+        {
+            "value": "llama-3.3-70b-versatile",
+            "label": "Llama 3.3 70B Versatile",
+        },
+        {
+            "value": "llama-3.1-8b-instant",
+            "label": "Llama 3.1 8B Instant",
+        },
+        {
+            "value": "moonshotai/kimi-k2-instruct-0905",
+            "label": "MoonshotAI Kimi K2 Instruct 0905",
+        },
+    ),
+}
+
+EMBEDDING_MODEL_OPTIONS_BY_PROVIDER: dict[str, tuple[dict[str, str], ...]] = {
+    PROVIDER_GEMINI: (
+        {"value": "gemini-embedding-001", "label": "Gemini Embedding 001"},
+        {"value": "gemini-embedding-2-preview", "label": "Gemini Embedding 2 Preview"},
+    ),
+    PROVIDER_GROQ: (),
+    PROVIDER_INTENSERP: (),
+}
 
 _SLOT_PROVIDER_FIELDS = {
     SLOT_FLASH: ("default_model_flash_provider", "default_model_flash_openai_compatible_provider"),
@@ -813,10 +878,7 @@ def _load_raw_settings() -> tuple[dict[str, Any], bool]:
 
 
 def _save_raw_settings(raw_settings: dict[str, Any]) -> None:
-    tmp = SETTINGS_FILE.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(raw_settings, handle, indent=2)
-    os.replace(str(tmp), str(SETTINGS_FILE))
+    dump_json_atomic(SETTINGS_FILE, raw_settings)
 
 
 def _resolve_active_preset(raw_settings: dict[str, Any]) -> dict[str, Any]:
@@ -1052,6 +1114,55 @@ def activate_settings_preset(preset_id: str) -> dict[str, str]:
     raise ValueError("Preset not found.")
 
 
+def _serialize_text_model_options(provider: str) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    for option in TEXT_MODEL_OPTIONS_BY_PROVIDER.get(provider, ()):
+        gemini_levels = list(option.get("gemini_thinking_levels", ()))
+        groq_reasoning_options = [dict(item) for item in option.get("groq_reasoning_options", ())]
+        options.append(
+            {
+                "value": str(option["value"]),
+                "label": str(option.get("label") or option["value"]),
+                "supports_gemini_thinking": bool(gemini_levels),
+                "gemini_thinking_levels": gemini_levels,
+                "supports_groq_reasoning": bool(groq_reasoning_options),
+                "groq_reasoning_options": groq_reasoning_options,
+            }
+        )
+    return options
+
+
+def _serialize_embedding_model_options(provider: str) -> list[dict[str, str]]:
+    return [
+        {
+            "value": str(option["value"]),
+            "label": str(option.get("label") or option["value"]),
+            "provider": provider,
+        }
+        for option in EMBEDDING_MODEL_OPTIONS_BY_PROVIDER.get(provider, ())
+    ]
+
+
+def get_text_model_option(provider: str, model_name: object) -> dict[str, Any] | None:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return None
+    for option in TEXT_MODEL_OPTIONS_BY_PROVIDER.get(provider, ()):
+        if str(option.get("value") or "").strip().lower() == normalized:
+            return dict(option)
+    return None
+
+
+def get_embedding_model_option(provider: str, model_name: object) -> dict[str, Any] | None:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return None
+    for option in EMBEDDING_MODEL_OPTIONS_BY_PROVIDER.get(provider, ()):
+        if str(option.get("value") or "").strip().lower() == normalized:
+            return dict(option)
+    return None
+
+
 def get_provider_capabilities() -> dict[str, Any]:
     return {
         "providers": {
@@ -1066,6 +1177,8 @@ def get_provider_capabilities() -> dict[str, Any]:
                 "supports_gemini_safety": bool(info.get("supports_gemini_safety")),
                 "supports_gemini_thinking": bool(info.get("supports_gemini_thinking")),
                 "supports_groq_reasoning": bool(info.get("supports_groq_reasoning")),
+                "text_model_options": _serialize_text_model_options(provider),
+                "embedding_model_options": _serialize_embedding_model_options(provider),
             }
             for provider, info in PROVIDER_REGISTRY.items()
         },
@@ -1243,10 +1356,52 @@ def get_supported_gemini_thinking_levels(model_name: object) -> list[str]:
     normalized = str(model_name or "").strip().lower()
     if not normalized:
         return []
-    for prefix, levels in GEMINI_3_THINKING_LEVELS:
-        if normalized.startswith(prefix):
-            return list(levels)
+
+    option = get_text_model_option(PROVIDER_GEMINI, model_name)
+    if option:
+        return [str(level) for level in option.get("gemini_thinking_levels", ())]
+
+    for candidate in TEXT_MODEL_OPTIONS_BY_PROVIDER.get(PROVIDER_GEMINI, ()):
+        value = str(candidate.get("value") or "").strip().lower()
+        aliases = {value}
+        if value.endswith("-preview"):
+            aliases.add(value.removesuffix("-preview"))
+        if any(normalized == alias or normalized.startswith(alias) for alias in aliases if alias):
+            return [str(level) for level in candidate.get("gemini_thinking_levels", ())]
     return []
+
+
+def get_supported_groq_reasoning_options(model_name: object) -> list[str]:
+    option = get_text_model_option(PROVIDER_GROQ, model_name)
+    if not option:
+        return []
+    output: list[str] = []
+    for item in option.get("groq_reasoning_options", ()):
+        value = str(item.get("value") or "").strip().lower()
+        if value:
+            output.append(value)
+    return output
+
+
+def resolve_groq_reasoning_effort(
+    settings: dict,
+    *,
+    slot_key: str,
+    model_name: object,
+) -> str:
+    raw_value = str(settings.get(f"{slot_key}_groq_reasoning_effort", "") or "").strip().lower()
+    if not raw_value:
+        return ""
+
+    option = get_text_model_option(PROVIDER_GROQ, model_name)
+    if option is None:
+        return raw_value
+
+    supported_options = get_supported_groq_reasoning_options(model_name)
+    if not supported_options:
+        return ""
+
+    return raw_value if raw_value in supported_options else ""
 
 
 def resolve_gemini_thinking_settings(
@@ -1455,10 +1610,7 @@ def set_world_ingest_settings(
     meta["embedding_provider"] = resolve_slot_provider(updated, SLOT_EMBEDDING)
     meta["embedding_openai_compatible_provider"] = updated["embedding_openai_compatible_provider"]
 
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, meta)
     return updated
 
 
@@ -1503,10 +1655,7 @@ def set_world_ingest_prompt_overrides(world_id: str, prompt_overrides: dict | No
             normalized[key] = value
 
     meta["ingest_prompt_overrides"] = normalized
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, meta)
     return normalized
 
 

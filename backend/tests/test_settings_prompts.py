@@ -61,6 +61,76 @@ def test_load_settings_includes_provider_defaults_and_locked_default_preset(monk
         _cleanup_temp_paths(settings_path, prompts_path)
 
 
+def test_provider_capabilities_expose_exact_text_and_embedding_model_catalogs():
+    capabilities = config.get_provider_capabilities()
+    gemini_models = capabilities["providers"]["gemini"]["text_model_options"]
+    groq_models = capabilities["providers"]["groq"]["text_model_options"]
+    gemini_embedding_models = capabilities["providers"]["gemini"]["embedding_model_options"]
+
+    assert [option["value"] for option in gemini_models] == [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3-flash-preview",
+    ]
+    assert [option["value"] for option in groq_models] == [
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "qwen/qwen3-32b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "moonshotai/kimi-k2-instruct-0905",
+    ]
+    assert gemini_models[0]["gemini_thinking_levels"] == ["low", "medium", "high"]
+    assert groq_models[0]["groq_reasoning_options"] == [
+        {"value": "low", "label": "Low"},
+        {"value": "medium", "label": "Medium"},
+        {"value": "high", "label": "High"},
+    ]
+    assert groq_models[2]["groq_reasoning_options"] == [
+        {"value": "none", "label": "None"},
+        {"value": "default", "label": "Reasoning On (provider default)"},
+    ]
+    assert groq_models[3]["supports_groq_reasoning"] is False
+    assert [option["value"] for option in gemini_embedding_models] == [
+        "gemini-embedding-001",
+        "gemini-embedding-2-preview",
+    ]
+    assert not any("text-embedding" in option["value"] for option in gemini_embedding_models)
+    assert capabilities["providers"]["groq"]["embedding_model_options"] == []
+
+
+def test_settings_payload_strips_secrets_and_internal_fields(monkeypatch):
+    monkeypatch.setattr(
+        settings_router,
+        "load_settings",
+        lambda: {
+            "default_model_chat": "gemini-3-flash-preview",
+            "provider_status": {"chat": {"ok": True}},
+            "provider_registry": {"providers": {}},
+            "settings_presets": [{"id": "default", "name": "Default", "locked": True}],
+            "active_settings_preset_id": "default",
+            "active_settings_preset_name": "Default",
+            "api_keys": [
+                {"value": "secret-1", "enabled": True},
+                {"value": "secret-2", "enabled": False},
+            ],
+            "_provider_credentials": {
+                "gemini": [{"api_key": "secret-1"}],
+            },
+            "_active_settings_preset_id": "default",
+        },
+    )
+
+    payload = settings_router._settings_payload()
+
+    assert payload["api_key_count"] == 2
+    assert payload["api_key_active_count"] == 1
+    assert payload["default_model_chat"] == "gemini-3-flash-preview"
+    assert "api_keys" not in payload
+    assert "_provider_credentials" not in payload
+    assert "_active_settings_preset_id" not in payload
+
+
 def test_prompt_keys_expose_graph_and_entity_resolution_prompts():
     expected = {
         "graph_architect_prompt",
@@ -276,7 +346,7 @@ def test_resolve_gemini_thinking_settings_supports_level_and_manual_budget():
             "default_model_chat_thinking_manual": "200",
         },
         slot_key="default_model_chat",
-        model_name="gemini-3.1-pro",
+        model_name="gemini-3.1-pro-preview",
         include_thoughts=True,
     )
     manual = config.resolve_gemini_thinking_settings(
@@ -295,6 +365,26 @@ def test_resolve_gemini_thinking_settings_supports_level_and_manual_budget():
     assert manual == {
         "thinking_budget": 200,
     }
+
+
+def test_resolve_groq_reasoning_effort_respects_supported_unsupported_and_custom_models():
+    assert config.resolve_groq_reasoning_effort(
+        {"default_model_chat_groq_reasoning_effort": "high"},
+        slot_key="default_model_chat",
+        model_name="openai/gpt-oss-20b",
+    ) == "high"
+
+    assert config.resolve_groq_reasoning_effort(
+        {"default_model_chat_groq_reasoning_effort": "high"},
+        slot_key="default_model_chat",
+        model_name="llama-3.3-70b-versatile",
+    ) == ""
+
+    assert config.resolve_groq_reasoning_effort(
+        {"default_model_chat_groq_reasoning_effort": "medium"},
+        slot_key="default_model_chat",
+        model_name="custom/groq-model",
+    ) == "medium"
 
 
 def test_save_settings_persists_legacy_api_key_enabled_state_into_gemini_library(monkeypatch):

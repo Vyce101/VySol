@@ -6,8 +6,10 @@ from core import vector_store
 
 
 class DummyCollection:
-    def __init__(self, *, query_error: Exception | None = None):
+    def __init__(self, *, query_error: Exception | None = None, name: str = "dummy", registry: dict[str, "DummyCollection"] | None = None):
         self.query_error = query_error
+        self.name = name
+        self._registry = registry
         self.upserts: list[dict] = []
         self.records: dict[str, dict] = {}
 
@@ -48,25 +50,43 @@ class DummyCollection:
             "metadatas": [self.records.get(str(record_id), {}).get("metadata", {}) for record_id in target_ids],
         }
 
+    def modify(self, *, name=None, metadata=None, configuration=None):
+        if name and self._registry is not None and name != self.name:
+            self._registry[name] = self._registry.pop(self.name)
+            self.name = name
+
 
 class DummyClient:
     def __init__(self, path: str, collection: DummyCollection):
         self.path = path
-        self._collection = collection
+        self._collections: dict[str, DummyCollection] = {}
+        self._fallback_collection = collection
         self.deleted: list[str] = []
 
     def get_or_create_collection(self, name: str):
-        return self._collection
+        if name in self._collections:
+            return self._collections[name]
+        if not self._collections:
+            collection = self._fallback_collection
+            collection.name = name
+            collection._registry = self._collections
+            self._collections[name] = collection
+            return collection
+        collection = DummyCollection(name=name, registry=self._collections)
+        self._collections[name] = collection
+        return collection
 
     def delete_collection(self, name: str):
         self.deleted.append(name)
+        self._collections.pop(name, None)
 
 
 def _patch_vector_dependencies(monkeypatch, *, collection: DummyCollection, embedding_model: str = "gemini-embedding-001", world_dir=None):
+    client = DummyClient("dummy-path", collection)
     monkeypatch.setattr(
         vector_store.chromadb,
         "PersistentClient",
-        lambda path: DummyClient(path, collection),
+        lambda path: client,
     )
     monkeypatch.setattr(vector_store, "get_world_embedding_model", lambda world_id: embedding_model)
     monkeypatch.setattr(vector_store, "load_settings", lambda: {"embedding_model": embedding_model})
@@ -228,3 +248,24 @@ def test_vector_store_query_dimension_mismatch_requires_rebuild(monkeypatch):
         store.query_by_embedding([0.9, 0.8, 0.7], n_results=1)
 
     assert "Re-embed All or Rechunk And Re-ingest" in str(exc.value)
+
+
+def test_vector_store_swap_staged_collection_replaces_live_name(monkeypatch):
+    collection = DummyCollection()
+    _patch_vector_dependencies(monkeypatch, collection=collection, embedding_model="gemini-embedding-001")
+
+    manifest = {"collections": {}}
+    monkeypatch.setattr(vector_store.VectorStore, "_load_manifest", lambda self: manifest)
+    monkeypatch.setattr(vector_store.VectorStore, "_save_manifest", lambda self, data: manifest.update(data))
+
+    store = vector_store.VectorStore("world-123", collection_suffix="unique_nodes")
+    store.collection.records["old-node"] = {"document": "old", "metadata": {}}
+
+    staged = store.create_staging_store()
+    staged.collection.records["new-node"] = {"document": "new", "metadata": {}}
+
+    store.swap_staged_collection(staged)
+
+    assert store.collection_name == "world_world_123_unique_nodes"
+    assert store.collection.records == {"new-node": {"document": "new", "metadata": {}}}
+    assert manifest["collections"]["unique_nodes"]["collection_name"] == "world_world_123_unique_nodes"

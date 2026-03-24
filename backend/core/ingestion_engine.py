@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Literal
 import networkx as nx
 
 from .agents import AgentCallError, GraphArchitectAgent
+from .atomic_json import dump_json_atomic
 from .chunker import RecursiveChunker
 from .config import (
     get_world_ingest_settings,
@@ -47,6 +48,8 @@ _vector_locks: dict[str, asyncio.Lock] = {}
 _meta_locks: dict[str, asyncio.Lock] = {}
 _active_waits: dict[str, dict[str, dict[str, Any]]] = {}
 _active_waits_lock = threading.RLock()
+_active_run_tasks: dict[str, dict[str, Any]] = {}
+_active_run_tasks_lock = threading.RLock()
 
 RetryStage = Literal["extraction", "embedding", "all"]
 ChunkMode = Literal["full", "full_cleanup", "embedding_only"]
@@ -173,6 +176,39 @@ async def _sleep_with_abort(expected_event: threading.Event | None, seconds: flo
         raise asyncio.CancelledError()
 
 
+async def _wait_until_abort(expected_event: threading.Event) -> None:
+    while not expected_event.is_set():
+        await asyncio.sleep(0.05)
+
+
+async def _await_with_abort(
+    world_id: str,
+    expected_event: threading.Event,
+    awaitable: Awaitable[Any],
+) -> Any:
+    _ensure_not_aborted(world_id, expected_event)
+    work_task = _register_run_task(
+        world_id,
+        expected_event,
+        asyncio.create_task(awaitable),
+    )
+    abort_task = asyncio.create_task(_wait_until_abort(expected_event))
+
+    try:
+        done, _ = await asyncio.wait(
+            {work_task, abort_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if abort_task in done:
+            work_task.cancel()
+            await asyncio.gather(work_task, return_exceptions=True)
+            raise asyncio.CancelledError()
+        return await work_task
+    finally:
+        abort_task.cancel()
+        await asyncio.gather(abort_task, return_exceptions=True)
+
+
 def _is_current_run(world_id: str, expected_event: threading.Event) -> bool:
     return _abort_events.get(world_id) is expected_event and _active_runs.get(world_id) is expected_event
 
@@ -189,6 +225,67 @@ def _clear_run_ownership(world_id: str, expected_event: threading.Event | None =
     abort_event = _abort_events.get(world_id)
     if expected_event is None or abort_event is expected_event:
         _abort_events.pop(world_id, None)
+
+
+def _register_run_task(
+    world_id: str,
+    expected_event: threading.Event,
+    task: asyncio.Task[Any],
+) -> asyncio.Task[Any]:
+    with _active_run_tasks_lock:
+        entry = _active_run_tasks.get(world_id)
+        if entry is None or entry.get("event") is not expected_event:
+            entry = {
+                "event": expected_event,
+                "loop": task.get_loop(),
+                "tasks": set(),
+            }
+            _active_run_tasks[world_id] = entry
+        entry["tasks"].add(task)
+
+    def _cleanup(completed_task: asyncio.Task[Any]) -> None:
+        with _active_run_tasks_lock:
+            entry = _active_run_tasks.get(world_id)
+            if entry is None or entry.get("event") is not expected_event:
+                return
+            entry["tasks"].discard(completed_task)
+            if not entry["tasks"] and _abort_events.get(world_id) is not expected_event and _active_runs.get(world_id) is not expected_event:
+                _active_run_tasks.pop(world_id, None)
+
+    task.add_done_callback(_cleanup)
+    return task
+
+
+def _cancel_run_tasks(world_id: str) -> None:
+    with _active_run_tasks_lock:
+        entry = _active_run_tasks.get(world_id)
+        if entry is None:
+            return
+        loop = entry.get("loop")
+        tasks = list(entry.get("tasks", ()))
+
+    if loop is None:
+        return
+
+    def _cancel() -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+    try:
+        loop.call_soon_threadsafe(_cancel)
+    except RuntimeError:
+        pass
+
+
+def _clear_run_tasks(world_id: str, expected_event: threading.Event | None = None) -> None:
+    with _active_run_tasks_lock:
+        entry = _active_run_tasks.get(world_id)
+        if entry is None:
+            return
+        if expected_event is not None and entry.get("event") is not expected_event:
+            return
+        _active_run_tasks.pop(world_id, None)
 
 
 def _ensure_not_aborted(world_id: str, expected_event: threading.Event) -> None:
@@ -353,7 +450,7 @@ async def _sync_wait_snapshot(world_id: str, meta: dict, meta_lock: asyncio.Lock
         if _set_wait_snapshot(meta, snapshot):
             if meta.get("ingestion_status") == "in_progress":
                 meta["ingestion_updated_at"] = _now_iso()
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
 
 
 async def _begin_wait(
@@ -555,7 +652,75 @@ def _live_stage_counters(meta: dict) -> dict[str, int]:
         "sources_total": len(sources),
         "sources_complete": sources_complete,
         "sources_partial_failure": sources_partial_failure,
+        "synthesized_failures": 0,
     }
+
+
+def _live_failure_rows(meta: dict) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for source in meta.get("sources", []):
+        display_name = source.get("display_name")
+        for rec in source.get("stage_failures", []):
+            if not isinstance(rec, dict):
+                continue
+            failure_row = dict(rec)
+            failure_row["display_name"] = display_name
+            failures.append(failure_row)
+    return failures
+
+
+def _build_live_audit_summary(meta: dict) -> dict[str, Any]:
+    world_summary = dict(_live_stage_counters(meta))
+    world_summary["expected_node_vectors"] = world_summary["current_unique_nodes"]
+    world_summary["embedded_node_vectors"] = world_summary["embedded_unique_nodes"]
+    world_summary["stale_unique_node_vectors"] = 0
+    world_summary["orphan_graph_nodes"] = 0
+
+    summary_sources: list[dict[str, Any]] = []
+    for source in meta.get("sources", []):
+        extracted_chunks = _normalize_index_list(source.get("extracted_chunks", []))
+        embedded_chunks = _normalize_index_list(source.get("embedded_chunks", []))
+        stage_failures = [dict(rec) for rec in source.get("stage_failures", []) if isinstance(rec, dict)]
+        summary_sources.append(
+            {
+                "source_id": source.get("source_id"),
+                "display_name": source.get("display_name"),
+                "book_number": source.get("book_number"),
+                "expected_chunks": _coerce_non_negative_int(source.get("chunk_count")),
+                "extracted_chunks": extracted_chunks,
+                "embedded_chunks": embedded_chunks,
+                "expected_node_vectors": 0,
+                "embedded_node_vectors": 0,
+                "missing_extraction_chunks": [],
+                "missing_embedding_chunks": [],
+                "missing_node_vectors": [],
+                "stale_node_vectors": [],
+                "failed_records": len(stage_failures),
+                "status": source.get("status"),
+                "stage_failures": stage_failures,
+            }
+        )
+
+    return {
+        "world": world_summary,
+        "sources": summary_sources,
+        "failures": _live_failure_rows(meta),
+        "blocking_issues": list(meta.get("ingestion_blocking_issues", [])),
+        "orphan_graph_nodes": [],
+    }
+
+
+def get_ingestion_audit_snapshot(
+    world_id: str,
+    *,
+    meta: dict | None = None,
+    synthesize_failures: bool = True,
+    persist: bool = True,
+) -> dict:
+    current_meta = meta if meta is not None else _load_meta(world_id)
+    if current_meta.get("ingestion_status") == "in_progress" and has_active_ingestion_run(world_id):
+        return _build_live_audit_summary(current_meta)
+    return audit_ingestion_integrity(world_id, synthesize_failures=synthesize_failures, persist=persist)
 
 
 def _progress_source_summary(source: dict | None) -> dict[str, Any]:
@@ -824,10 +989,11 @@ def _load_meta(world_id: str) -> dict:
 
 def _save_meta(world_id: str, meta: dict) -> None:
     path = world_meta_path(world_id)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, meta)
+
+
+async def _save_meta_async(world_id: str, meta: dict) -> None:
+    await asyncio.to_thread(_save_meta, world_id, meta)
 
 
 def _load_checkpoint(world_id: str) -> dict | None:
@@ -844,10 +1010,11 @@ def _load_checkpoint(world_id: str) -> dict | None:
 def _save_checkpoint(world_id: str, data: dict) -> None:
     path = world_checkpoint_path(world_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, data)
+
+
+async def _save_checkpoint_async(world_id: str, data: dict) -> None:
+    await asyncio.to_thread(_save_checkpoint, world_id, data)
 
 
 def _clear_checkpoint(world_id: str) -> None:
@@ -881,10 +1048,7 @@ def _save_safety_review_cache(world_id: str, data: dict) -> None:
         "version": 1,
         "reviews": list(data.get("reviews", [])) if isinstance(data, dict) else [],
     }
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, payload)
 
 
 def _review_id_for_chunk(chunk_id: str) -> str:
@@ -1460,6 +1624,18 @@ def _source_has_actionable_resume_work(
     if status in {"pending", "ingesting"}:
         return True
 
+    extracted_chunks = set(_normalize_index_list(source.get("extracted_chunks", [])))
+    embedded_chunks = set(_normalize_index_list(source.get("embedded_chunks", [])))
+    for chunk_index in sorted(extracted_chunks - embedded_chunks):
+        if _matches_unresolved_safety_review_chunk(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+            chunk_index=chunk_index,
+        ):
+            continue
+        return True
+
     for failure in source.get("stage_failures") or []:
         if not isinstance(failure, dict):
             continue
@@ -2021,6 +2197,26 @@ def _persist_chunk_graph_artifacts(
     return node_records
 
 
+async def _persist_chunk_graph_artifacts_async(
+    graph_store: GraphStore,
+    *,
+    nodes: list[Any],
+    edges: list[Any],
+    chunk_id: str,
+    book_number: int,
+    chunk_index: int,
+) -> list[dict]:
+    return await asyncio.to_thread(
+        _persist_chunk_graph_artifacts,
+        graph_store,
+        nodes=nodes,
+        edges=edges,
+        chunk_id=chunk_id,
+        book_number=book_number,
+        chunk_index=chunk_index,
+    )
+
+
 async def _upsert_unique_node_vectors(
     unique_node_vector_store: VectorStore,
     node_records: list[dict],
@@ -2031,6 +2227,7 @@ async def _upsert_unique_node_vectors(
     vector_lock: asyncio.Lock | None = None,
     abort_check: Callable[[], None] | None = None,
     progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
+    awaitable_runner: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
 ) -> int:
     document_ids: list[str] = []
     texts: list[str] = []
@@ -2074,11 +2271,12 @@ async def _upsert_unique_node_vectors(
         batch_metadatas = metadatas[start:end]
 
         if embeddings is None:
-            batch_embeddings = await asyncio.to_thread(
+            embed_call = asyncio.to_thread(
                 unique_node_vector_store.embed_texts,
                 batch_texts,
                 api_key,
             )
+            batch_embeddings = await (awaitable_runner(embed_call) if awaitable_runner else embed_call)
         else:
             batch_embeddings = embeddings[start:end]
 
@@ -2126,6 +2324,7 @@ async def _rebuild_unique_node_vectors(
     vector_lock: asyncio.Lock | None = None,
     abort_check: Callable[[], None] | None = None,
     progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
+    awaitable_runner: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
 ) -> int:
     node_records = []
     for node_id in sorted(graph_store.graph.nodes()):
@@ -2135,9 +2334,72 @@ async def _rebuild_unique_node_vectors(
         if node:
             node_records.append(node)
 
-    unique_node_vector_store.drop_collection()
-    if abort_check:
-        abort_check()
+    staging_store = unique_node_vector_store.create_staging_store()
+    staging_collection_name = staging_store.collection_name
+    try:
+        written = await _upsert_unique_node_vectors(
+            staging_store,
+            node_records,
+            api_key,
+            vector_lock=vector_lock,
+            abort_check=abort_check,
+            progress_callback=progress_callback,
+            awaitable_runner=awaitable_runner,
+        )
+        if abort_check:
+            abort_check()
+
+        swap_call = asyncio.to_thread(
+            unique_node_vector_store.swap_staged_collection,
+            staging_store,
+        )
+        if vector_lock is None:
+            await (awaitable_runner(swap_call) if awaitable_runner else swap_call)
+        else:
+            async with vector_lock:
+                if abort_check:
+                    abort_check()
+                await (awaitable_runner(swap_call) if awaitable_runner else swap_call)
+        return written
+    finally:
+        if staging_store.collection_name == staging_collection_name:
+            try:
+                await asyncio.to_thread(staging_store.delete_collection)
+            except Exception:
+                pass
+
+
+async def _upsert_selected_unique_node_vectors(
+    graph_store: GraphStore,
+    unique_node_vector_store: VectorStore,
+    node_ids: list[str],
+    api_key: str,
+    *,
+    vector_lock: asyncio.Lock | None = None,
+    abort_check: Callable[[], None] | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
+    awaitable_runner: Callable[[Awaitable[Any]], Awaitable[Any]] | None = None,
+) -> int:
+    node_records: list[dict] = []
+    seen_node_ids: set[str] = set()
+    for node_id in node_ids:
+        if abort_check:
+            abort_check()
+        normalized_id = str(node_id or "").strip()
+        if not normalized_id or normalized_id in seen_node_ids:
+            continue
+        seen_node_ids.add(normalized_id)
+        node = graph_store.get_node(normalized_id)
+        if node:
+            node_records.append(node)
+
+    if not node_records:
+        if progress_callback is not None:
+            progress_result = progress_callback(0, 0)
+            if progress_result is not None:
+                await progress_result
+        return 0
+
     return await _upsert_unique_node_vectors(
         unique_node_vector_store,
         node_records,
@@ -2145,6 +2407,7 @@ async def _rebuild_unique_node_vectors(
         vector_lock=vector_lock,
         abort_check=abort_check,
         progress_callback=progress_callback,
+        awaitable_runner=awaitable_runner,
     )
 
 
@@ -3174,6 +3437,8 @@ def _build_chunk_plan(
     plan: dict[int, ChunkMode] = {}
     unresolved_review_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
     skipped_review_chunk_indices: set[int] = set()
+    extracted_chunks = set(_normalize_index_list(source.get("extracted_chunks", []), max_index=chunks_total - 1))
+    embedded_chunks = set(_normalize_index_list(source.get("embedded_chunks", []), max_index=chunks_total - 1))
 
     if reembed_all:
         return {idx: "embedding_only" for idx in range(max(0, chunks_total))}
@@ -3182,8 +3447,18 @@ def _build_chunk_plan(
         start_from = 0
         if resume and checkpoint and checkpoint.get("source_id") == source.get("source_id"):
             start_from = max(0, int(checkpoint.get("last_completed_chunk_index", -1)) + 1)
-        for idx in range(start_from, chunks_total):
-            plan[idx] = "full"
+        if resume:
+            for idx in range(max(0, chunks_total)):
+                if idx in embedded_chunks:
+                    continue
+                if idx in extracted_chunks:
+                    plan[idx] = "embedding_only"
+                    continue
+                if idx >= start_from:
+                    plan[idx] = "full"
+        else:
+            for idx in range(start_from, chunks_total):
+                plan[idx] = "full"
 
     if resume and source.get("failed_chunks") and not source.get("stage_failures"):
         for idx in _normalize_index_list(source.get("failed_chunks", []), max_index=chunks_total - 1):
@@ -3250,6 +3525,9 @@ async def start_ingestion(
     _abort_events[world_id] = my_event
     _active_runs[world_id] = my_event
     _clear_active_waits(world_id)
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        _register_run_task(world_id, my_event, current_task)
     try:
         operation_norm = _normalize_ingest_operation(operation)
         retry_stage_norm = _normalize_retry_stage(retry_stage)
@@ -3300,7 +3578,7 @@ async def start_ingestion(
             meta["total_nodes"] = 0
             meta["embedded_unique_nodes"] = 0
             meta["total_edges"] = 0
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
         elif is_reembed_all:
             audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
             meta = _load_meta(world_id)
@@ -3330,7 +3608,7 @@ async def start_ingestion(
             _mark_ingestion_live(meta, operation=operation_norm, started=True)
             _clear_progress_tracking(meta)
             meta["embedded_unique_nodes"] = 0
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
         else:
             # Resume/retry flow includes an audit pass that can synthesize
             # repairable failures for legacy mismatch worlds.
@@ -3340,7 +3618,7 @@ async def start_ingestion(
             _apply_world_ingest_settings(meta, world_ingest_settings, lock=False)
             _mark_ingestion_live(meta, operation=operation_norm, started=True)
             _clear_progress_tracking(meta)
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
 
         sources = (
             [
@@ -3385,6 +3663,8 @@ async def start_ingestion(
         graph_lock = _get_async_lock(world_id, _graph_locks)
         vector_lock = _get_async_lock(world_id, _vector_locks)
         meta_lock = _get_async_lock(world_id, _meta_locks)
+        touched_unique_node_ids: set[str] = set()
+        touched_unique_node_ids_lock = asyncio.Lock()
 
         async def set_world_progress_phase(
             phase: IngestProgressPhase,
@@ -3407,7 +3687,7 @@ async def start_ingestion(
                     unique_node_rebuild_completed=unique_node_rebuild_completed,
                     unique_node_rebuild_total=unique_node_rebuild_total,
                 )
-                _save_meta(world_id, meta)
+                await _save_meta_async(world_id, meta)
             if emit_event:
                 push_sse_event(
                     world_id,
@@ -3534,12 +3814,12 @@ async def start_ingestion(
             embedding_wait_agent = (
                 "embedding_rebuild"
                 if is_reembed_all
-                else ("embedding_retry" if mode == "embedding_only" else "node_embedding")
+                else ("embedding_retry" if mode == "embedding_only" else "embedding")
             )
 
             async with meta_lock:
                 _mark_ingestion_live(meta, operation=operation_norm)
-                _save_meta(world_id, meta)
+                await _save_meta_async(world_id, meta)
 
             if mode in ("full", "full_cleanup"):
                 extraction_slot: int | None = None
@@ -3598,7 +3878,11 @@ async def start_ingestion(
                         },
                     )
                     extraction_payload = _build_graph_extraction_payload_for_chunk(tc)
-                    ga_output, ga_usage = await ga.run(extraction_payload)
+                    ga_output, ga_usage = await _await_with_abort(
+                        world_id,
+                        my_event,
+                        ga.run(extraction_payload),
+                    )
                     _ensure_not_aborted(world_id, my_event)
                     final_nodes = list(ga_output.nodes)
                     final_edges = list(ga_output.edges)
@@ -3622,7 +3906,11 @@ async def start_ingestion(
                                 ),
                             },
                         )
-                        glean_out, _ = await ga.run_glean(extraction_payload, final_nodes, final_edges)
+                        glean_out, _ = await _await_with_abort(
+                            world_id,
+                            my_event,
+                            ga.run_glean(extraction_payload, final_nodes, final_edges),
+                        )
                         _ensure_not_aborted(world_id, my_event)
                         final_nodes.extend(glean_out.nodes)
                         final_edges.extend(glean_out.edges)
@@ -3645,7 +3933,7 @@ async def start_ingestion(
                     live_total_nodes = 0
                     live_total_edges = 0
                     async with graph_lock:
-                        node_records_for_embedding = _persist_chunk_graph_artifacts(
+                        node_records_for_embedding = await _persist_chunk_graph_artifacts_async(
                             graph_store,
                             nodes=final_nodes,
                             edges=final_edges,
@@ -3675,7 +3963,7 @@ async def start_ingestion(
                         meta["total_nodes"] = max(_coerce_non_negative_int(meta.get("total_nodes")), live_total_nodes)
                         meta["total_edges"] = max(_coerce_non_negative_int(meta.get("total_edges")), live_total_edges)
                         _mark_ingestion_live(meta, operation=operation_norm)
-                        _save_meta(world_id, meta)
+                        await _save_meta_async(world_id, meta)
 
                 except asyncio.CancelledError:
                     return
@@ -3721,7 +4009,7 @@ async def start_ingestion(
                                 safety_reason=str(safety_reason or err_text),
                             )
                         _mark_ingestion_live(meta, operation=operation_norm)
-                        _save_meta(world_id, meta)
+                        await _save_meta_async(world_id, meta)
                     push_sse_event(
                         world_id,
                         {
@@ -3760,13 +4048,13 @@ async def start_ingestion(
                         "chunk_index": chunk_idx,
                         "chunks_total": len(temporal_chunks),
                         "source_id": source_id,
-                        "active_agent": "embedding_rebuild" if is_reembed_all else "embedding_retry",
+                        "active_agent": embedding_wait_agent,
                         "book_number": book_number,
                         **_build_progress_event(
                             world_id,
                             meta,
                             source_id=source_id,
-                            active_agent="embedding_rebuild" if is_reembed_all else "embedding_retry",
+                            active_agent=embedding_wait_agent,
                             total_chunks=len(temporal_chunks),
                         ),
                     },
@@ -3797,15 +4085,17 @@ async def start_ingestion(
                     chunk_index=chunk_idx,
                     active_agent=embedding_wait_agent,
                 )
-                chunk_embeddings = await asyncio.to_thread(
-                    vector_store.embed_texts,
-                    [tc.prefixed_text],
-                    api_key=api_key,
+                chunk_embeddings = await _await_with_abort(
+                    world_id,
+                    my_event,
+                    asyncio.to_thread(
+                        vector_store.embed_texts,
+                        [tc.prefixed_text],
+                        api_key=api_key,
+                    ),
                 )
                 _ensure_not_aborted(world_id, my_event)
                 chunk_embedding = chunk_embeddings[0]
-                unique_node_embedding_count = 0
-                embedded_unique_node_total = 0
 
                 _ensure_not_aborted(world_id, my_event)
                 async with vector_lock:
@@ -3826,45 +4116,17 @@ async def start_ingestion(
                     )
                     _ensure_not_aborted(world_id, my_event)
                 _ensure_not_aborted(world_id, my_event)
-
-                push_sse_event(
-                    world_id,
-                    {
-                        "event": "progress",
-                        "chunk_index": chunk_idx,
-                        "chunks_total": len(temporal_chunks),
-                        "source_id": source_id,
-                        "active_agent": "node_embedding_rebuild" if is_reembed_all else "node_embedding",
-                        "book_number": book_number,
-                        **_build_progress_event(
-                            world_id,
-                            meta,
-                            source_id=source_id,
-                            active_agent="node_embedding_rebuild" if is_reembed_all else "node_embedding",
-                            total_chunks=len(temporal_chunks),
-                        ),
-                    },
-                )
-                unique_node_embedding_count = await _upsert_unique_node_vectors(
-                    unique_node_vector_store=unique_node_vector_store,
-                    node_records=node_records_for_embedding,
-                    api_key=api_key,
-                    vector_lock=vector_lock,
-                    abort_check=lambda: _ensure_not_aborted(world_id, my_event),
-                )
-                async with vector_lock:
-                    embedded_unique_node_total = await asyncio.to_thread(unique_node_vector_store.count)
-                _ensure_not_aborted(world_id, my_event)
+                touched_node_ids = {
+                    str(node.get("id") or "").strip()
+                    for node in node_records_for_embedding
+                    if isinstance(node, dict) and str(node.get("id") or "").strip()
+                }
 
                 async with meta_lock:
                     _mark_stage_success(source, stage="embedding", chunk_index=chunk_idx, chunk_id=chunk)
-                    current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
-                    if current_unique_nodes > 0:
-                        embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
-                    meta["embedded_unique_nodes"] = embedded_unique_node_total
                     checkpoint = _load_checkpoint(world_id) or {}
                     last_completed = int(checkpoint.get("last_completed_chunk_index", -1))
-                    _save_checkpoint(
+                    await _save_checkpoint_async(
                         world_id,
                         {
                             "source_id": source_id,
@@ -3876,7 +4138,10 @@ async def start_ingestion(
                         },
                     )
                     _mark_ingestion_live(meta, operation=operation_norm)
-                    _save_meta(world_id, meta)
+                    await _save_meta_async(world_id, meta)
+                if touched_node_ids:
+                    async with touched_unique_node_ids_lock:
+                        touched_unique_node_ids.update(touched_node_ids)
 
                 push_sse_event(
                     world_id,
@@ -3888,13 +4153,11 @@ async def start_ingestion(
                         "agent": "vector_rebuild" if is_reembed_all else "embedding",
                         "mode": mode,
                         "chunk_vector_count": 1,
-                        "node_vector_count": unique_node_embedding_count,
-                        "unique_node_vector_count": unique_node_embedding_count,
                         **_build_progress_event(
                             world_id,
                             meta,
                             source_id=source_id,
-                            active_agent="node_embedding_rebuild" if is_reembed_all else "node_embedding",
+                            active_agent=embedding_wait_agent,
                             total_chunks=len(temporal_chunks),
                         ),
                     },
@@ -3927,7 +4190,7 @@ async def start_ingestion(
                         error_message=err_text,
                     )
                     _mark_ingestion_live(meta, operation=operation_norm)
-                    _save_meta(world_id, meta)
+                    await _save_meta_async(world_id, meta)
                 push_sse_event(
                     world_id,
                     {
@@ -3943,7 +4206,7 @@ async def start_ingestion(
                             world_id,
                             meta,
                             source_id=source_id,
-                            active_agent="node_embedding_rebuild" if is_reembed_all else "node_embedding",
+                            active_agent=embedding_wait_agent,
                             total_chunks=len(temporal_chunks),
                         ),
                     },
@@ -3975,7 +4238,7 @@ async def start_ingestion(
                     },
                 )
                 source["status"] = "error"
-                _save_meta(world_id, meta)
+                await _save_meta_async(world_id, meta)
                 continue
 
             temporal_chunks = _load_source_temporal_chunks(
@@ -3992,7 +4255,7 @@ async def start_ingestion(
             source["extracted_chunks"] = _normalize_index_list(source.get("extracted_chunks", []), max_index=chunks_total - 1)
             source["embedded_chunks"] = _normalize_index_list(source.get("embedded_chunks", []), max_index=chunks_total - 1)
             source["failed_chunks"] = _normalize_index_list(source.get("failed_chunks", []), max_index=chunks_total - 1)
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
 
             checkpoint = _load_checkpoint(world_id)
             chunk_plan = _build_chunk_plan(
@@ -4008,18 +4271,24 @@ async def start_ingestion(
 
             if not chunk_plan:
                 _update_source_status_from_coverage(source)
-                _save_meta(world_id, meta)
+                await _save_meta_async(world_id, meta)
                 continue
 
             tasks = [
-                process_chunk(
-                    idx,
-                    temporal_chunks[idx],
-                    source_id,
-                    book_number,
-                    temporal_chunks,
-                    source,
-                    mode,
+                _register_run_task(
+                    world_id,
+                    my_event,
+                    asyncio.create_task(
+                        process_chunk(
+                            idx,
+                            temporal_chunks[idx],
+                            source_id,
+                            book_number,
+                            temporal_chunks,
+                            source,
+                            mode,
+                        )
+                    ),
                 )
                 for idx, mode in chunk_plan.items()
             ]
@@ -4033,10 +4302,11 @@ async def start_ingestion(
                     if snapshot:
                         source["ingest_snapshot"] = snapshot
                 _mark_ingestion_live(meta, operation=operation_norm)
-                _save_meta(world_id, meta)
+                await _save_meta_async(world_id, meta)
 
         is_current = _is_current_run(world_id, my_event)
         if not my_event.is_set() and is_current:
+            unique_node_rebuild_ran = False
             if is_reembed_all:
                 unique_node_total = graph_store.get_node_count()
                 await set_world_progress_phase(
@@ -4068,6 +4338,69 @@ async def start_ingestion(
                     vector_lock=vector_lock,
                     abort_check=lambda: _ensure_not_aborted(world_id, my_event),
                     progress_callback=_report_unique_node_rebuild_progress,
+                    awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
+                )
+                unique_node_rebuild_ran = True
+            else:
+                async with touched_unique_node_ids_lock:
+                    unique_node_ids_for_rebuild = sorted(touched_unique_node_ids)
+                if unique_node_ids_for_rebuild:
+                    await set_world_progress_phase(
+                        "unique_node_rebuild",
+                        unique_node_rebuild_completed=0,
+                        unique_node_rebuild_total=len(unique_node_ids_for_rebuild),
+                        active_agent="node_embedding_rebuild",
+                    )
+
+                    async def _report_selected_unique_node_rebuild_progress(completed: int, total: int) -> None:
+                        await set_world_progress_phase(
+                            "unique_node_rebuild",
+                            unique_node_rebuild_completed=completed,
+                            unique_node_rebuild_total=total,
+                            emit_event=True,
+                            active_agent="node_embedding_rebuild",
+                        )
+
+                    api_key, _ = await acquire_gemini_key(
+                        source_id=None,
+                        book_number=None,
+                        chunk_index=None,
+                        active_agent="node_embedding_rebuild",
+                    )
+                    await _upsert_selected_unique_node_vectors(
+                        graph_store,
+                        unique_node_vector_store,
+                        unique_node_ids_for_rebuild,
+                        api_key,
+                        vector_lock=vector_lock,
+                        abort_check=lambda: _ensure_not_aborted(world_id, my_event),
+                        progress_callback=_report_selected_unique_node_rebuild_progress,
+                        awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
+                    )
+                    unique_node_rebuild_ran = True
+            if unique_node_rebuild_ran:
+                async with vector_lock:
+                    embedded_unique_node_total = await asyncio.to_thread(unique_node_vector_store.count)
+                async with meta_lock:
+                    current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
+                    if current_unique_nodes > 0:
+                        embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
+                    meta["embedded_unique_nodes"] = embedded_unique_node_total
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "agent_complete",
+                        "agent": "node_embedding_rebuild",
+                        "node_vector_count": embedded_unique_node_total,
+                        "unique_node_vector_count": embedded_unique_node_total,
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            active_agent="node_embedding_rebuild",
+                        ),
+                    },
                 )
             current_counters = _live_stage_counters(meta)
             audit_completed_work_units, audit_total_work_units = _compute_world_progress_units(
@@ -4100,7 +4433,7 @@ async def start_ingestion(
                 unique_node_rebuild_total=_coerce_non_negative_int(refreshed.get("ingestion_unique_node_rebuild_total")),
             )
             _mark_ingestion_terminal(refreshed, "complete" if not has_failures else "partial_failure")
-            _save_meta(world_id, refreshed)
+            await _save_meta_async(world_id, refreshed)
             if not has_failures:
                 _clear_checkpoint(world_id)
             for issue in audit.get("blocking_issues", []):
@@ -4127,7 +4460,7 @@ async def start_ingestion(
             refreshed = _load_meta(world_id)
             _clear_active_waits(world_id)
             _mark_ingestion_terminal(refreshed, "aborted")
-            _save_meta(world_id, refreshed)
+            await _save_meta_async(world_id, refreshed)
             push_sse_event(
                 world_id,
                 {
@@ -4143,7 +4476,7 @@ async def start_ingestion(
             refreshed = _load_meta(world_id)
             _clear_active_waits(world_id)
             _mark_ingestion_terminal(refreshed, "aborted")
-            _save_meta(world_id, refreshed)
+            await _save_meta_async(world_id, refreshed)
             push_sse_event(
                 world_id,
                 {
@@ -4169,7 +4502,7 @@ async def start_ingestion(
             )
             meta["ingestion_blocking_issues"] = existing_issues
             _mark_ingestion_terminal(meta, "error")
-            _save_meta(world_id, meta)
+            await _save_meta_async(world_id, meta)
             push_sse_event(
                 world_id,
                 {
@@ -4182,6 +4515,7 @@ async def start_ingestion(
             )
     finally:
         _clear_active_waits(world_id)
+        _clear_run_tasks(world_id, my_event)
         _clear_run_ownership(world_id, my_event)
 
 
@@ -4198,6 +4532,7 @@ def abort_ingestion(world_id: str) -> None:
         meta.pop("ingestion_wait", None)
         _save_meta(world_id, meta)
         _clear_active_waits(world_id)
+        _cancel_run_tasks(world_id)
         push_sse_event(
             world_id,
             {
@@ -4232,8 +4567,14 @@ def get_checkpoint_info(world_id: str) -> dict:
     cp = _load_checkpoint(world_id)
     meta = _load_meta(world_id)
     allow_synthesis = meta.get("ingestion_status") != "in_progress"
-    audit = audit_ingestion_integrity(world_id, synthesize_failures=allow_synthesis, persist=True)
-    meta = _load_meta(world_id)
+    audit = get_ingestion_audit_snapshot(
+        world_id,
+        meta=meta,
+        synthesize_failures=allow_synthesis,
+        persist=allow_synthesis,
+    )
+    if meta.get("ingestion_status") != "in_progress" or not has_active_ingestion_run(world_id):
+        meta = _load_meta(world_id)
     sources = meta.get("sources", [])
     source_by_id = {s.get("source_id"): s for s in sources}
     cp_source = source_by_id.get(cp.get("source_id")) if cp else None

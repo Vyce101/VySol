@@ -114,11 +114,17 @@ Gemini thinking:
 - `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
 - `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
 - Leaving the dropdown blank means `use the model's provider default`
+- Known Gemini catalog models that do not support a built-in thinking dropdown now show a visible unsupported note instead of silently hiding the row
+- Custom or unknown Gemini model ids get an advanced manual thinking field because VySol cannot truthfully infer their supported presets
 
 Groq reasoning:
 
-- Groq model rows show a `Reasoning Effort` dropdown instead of Gemini thinking
-- The setting is stored per Groq-backed slot
+- Groq model rows resolve reasoning support per model, not just per provider
+- `openai/gpt-oss-20b` and `openai/gpt-oss-120b` show `low`, `medium`, and `high`
+- `qwen/qwen3-32b` shows `none` plus `Reasoning On (provider default)`, which keeps the provider's own default distinct from VySol's blank `Use model default` state
+- Known Groq catalog models without reasoning support show a visible unsupported note instead of silently hiding the row
+- Custom or unknown Groq model ids get an advanced manual reasoning field because VySol cannot safely infer their supported presets
+- The setting is still stored per Groq-backed slot, but VySol now ignores stale saved reasoning values when the currently selected model does not support them
 - Chat also gets a Groq-only `Include Reasoning` toggle
 - VySol does not fake live thought-token streaming for Groq; if reasoning is returned, it is attached after the reply completes
 
@@ -305,6 +311,7 @@ Reading the ingest progress header:
 - `Chunks Embedded` means chunks whose chunk vectors have been durably written
 - `Unique Graph Nodes` means the current unique nodes in the saved graph
 - `Embedded Unique Nodes` means how many current unique graph nodes still have matching embeddings in the unique-node index
+- Per-chunk embedding completion now reports only chunk-vector completion; unique-node vector totals are reported later by the world-level rebuild phase instead of falsely claiming `0 node vectors` mid-run
 - After chunk work finishes, world-level progress can continue through `unique_node_rebuild` and `audit_finalization` before the run is actually done
 - `World Blockers` highlights graph/vector audit problems that are not tied to a single chunk and therefore do not belong under `Failed Records`
 - Each source row in `Books in This World` now also shows `Embedded X / Y`, where `X` is the number of chunks from that source whose embeddings are fully finished and `Y` is that source's total chunk count
@@ -321,6 +328,11 @@ Wait states during ingest:
 - `Queued for embedding slot` means embedding workers are busy and this run is waiting for an embedding slot
 - `Waiting for API key cooldown` means the active Gemini key pool is temporarily cooling down and the run is waiting to continue
 - Short pauses in these states are normal and do not automatically mean the ingest failed
+
+Abort behavior:
+
+- `Abort` is a soft cancel: VySol stops waiting on slow model and embedding responses as soon as it can and moves the run toward `Aborting` and then `Aborted`
+- Late provider responses from an aborted run are ignored instead of being allowed to write graph data, vectors, checkpoints, or misleading SSE progress after the stop request
 
 After ingestion finishes:
 
@@ -369,6 +381,7 @@ Use the rebuild and retry actions based on what went wrong:
 - Is blocked if an older ingested source is missing, changed, partial, failed, or comes from an older world that never recorded source snapshots
 - Uses active repaired chunk bodies when the locked source snapshot and chunk map still match
 - Is blocked while this world still has unresolved safety-review work, because the rebuild would otherwise operate on incomplete repair state
+- During the final full unique-node rebuild, VySol stages the replacement node-vector collection and swaps it into place only after the rebuild succeeds, so aborting there does not leave the live node-vector index half-written
 - Use this when you change only the world embedding provider/model or need to rebuild vectors without re-extracting the graph
 
 `Re-ingest`

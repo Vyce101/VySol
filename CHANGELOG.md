@@ -26,6 +26,7 @@ All notable user-visible changes to this project will be documented in this file
 ### Changed
 
 - Changed global settings so provider-specific controls now only appear when the selected provider actually supports them, including Gemini safety/thinking controls and Groq reasoning controls.
+- Changed Gemini and Groq reasoning controls to follow per-model capabilities more truthfully, with docs-backed presets for known supported models, visible unsupported-state messaging for known unsupported catalog models, and advanced manual entry only for custom or unknown model ids.
 - Changed world ingest settings, vector manifests, and rebuild checks to track embedding provider as well as embedding model.
 - Refreshed docs and aligned runtime defaults.
 - Corrected project branding capitalization to `VySol`.
@@ -71,6 +72,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed world-duplication preview cards so active duplicates no longer disappear during normal polling, source cards lock the duplicate action while a copy is running, and world-card status pills/stats now keep a consistent compact layout across different worlds.
 - Fixed ingest-family color consistency so dark mode uses the intended purple accent, light mode uses the intended blue accent, safety-review passed states reuse the same success green, and washed-out or invisible ingest progress/book/status accents render correctly again.
 - Fixed glean default/input behavior and clarified the currently supported OS.
+- Fixed ingest truthfulness and abort responsiveness so chunk embedding no longer falsely reports `0 node vectors` mid-run, final unique-node rebuild completion now reports its real count separately, slow model/embed awaits stop blocking abort responsiveness, and aborted runs ignore late provider results instead of writing stale data.
 - Fixed launcher startup state detection.
 - Fixed Gemini chat payload assembly for the Gemini SDK request shape.
 - Fixed graph node focus visibility by adding a subtle white hover glow and a stronger selected-node glow in both the graph tab and Context Graph viewer.
