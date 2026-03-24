@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 import uuid
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
 from .agents import _call_agent
+from .atomic_json import dump_json_atomic
 from .config import load_settings, world_meta_path
 from .entity_text import build_unique_node_document
 from .graph_store import GraphStore
@@ -144,10 +144,7 @@ def _load_meta(world_id: str) -> dict:
 
 def _save_meta(world_id: str, meta: dict) -> None:
     path = world_meta_path(world_id)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, meta)
 
 
 def _staging_graph_path(world_id: str) -> Path:

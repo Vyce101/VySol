@@ -20,9 +20,10 @@ from core.config import (
     world_graph_path,
     world_sources_dir,
 )
-from core.ingestion_engine import audit_ingestion_integrity
+from core.atomic_json import dump_json_atomic
 from core.ingestion_engine import (
     get_checkpoint_info,
+    get_ingestion_audit_snapshot,
     get_reembed_eligibility,
     get_safety_review_summary,
     has_active_ingestion_run,
@@ -63,10 +64,7 @@ def _load_meta(world_id: str) -> dict:
 
 def _save_meta(world_id: str, meta: dict) -> None:
     path = world_meta_path(world_id)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    os.replace(str(tmp), str(path))
+    dump_json_atomic(path, meta)
 
 
 def _with_effective_ingest_settings(meta: dict) -> dict:
@@ -75,6 +73,34 @@ def _with_effective_ingest_settings(meta: dict) -> dict:
     meta["embedding_provider"] = meta["ingest_settings"]["embedding_provider"]
     meta["embedding_openai_compatible_provider"] = meta["ingest_settings"]["embedding_openai_compatible_provider"]
     return meta
+
+
+def _serialize_world_card(meta: dict) -> dict:
+    return {
+        "world_id": meta.get("world_id"),
+        "world_name": meta.get("world_name"),
+        "created_at": meta.get("created_at"),
+        "ingestion_status": meta.get("ingestion_status"),
+        "total_chunks": int(meta.get("total_chunks") or 0),
+        "total_nodes": int(meta.get("total_nodes") or 0),
+        "total_edges": int(meta.get("total_edges") or 0),
+        "sources": [
+            {
+                "source_id": source.get("source_id"),
+                "status": source.get("status"),
+            }
+            for source in meta.get("sources", [])
+            if isinstance(source, dict)
+        ],
+        "is_temporary_duplicate": bool(meta.get("is_temporary_duplicate")),
+        "duplication_status": meta.get("duplication_status"),
+        "duplication_progress_percent": int(meta.get("duplication_progress_percent") or 0),
+        "duplication_source_world_id": meta.get("duplication_source_world_id"),
+        "duplication_source_world_name": meta.get("duplication_source_world_name"),
+        "active_duplication_run": bool(meta.get("active_duplication_run")),
+        "duplication_locked": bool(meta.get("duplication_locked")),
+        "duplication_error": meta.get("duplication_error"),
+    }
 
 
 def _is_duplicate_in_progress(meta: dict) -> bool:
@@ -92,7 +118,7 @@ def _collect_worlds() -> list[dict]:
                     meta = recover_stale_ingestion(world_id)
                     meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
                     meta["active_duplication_run"] = has_active_duplication_run(world_id)
-                    worlds.append(_with_effective_ingest_settings(meta))
+                    worlds.append(meta)
                 except (json.JSONDecodeError, OSError):
                     continue
     locked_source_ids = {
@@ -112,7 +138,7 @@ def _collect_worlds() -> list[dict]:
 @router.get("")
 async def list_worlds():
     """List all worlds sorted by created_at desc."""
-    return _collect_worlds()
+    return [_serialize_world_card(meta) for meta in _collect_worlds()]
 
 
 @router.get("/activities")
@@ -198,33 +224,51 @@ async def duplicate_world(world_id: str):
 @router.get("/{world_id}")
 async def get_world(world_id: str):
     meta = recover_stale_ingestion(world_id)
+    meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
     if meta.get("is_temporary_duplicate"):
         meta["active_duplication_run"] = has_active_duplication_run(world_id)
         meta["active_ingestion_run"] = False
         return _with_effective_ingest_settings(meta)
     audit = None
     try:
-        allow_synthesis = meta.get("ingestion_status") != "in_progress"
-        audit = audit_ingestion_integrity(world_id, synthesize_failures=allow_synthesis, persist=True)
-        meta = _load_meta(world_id)
+        active_ingest = meta.get("ingestion_status") == "in_progress" and meta.get("active_ingestion_run") is True
+        audit = get_ingestion_audit_snapshot(
+            world_id,
+            meta=meta,
+            synthesize_failures=not active_ingest,
+            persist=not active_ingest,
+        )
+        if not active_ingest:
+            meta = _load_meta(world_id)
+            meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
         meta["ingestion_audit"] = audit
     except Exception:
         # Never block world retrieval on audit issues.
         pass
-    try:
-        meta["reembed_eligibility"] = get_reembed_eligibility(world_id, meta=meta, audit_summary=audit)
-    except Exception:
+    if meta.get("ingestion_status") == "in_progress" and meta.get("active_ingestion_run") is True:
         meta["reembed_eligibility"] = {
             "can_reembed_all": False,
-            "reason_code": "eligibility_unavailable",
-            "message": "Could not verify whether Re-embed All is safe for this world.",
+            "reason_code": "ingestion_in_progress",
+            "message": "Wait for the active ingest run to finish before checking Re-embed All eligibility.",
             "ignored_pending_sources_count": 0,
             "requires_full_rebuild": False,
             "eligible_source_ids": [],
             "eligible_sources_count": 0,
         }
+    else:
+        try:
+            meta["reembed_eligibility"] = get_reembed_eligibility(world_id, meta=meta, audit_summary=audit)
+        except Exception:
+            meta["reembed_eligibility"] = {
+                "can_reembed_all": False,
+                "reason_code": "eligibility_unavailable",
+                "message": "Could not verify whether Re-embed All is safe for this world.",
+                "ignored_pending_sources_count": 0,
+                "requires_full_rebuild": False,
+                "eligible_source_ids": [],
+                "eligible_sources_count": 0,
+            }
     meta["safety_review_summary"] = get_safety_review_summary(world_id)
-    meta["active_ingestion_run"] = has_active_ingestion_run(world_id)
     return _with_effective_ingest_settings(meta)
 
 
@@ -253,10 +297,17 @@ async def delete_world(world_id: str):
 @router.get("/{world_id}/sources")
 async def list_sources(world_id: str):
     meta = recover_stale_ingestion(world_id)
+    active_ingest = meta.get("ingestion_status") == "in_progress" and has_active_ingestion_run(world_id)
     try:
-        allow_synthesis = meta.get("ingestion_status") != "in_progress"
-        audit_ingestion_integrity(world_id, synthesize_failures=allow_synthesis, persist=True)
-        meta = _load_meta(world_id)
+        if not active_ingest:
+            allow_synthesis = meta.get("ingestion_status") != "in_progress"
+            get_ingestion_audit_snapshot(
+                world_id,
+                meta=meta,
+                synthesize_failures=allow_synthesis,
+                persist=True,
+            )
+            meta = _load_meta(world_id)
     except Exception:
         pass
     return meta.get("sources", [])

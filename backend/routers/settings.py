@@ -24,6 +24,11 @@ from core.key_manager import get_key_manager
 
 router = APIRouter()
 
+_PUBLIC_SETTINGS_BLOCKLIST = {
+    "api_keys",
+    "_provider_credentials",
+}
+
 
 class PromptUpdateRequest(BaseModel):
     key: str
@@ -59,11 +64,15 @@ def _reload_provider_managers() -> None:
 
 
 def _settings_payload() -> dict:
-    settings = load_settings()
+    settings = dict(load_settings())
     for key in LEGACY_REMOVED_KEYS:
         settings.pop(key, None)
-    settings["api_key_count"] = len(settings.get("api_keys", []))
-    settings["api_key_active_count"] = sum(1 for entry in settings.get("api_keys", []) if bool(entry.get("enabled", True)))
+    api_keys = list(settings.get("api_keys", []))
+    settings["api_key_count"] = len(api_keys)
+    settings["api_key_active_count"] = sum(1 for entry in api_keys if bool(entry.get("enabled", True)))
+    for key in list(settings.keys()):
+        if key in _PUBLIC_SETTINGS_BLOCKLIST or key.startswith("_"):
+            settings.pop(key, None)
     return settings
 
 

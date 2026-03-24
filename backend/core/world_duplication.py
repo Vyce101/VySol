@@ -14,6 +14,7 @@ from typing import Any
 
 import chromadb
 
+from .atomic_json import dump_json_atomic
 from .config import (
     SAVED_WORLDS_DIR,
     load_world_meta,
@@ -65,10 +66,7 @@ def _load_meta(world_id: str) -> dict:
 def _save_meta(world_id: str, meta: dict) -> None:
     path = world_meta_path(world_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, indent=2)
-    tmp.replace(path)
+    dump_json_atomic(path, meta)
 
 
 def _load_json(path: Path) -> dict | None:
@@ -84,10 +82,7 @@ def _load_json(path: Path) -> dict | None:
 
 def _save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp.json")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-    tmp.replace(path)
+    dump_json_atomic(path, payload)
 
 
 def _parse_chunk_id(world_id: str, chunk_id: str) -> tuple[str, int] | None:

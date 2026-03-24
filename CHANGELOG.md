@@ -4,6 +4,24 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-03-24
+
+### Added
+
+- Added a shared atomic JSON writer with Windows-friendly replace retries, plus focused regression coverage for atomic writes and active-ingest world snapshot responses.
+
+### Changed
+
+- Changed world-card and ingest-config API payloads so the home and ingest UI can use lighter world summaries, live active-ingest audit snapshots, and provider-backed embedding model options more truthfully.
+- Changed the world re-ingest setup UI to use provider-backed embedding model pickers instead of relying only on free-text model entry.
+
+### Fixed
+
+- Fixed public settings payloads so `/settings` no longer returns stored API keys or internal provider-credential maps to the browser.
+- Fixed the graph page to show a real loading state and retryable load error instead of failing silently when the graph request does not return.
+- Fixed ingest-page runtime-state races so optimistic start state, live backend ingest ownership, aborting state, and stale snapshot refreshes no longer desync as easily.
+- Fixed several metadata write paths to use the shared atomic JSON helper, reducing Windows file-lock failures during entity-resolution and world-duplication state writes.
+
 ## [0.1.0] - 2026-03-24
 
 ### Added

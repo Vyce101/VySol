@@ -14,6 +14,7 @@ from typing import Literal
 from core.config import (
     PROVIDER_REGISTRY,
     SLOT_EMBEDDING,
+    get_provider_capabilities,
     get_world_ingest_prompt_states,
     get_world_ingest_settings,
     resolve_slot_provider,
@@ -122,6 +123,7 @@ async def ingest_config(world_id: str):
         "has_active_chunk_overrides": int(summary.get("active_override_reviews", 0) or 0) > 0,
         "active_chunk_override_count": int(summary.get("active_override_reviews", 0) or 0),
         "safety_review_summary": summary,
+        "provider_registry": get_provider_capabilities(),
     }
 
 

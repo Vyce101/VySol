@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useState, useEffect, useCallback, use } from "react";
 import { Search, X } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -29,20 +30,25 @@ export default function GraphPage({ params }: { params: Promise<{ worldId: strin
     const [edges, setEdges] = useState<GraphLink[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [searchResults, setSearchResults] = useState<string[]>([]);
+    const [isInitialLoadPending, setIsInitialLoadPending] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     const loadGraph = useCallback(async () => {
         try {
+            setLoadError(null);
             const data = await apiFetch<{ nodes: GraphNode[]; edges: GraphLink[] }>(`/worlds/${worldId}/graph`);
             setNodes(data.nodes);
             setEdges(data.edges);
-        } catch { /* ignore */ }
+        } catch (error: unknown) {
+            setLoadError((error as Error).message || "Could not load graph.");
+        } finally {
+            setIsInitialLoadPending(false);
+        }
     }, [worldId]);
 
-    /* eslint-disable react-hooks/set-state-in-effect */
     useEffect(() => {
         void loadGraph();
     }, [loadGraph]);
-    /* eslint-enable react-hooks/set-state-in-effect */
 
     const handleSearch = async (query: string) => {
         setSearchQuery(query);
@@ -58,6 +64,38 @@ export default function GraphPage({ params }: { params: Promise<{ worldId: strin
             setSearchResults([]);
         }
     };
+
+    if (isInitialLoadPending) {
+        return <GraphState title="Loading graph..." subtitle="Pulling the latest graph snapshot for this world." />;
+    }
+
+    if (loadError && nodes.length === 0 && edges.length === 0) {
+        return (
+            <GraphState
+                title="Could not load graph"
+                subtitle={loadError}
+                action={(
+                    <button
+                        onClick={() => {
+                            setIsInitialLoadPending(true);
+                            void loadGraph();
+                        }}
+                        style={{
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius)",
+                            background: "var(--background-secondary)",
+                            color: "var(--text-primary)",
+                            padding: "10px 14px",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                        }}
+                    >
+                        Retry
+                    </button>
+                )}
+            />
+        );
+    }
 
     return (
         <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0, height: "100%" }}>
@@ -107,6 +145,32 @@ export default function GraphPage({ params }: { params: Promise<{ worldId: strin
                 }}
                 showColorToggle
             />
+        </div>
+    );
+}
+
+function GraphState({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
+    return (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <div
+                style={{
+                    maxWidth: 420,
+                    width: "100%",
+                    display: "grid",
+                    gap: 14,
+                    padding: 24,
+                    borderRadius: 18,
+                    border: "1px solid var(--border)",
+                    background: "linear-gradient(180deg, var(--overlay) 0%, var(--card) 100%)",
+                    boxShadow: "0 12px 28px color-mix(in srgb, var(--shadow-color) 50%, transparent)",
+                }}
+            >
+                <div style={{ display: "grid", gap: 6 }}>
+                    <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "var(--text-primary)" }}>{title}</h2>
+                    <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-subtle)" }}>{subtitle}</p>
+                </div>
+                {action ?? null}
+            </div>
         </div>
     );
 }

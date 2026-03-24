@@ -5,6 +5,13 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ChevronDown, ChevronUp, Info, Loader2, X } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import {
+    CUSTOM_MODEL_OPTION_VALUE,
+    getModelPickerValue,
+    getProviderEmbeddingModelOptions,
+    type ProviderCapabilities,
+    type ProviderModelOption,
+} from "@/lib/provider-models";
+import {
     formatPromptSourceLabel,
     WORLD_INGEST_PROMPT_FIELDS,
     type WorldIngestConfigResponse,
@@ -31,6 +38,7 @@ export interface WorldIngestSetupDraft {
     embeddingProvider: string;
     embeddingOpenAiProvider: string;
     embeddingModel: string;
+    providerRegistry: ProviderCapabilities;
     gleanAmount: string;
     prompts: Record<WorldIngestPromptKey, string>;
     promptSources: Record<WorldIngestPromptKey, string>;
@@ -62,6 +70,7 @@ export function createWorldIngestSetupDraft(config: WorldIngestConfigResponse): 
         embeddingProvider: config.ingest_settings.embedding_provider,
         embeddingOpenAiProvider: config.ingest_settings.embedding_openai_compatible_provider,
         embeddingModel: config.ingest_settings.embedding_model,
+        providerRegistry: config.provider_registry,
         gleanAmount: String(config.ingest_settings.glean_amount),
         prompts: {
             graph_architect_prompt: config.prompts.graph_architect_prompt?.value ?? "",
@@ -160,8 +169,15 @@ export function WorldIngestSetupForm({
     const isInline = layout === "inline";
     const isInitialIngest = variant === "initial_ingest";
     const showReuseToggle = variant === "reingest" && draft.hasActiveChunkOverrides;
-    const embeddingProviderUnsupported = draft.embeddingProvider === "openai_compatible";
-    const embeddingProviderUnsupportedReason = "OpenAI-compatible > Groq is not available for embeddings yet in this build.";
+    const resolvedEmbeddingProvider = draft.embeddingProvider === "openai_compatible"
+        ? draft.embeddingOpenAiProvider
+        : draft.embeddingProvider;
+    const embeddingProviderMeta = draft.providerRegistry.providers[resolvedEmbeddingProvider];
+    const embeddingModelOptions = getProviderEmbeddingModelOptions(draft.providerRegistry, resolvedEmbeddingProvider);
+    const embeddingProviderUnsupported = Boolean(embeddingProviderMeta) && !embeddingProviderMeta.supports_embedding;
+    const embeddingProviderUnsupportedReason = embeddingProviderUnsupported
+        ? `${embeddingProviderMeta?.display_name ?? resolvedEmbeddingProvider} is not available for embeddings yet in this build.`
+        : "";
 
     useEffect(() => {
         if (reuseToggleDisabled && draft.reuseActiveChunkOverrides) {
@@ -313,7 +329,12 @@ export function WorldIngestSetupForm({
                                 onChange={(next) => updateDraft({ embeddingOpenAiProvider: next })}
                             />
                         ) : null}
-                        <TextField label="World Embedding Model" value={draft.embeddingModel} onChange={(next) => updateDraft({ embeddingModel: next })} mono />
+                        <ModelPickerField
+                            label="World Embedding Model"
+                            value={draft.embeddingModel}
+                            options={embeddingModelOptions}
+                            onChange={(next) => updateDraft({ embeddingModel: next })}
+                        />
                         <NumberField label="Graph Architect Glean Amount" value={draft.gleanAmount} onChange={(next) => updateDraft({ gleanAmount: next })} min={0} />
                         {embeddingProviderUnsupported ? (
                             <div style={{ fontSize: 12, color: "var(--error)", lineHeight: 1.45 }}>
@@ -541,6 +562,11 @@ export default function WorldReingestSetupContent({
         embeddingProvider: "gemini",
         embeddingOpenAiProvider: "groq",
         embeddingModel: "gemini-embedding-2-preview",
+        providerRegistry: {
+            providers: {},
+            families: {},
+            openai_compatible_providers: [],
+        },
         gleanAmount: "1",
         prompts: { ...EMPTY_PROMPTS },
         promptSources: { ...DEFAULT_PROMPT_SOURCES },
@@ -681,15 +707,17 @@ function TextField({
     value,
     onChange,
     mono = false,
+    hideLabel = false,
 }: {
     label: string;
     value: string;
     onChange: (next: string) => void;
     mono?: boolean;
+    hideLabel?: boolean;
 }) {
     return (
         <div style={{ display: "grid", gap: 6 }}>
-            <label style={{ fontSize: 12, color: "var(--text-subtle)" }}>{label}</label>
+            {!hideLabel ? <label style={{ fontSize: 12, color: "var(--text-subtle)" }}>{label}</label> : null}
             <input
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
@@ -739,6 +767,54 @@ function SelectField({
                     <option key={option.value} value={option.value}>{option.label}</option>
                 ))}
             </select>
+        </div>
+    );
+}
+
+function ModelPickerField({
+    label,
+    value,
+    options,
+    onChange,
+}: {
+    label: string;
+    value: string;
+    options: ProviderModelOption[];
+    onChange: (value: string) => void;
+}) {
+    const pickerValue = getModelPickerValue(options, value);
+
+    return (
+        <div style={{ display: "grid", gap: 6 }}>
+            <label style={{ fontSize: 12, color: "var(--text-subtle)" }}>{label}</label>
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "minmax(0, 1fr) 180px" }}>
+                <TextField label="" value={value} onChange={onChange} mono hideLabel />
+                <select
+                    value={pickerValue}
+                    onChange={(event) => {
+                        const nextValue = event.target.value;
+                        if (nextValue === CUSTOM_MODEL_OPTION_VALUE) {
+                            return;
+                        }
+                        onChange(nextValue);
+                    }}
+                    style={{
+                        width: "100%",
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid var(--border)",
+                        background: "var(--background-secondary)",
+                        color: "var(--text-primary)",
+                        fontSize: 13,
+                        cursor: "pointer",
+                    }}
+                >
+                    <option value={CUSTOM_MODEL_OPTION_VALUE}>Custom</option>
+                    {options.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                </select>
+            </div>
         </div>
     );
 }

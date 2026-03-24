@@ -337,7 +337,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
     const [sources, setSources] = useState<Source[]>([]);
     const [checkpoint, setCheckpoint] = useState<Checkpoint | null>(null);
-    const [ingesting, setIngesting] = useState(false);
+    const [optimisticIngestRun, setOptimisticIngestRun] = useState(false);
+    const [worldIngestionStatus, setWorldIngestionStatus] = useState<string | null>(null);
+    const [worldActiveIngestionRun, setWorldActiveIngestionRun] = useState(false);
     const [abortRequestPending, setAbortRequestPending] = useState(false);
     const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
     const [progress, setProgress] = useState(initialProgress);
@@ -351,6 +353,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const logEndRef = useRef<HTMLDivElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
     const esRef = useRef<EventSource | null>(null);
+    const runtimeSnapshotRequestIdRef = useRef(0);
     const initialIngestDraftWorldIdRef = useRef<string | null>(null);
     const initialIngestDraftDirtyRef = useRef(false);
 
@@ -381,6 +384,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const resetProgress = () => setProgress(initialProgress);
     const isTerminalIngestionStatus = (status?: string | null) => Boolean(status && status !== "in_progress");
+    const deriveBackendLiveIngestRun = (world?: Partial<WorldResponse> | null, nextCheckpoint?: Partial<Checkpoint> | null) => Boolean(
+        (world?.ingestion_status === "in_progress" && world?.active_ingestion_run === true)
+        || nextCheckpoint?.active_ingestion_run === true
+        || nextCheckpoint?.progress_phase === "aborting"
+    );
     const clearRuntimeSyncWarning = () => {
         setStatusIsStale(false);
         setStatusSyncError(null);
@@ -416,6 +424,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     useEffect(() => {
         setWorldName("World");
+        setWorldIngestionStatus(null);
+        setWorldActiveIngestionRun(false);
+        setOptimisticIngestRun(false);
         setInitialIngestDraft(null);
         setInitialIngestDraftDirty(false);
         initialIngestDraftWorldIdRef.current = null;
@@ -486,6 +497,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const applyWorldData = (data: WorldResponse) => {
         setWorldName(data.world_name || "World");
+        setWorldIngestionStatus(data.ingestion_status ?? null);
+        setWorldActiveIngestionRun(data.active_ingestion_run === true);
         setReembedEligibility(data.reembed_eligibility ?? null);
         setSafetyReviewSummary(data.safety_review_summary ?? null);
     };
@@ -504,21 +517,26 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     const applyRuntimeSnapshot = (
         snapshot: RuntimeSnapshot,
-        options?: { reconnectStream?: boolean }
+        options?: { reconnectStream?: boolean; requestId?: number }
     ) => {
+        if (options?.requestId && options.requestId !== runtimeSnapshotRequestIdRef.current) {
+            return;
+        }
         applyWorldData(snapshot.world);
         applyCheckpointData(snapshot.checkpoint);
 
-        const liveRun = snapshot.world.ingestion_status === "in_progress" && snapshot.world.active_ingestion_run === true;
+        const liveRun = deriveBackendLiveIngestRun(snapshot.world, snapshot.checkpoint);
         const aborting = snapshot.checkpoint.progress_phase === "aborting";
-        const terminal = !liveRun && isTerminalIngestionStatus(snapshot.world.ingestion_status);
+        const terminal = !liveRun && isTerminalIngestionStatus(snapshot.world.ingestion_status ?? null);
 
         if (aborting || terminal || !liveRun) {
             setAbortRequestPending(false);
         }
+        if (liveRun || terminal) {
+            setOptimisticIngestRun(false);
+        }
 
         if (liveRun) {
-            setIngesting(true);
             if (options?.reconnectStream) {
                 connectToSSE();
             }
@@ -526,7 +544,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         }
 
         esRef.current?.close();
-        setIngesting(false);
     };
 
     async function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
@@ -538,12 +555,19 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }
 
     async function loadRuntimeSnapshot(reconnectStream = false): Promise<RuntimeSnapshotLoadResult> {
+        const requestId = ++runtimeSnapshotRequestIdRef.current;
         try {
             const snapshot = await fetchRuntimeSnapshot();
-            applyRuntimeSnapshot(snapshot, { reconnectStream });
+            if (requestId !== runtimeSnapshotRequestIdRef.current) {
+                return { ok: true, snapshot };
+            }
+            applyRuntimeSnapshot(snapshot, { reconnectStream, requestId });
             markRuntimeSnapshotSuccess();
             return { ok: true, snapshot };
         } catch (error) {
+            if (requestId !== runtimeSnapshotRequestIdRef.current) {
+                return { ok: false, error: normalizeRuntimeSyncError(error) };
+            }
             const normalized = normalizeRuntimeSyncError(error);
             markRuntimeSnapshotFailure(normalized);
             return { ok: false, error: normalized };
@@ -587,6 +611,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         try {
             const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
             applyWorldData(data);
+            if ((data.ingestion_status === "in_progress" && data.active_ingestion_run === true) || isTerminalIngestionStatus(data.ingestion_status ?? null)) {
+                setOptimisticIngestRun(false);
+            }
             return data;
         } catch (error) {
             if (options?.markStaleOnError) {
@@ -612,6 +639,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             applyCheckpointData(data);
             if (data.progress_phase === "aborting" || data.active_ingestion_run === false) {
                 setAbortRequestPending(false);
+            }
+            if (data.active_ingestion_run === true || data.active_ingestion_run === false || data.progress_phase === "aborting") {
+                setOptimisticIngestRun(false);
             }
             return data;
         } catch (error) {
@@ -642,6 +672,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     }
 
     async function refreshIngestActionState() {
+        const requestId = ++runtimeSnapshotRequestIdRef.current;
         try {
             const [worldData, sourcesData, checkpointData, ingestConfigData] = await Promise.all([
                 apiFetch<WorldResponse>(`/worlds/${worldId}`),
@@ -649,8 +680,12 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
                 apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
             ]);
+            if (requestId !== runtimeSnapshotRequestIdRef.current) {
+                return;
+            }
             applyRuntimeSnapshot({ world: worldData, checkpoint: checkpointData }, {
-                reconnectStream: worldData.ingestion_status === "in_progress" && worldData.active_ingestion_run === true,
+                reconnectStream: deriveBackendLiveIngestRun(worldData, checkpointData),
+                requestId,
             });
             markRuntimeSnapshotSuccess();
             applySourcesData(sourcesData);
@@ -729,9 +764,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 if (entry.safety_review_summary) {
                     setSafetyReviewSummary(entry.safety_review_summary);
                 }
+                if (typeof entry.ingestion_status === "string") {
+                    setWorldIngestionStatus(entry.ingestion_status);
+                }
+                if (typeof entry.active_ingestion_run === "boolean") {
+                    setWorldActiveIngestionRun(entry.active_ingestion_run);
+                }
+                if (entry.active_ingestion_run === true || entry.ingestion_status === "in_progress" || entry.progress_phase === "aborting") {
+                    setOptimisticIngestRun(false);
+                }
+                if (entry.active_ingestion_run === false || (entry.ingestion_status && isTerminalIngestionStatus(entry.ingestion_status))) {
+                    setOptimisticIngestRun(false);
+                }
                 if (entry.event === "aborting" || entry.progress_phase === "aborting") {
                     setAbortRequestPending(false);
-                    setIngesting(true);
                 }
                 if (entry.error_type === "safety_block") {
                     void loadSafetyReviews({ markStaleOnError: true });
@@ -784,6 +830,8 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const buildIngestSettingsPayload = (override?: Partial<WorldIngestSettings>) => ({
         chunk_size_chars: override?.chunk_size_chars ?? savedIngestSettings?.chunk_size_chars ?? 4000,
         chunk_overlap_chars: override?.chunk_overlap_chars ?? savedIngestSettings?.chunk_overlap_chars ?? 150,
+        embedding_provider: override?.embedding_provider ?? savedIngestSettings?.embedding_provider ?? "gemini",
+        embedding_openai_compatible_provider: override?.embedding_openai_compatible_provider ?? savedIngestSettings?.embedding_openai_compatible_provider ?? "groq",
         embedding_model: override?.embedding_model ?? savedIngestSettings?.embedding_model ?? "gemini-embedding-2-preview",
         glean_amount: override?.glean_amount ?? savedIngestSettings?.glean_amount ?? 1,
     });
@@ -800,7 +848,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         resetProgress();
         setRetryNotice(null);
         setAbortRequestPending(false);
-        setIngesting(true);
+        setOptimisticIngestRun(true);
         setLogEntries([]);
         clearRuntimeSyncWarning();
         try {
@@ -819,7 +867,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             setActiveRightPanel("progress");
             connectToSSE();
         } catch (err: unknown) {
-            setIngesting(false);
+            setOptimisticIngestRun(false);
             alert((err as Error).message);
         }
     };
@@ -828,7 +876,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         resetProgress();
         setRetryNotice(null);
         setAbortRequestPending(false);
-        setIngesting(true);
+        setOptimisticIngestRun(true);
         setLogEntries([]);
         setActiveRightPanel("progress");
         clearRuntimeSyncWarning();
@@ -844,7 +892,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             }
             connectToSSE();
         } catch (err: unknown) {
-            setIngesting(false);
+            setOptimisticIngestRun(false);
             setAbortRequestPending(false);
             alert((err as Error).message);
         }
@@ -1076,6 +1124,15 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         && !unresolvedSafetyReviewChunkIds.has(failure.chunk_id)
     ));
     const hasPending = sources.some((s) => s.status === "pending" || s.status === "ingesting");
+    const ingesting = optimisticIngestRun
+        || deriveBackendLiveIngestRun(
+            {
+                ingestion_status: worldIngestionStatus ?? undefined,
+                active_ingestion_run: worldActiveIngestionRun,
+            },
+            checkpoint,
+        )
+        || progress.phase === "aborting";
     const hasRetryableFailuresOutsideSafetyQueue = failureRecords.some(
         (failure) => !unresolvedSafetyReviewChunkIds.has(failure.chunk_id)
     );

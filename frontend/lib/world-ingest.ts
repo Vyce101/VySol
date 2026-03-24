@@ -1,3 +1,5 @@
+import type { ProviderCapabilities } from "@/lib/provider-models";
+
 export type WorldIngestPromptKey =
     | "graph_architect_prompt"
     | "graph_architect_glean_prompt"
@@ -25,6 +27,7 @@ export interface WorldIngestConfigResponse {
     prompts: Record<WorldIngestPromptKey, WorldPromptState>;
     has_active_chunk_overrides: boolean;
     active_chunk_override_count: number;
+    provider_registry: ProviderCapabilities;
 }
 
 export const WORLD_INGEST_PROMPT_FIELDS: Array<{ key: WorldIngestPromptKey; label: string }> = [
