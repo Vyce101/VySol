@@ -54,6 +54,7 @@ All notable user-visible changes to this project will be documented in this file
 
 ### Fixed
 
+- Fixed backend startup crashes caused by parser-level indentation damage so saved worlds/settings no longer appear to vanish when the API fails to boot, and the home/settings UI now reports backend-load failures explicitly instead of showing a false empty state.
 - Fixed ingest action gating so `Resume` and `Retry All Failures` no longer stay visible when the only remaining failed chunks already belong to the Safety Queue after a failed repair test.
 - Fixed ingest and entity-resolution UI honesty so non-terminal ingest chunk errors no longer close the live progress stream, stale runtime refreshes now surface a visible warning with retry, and normal entity-resolution `reason` updates no longer render as false failure banners.
 - Fixed entity resolution commit recovery so interrupted final meta writes now preserve a truthful `commit_pending` state, staged vector snapshot failures no longer mutate the live graph first, and stale-run recovery can finish a pending committed result instead of pretending it rolled back.

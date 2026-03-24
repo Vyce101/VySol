@@ -61,6 +61,7 @@ function getSupportedGeminiThinkingLevels(modelName: string): string[] {
 
 export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const [settings, setSettings] = useState<SettingsData | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [keys, setKeys] = useState<KeyEntry[]>([]);
     const [newKey, setNewKey] = useState("");
     const [rotationMode, setRotationMode] = useState("FAIL_OVER");
@@ -92,6 +93,7 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
         try {
             const data = await apiFetch<SettingsData>("/settings");
             setSettings(data);
+            setLoadError(null);
             setKeys(data.api_keys || []);
             setRotationMode(data.key_rotation_mode);
             setFlashModel(data.default_model_flash);
@@ -118,8 +120,8 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
             setChatProvider(data.chat_provider || "gemini");
             setIntenserpUrl(data.intenserp_base_url || "http://127.0.0.1:7777/v1");
             setIntenserpModelId(data.intenserp_model_id || "glm-chat");
-        } catch {
-            // ignore
+        } catch (err: unknown) {
+            setLoadError((err as Error).message || "Could not load settings.");
         }
     }
 
@@ -199,6 +201,55 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                     </button>
                 </div>
 
+                {!settings && loadError ? (
+                    <div
+                        style={{
+                            display: "grid",
+                            gap: 12,
+                            background: "var(--background-secondary)",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius)",
+                            padding: 16,
+                        }}
+                    >
+                        <div style={{ display: "grid", gap: 6 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)", margin: 0 }}>
+                                Could not load settings
+                            </h3>
+                            <p style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text-subtle)", margin: 0 }}>
+                                {loadError}
+                            </p>
+                            <p style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)", margin: 0 }}>
+                                Your saved settings may still exist on disk, but the app cannot confirm that until the backend responds.
+                            </p>
+                        </div>
+                        <div>
+                            <button
+                                onClick={() => void loadSettings()}
+                                style={{
+                                    border: "1px solid var(--border)",
+                                    borderRadius: "var(--radius)",
+                                    background: "var(--card)",
+                                    color: "var(--text-primary)",
+                                    padding: "10px 14px",
+                                    cursor: "pointer",
+                                    fontWeight: 600,
+                                }}
+                            >
+                                Retry
+                            </button>
+                        </div>
+                    </div>
+                ) : null}
+
+                {!settings && !loadError ? (
+                    <div style={{ fontSize: 13, color: "var(--text-subtle)", marginBottom: 16 }}>
+                        Loading settings...
+                    </div>
+                ) : null}
+
+                {settings ? (
+                <>
                 <Section title="API Keys">
                     <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
                         Add Gemini API keys. Keys are stored in settings.json on disk. {settings && `(${settings.api_key_active_count} active / ${settings.api_key_count} stored)`}
@@ -531,6 +582,8 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                 {toast && (
                     <div className="toast toast-success">{toast}</div>
                 )}
+                </>
+                ) : null}
             </div>
         </div>
     );

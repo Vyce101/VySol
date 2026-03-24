@@ -244,7 +244,7 @@ class EntityArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str) -> tuple[EntityArchitectOutput, dict]:
         settings = load_settings()
-    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
+        model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="entity_architect_prompt",
@@ -270,7 +270,7 @@ class RelationshipArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str, entities: list[NodeOut]) -> tuple[RelationshipArchitectOutput, dict]:
         settings = load_settings()
-    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
+        model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         user_content = json.dumps(
             {
@@ -306,7 +306,7 @@ class GraphArchitectAgent:
 
     async def run(self, extraction_chunk_text: str) -> tuple[GraphArchitectOutput, dict]:
         settings = load_settings()
-    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
+        model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="graph_architect_prompt",
@@ -334,7 +334,7 @@ class GraphArchitectAgent:
         previous_edges: list[EdgeOut],
     ) -> tuple[GraphArchitectOutput, dict]:
         settings = load_settings()
-    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
+        model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         user_content = extraction_chunk_text + "\n\n"
         user_content += "Here are the previously extracted entities for this same chunk:\n"
@@ -368,7 +368,7 @@ class ClaimArchitectAgent:
 
     async def run(self, prefixed_chunk_text: str) -> tuple[ClaimArchitectOutput, dict]:
         settings = load_settings()
-    model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
+        model = settings.get("default_model_flash", "gemini-3.1-flash-lite-preview")
 
         parsed, usage = await _call_agent(
             prompt_key="claim_architect_prompt",

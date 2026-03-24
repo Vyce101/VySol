@@ -218,7 +218,7 @@ def stream_chat(
         gemini_messages_payload.append({"role": "user", "content": message})
         intenserp_messages_payload.append({"role": "user", "content": message})
 
-    model_name = settings.get("default_model_chat", "gemini-3-flash-preview")
+        model_name = settings.get("default_model_chat", "gemini-3-flash-preview")
         intenserp_model_id = settings.get("intenserp_model_id", "glm-chat")
         captured_at = datetime.now(timezone.utc).isoformat()
 

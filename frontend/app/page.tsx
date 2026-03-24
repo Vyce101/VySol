@@ -308,6 +308,7 @@ function WorldCard({
 export default function HomePage() {
     const [worlds, setWorlds] = useState<World[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [showCreate, setShowCreate] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [duplicatePendingWorldId, setDuplicatePendingWorldId] = useState<string | null>(null);
@@ -316,8 +317,9 @@ export default function HomePage() {
         try {
             const data = await apiFetch<World[]>("/worlds");
             setWorlds(data);
-        } catch {
-            // Backend not running
+            setLoadError(null);
+        } catch (err: unknown) {
+            setLoadError((err as Error).message || "Could not load worlds.");
         } finally {
             setLoading(false);
         }
@@ -387,6 +389,49 @@ export default function HomePage() {
             {loading ? (
                 <div style={{ display: "flex", justifyContent: "center", padding: 80 }}>
                     <Loader2 size={32} style={{ animation: "spin 1s linear infinite", color: "var(--primary)" }} />
+                </div>
+            ) : loadError ? (
+                <div
+                    style={{
+                        display: "grid",
+                        gap: 16,
+                        background: "var(--card)",
+                        border: "1px solid var(--border)",
+                        borderRadius: "var(--radius)",
+                        padding: 24,
+                        boxShadow: "0 12px 26px color-mix(in srgb, var(--shadow-color) 55%, transparent)",
+                    }}
+                >
+                    <div style={{ display: "grid", gap: 6 }}>
+                        <h2 style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)" }}>
+                            Could not load worlds
+                        </h2>
+                        <p style={{ fontSize: 14, lineHeight: 1.5, color: "var(--text-subtle)", margin: 0 }}>
+                            {loadError}
+                        </p>
+                        <p style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text-muted)", margin: 0 }}>
+                            Your saved worlds may still exist on disk, but the app cannot confirm that until the backend responds.
+                        </p>
+                    </div>
+                    <div>
+                        <button
+                            onClick={() => {
+                                setLoading(true);
+                                void fetchWorlds();
+                            }}
+                            style={{
+                                border: "1px solid var(--border)",
+                                borderRadius: "var(--radius)",
+                                background: "var(--background-secondary)",
+                                color: "var(--text-primary)",
+                                padding: "10px 14px",
+                                cursor: "pointer",
+                                fontWeight: 600,
+                            }}
+                        >
+                            Retry
+                        </button>
+                    </div>
                 </div>
             ) : (
                 <div style={{
