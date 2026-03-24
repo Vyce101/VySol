@@ -1,21 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import type { MutableRefObject, ReactElement, ReactNode } from "react";
 import { Maximize, ChevronRight, ChevronLeft } from "lucide-react";
 import dynamic from "next/dynamic";
-
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
-
-type ForceGraphHandle = {
-    zoomToFit: (ms?: number, padding?: number) => void;
-    getGraphBbox: () => { x: [number, number]; y: [number, number] } | undefined;
-    d3Force: (forceName: string) => {
-        strength?: (value: number | ((obj: unknown) => number)) => void;
-        distance?: (value: number | ((obj: unknown) => number)) => void;
-        distanceMax?: (value: number) => void;
-    } | undefined;
-    d3ReheatSimulation: () => void;
-};
+import type { ForceGraphMethods, ForceGraphProps, LinkObject, NodeObject } from "react-force-graph-2d";
 
 export interface GraphViewerNeighbor {
     id: string;
@@ -67,11 +56,16 @@ export interface GraphViewerNodeDetail {
     neighbors: GraphViewerNeighbor[];
 }
 
-type RenderNode = GraphViewerNode;
-type RenderLink = GraphViewerLink & {
-    source: string | RenderNode;
-    target: string | RenderNode;
-};
+type ForceGraphLinkData = Omit<GraphViewerLink, "source" | "target">;
+type ForceGraphNode = NodeObject<GraphViewerNode>;
+type ForceGraphLink = LinkObject<GraphViewerNode, ForceGraphLinkData>;
+type ForceGraphHandle = ForceGraphMethods<GraphViewerNode, ForceGraphLinkData>;
+type GraphEndpoint = ForceGraphLink["source"] | ForceGraphLink["target"];
+type ForceGraphComponent = (props: ForceGraphProps<GraphViewerNode, ForceGraphLinkData> & {
+    ref?: MutableRefObject<ForceGraphHandle | undefined>;
+}) => ReactElement | null;
+
+const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false }) as unknown as ForceGraphComponent;
 
 const LINK_CURVATURE = 0.25;
 const DEFAULT_LINK_WIDTH = 1.45;
@@ -164,6 +158,16 @@ const hasUsableGraphBounds = (bbox: { x: [number, number]; y: [number, number] }
     return maxX > minX && maxY > minY;
 };
 
+const getGraphNodeId = (value: GraphEndpoint): string | null => {
+    if (typeof value === "string") return value;
+    if (typeof value === "number") return String(value);
+    if (value && typeof value === "object") {
+        if (typeof value.id === "string") return value.id;
+        if (typeof value.id === "number") return String(value.id);
+    }
+    return null;
+};
+
 function getFallbackNodeDetail(node: GraphViewerNode): GraphViewerNodeDetail {
     return {
         id: node.id,
@@ -193,7 +197,7 @@ export default function InteractiveGraphViewer(props: {
     edges: GraphViewerLink[];
     resolveNodeDetail?: (node: GraphViewerNode) => Promise<GraphViewerNodeDetail | null> | GraphViewerNodeDetail | null;
     searchResults?: string[];
-    searchOverlay?: React.ReactNode;
+    searchOverlay?: ReactNode;
     emptyStateTitle?: string;
     emptyStateSubtitle?: string;
     panelPlaceholderTitle?: string;
@@ -230,7 +234,7 @@ export default function InteractiveGraphViewer(props: {
     const [colorBySource, setColorBySource] = useState(false);
     const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
     const [, setThemeMode] = useState("dark");
-    const graphRef = useRef<ForceGraphHandle | null>(null);
+    const graphRef = useRef<ForceGraphHandle | undefined>(undefined);
     const containerRef = useRef<HTMLDivElement>(null);
     const resizeFrameRef = useRef<number | null>(null);
     const initialFitFrameRef = useRef<number | null>(null);
@@ -244,7 +248,8 @@ export default function InteractiveGraphViewer(props: {
         ? selectedNode
         : null;
     const selectedNodeId = visibleSelectedNode?.id ?? null;
-    const graphData = useMemo(() => ({ nodes, links: edges }), [nodes, edges]);
+    const nodeLookup = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+    const graphData = useMemo<{ nodes: ForceGraphNode[]; links: ForceGraphLink[] }>(() => ({ nodes, links: edges }), [nodes, edges]);
 
     const measureContainer = useCallback(() => {
         const element = containerRef.current;
@@ -318,19 +323,25 @@ export default function InteractiveGraphViewer(props: {
 
     const applyGraphLayout = useCallback(() => {
         if (!graphRef.current || nodes.length === 0 || dimensions.width <= 0 || dimensions.height <= 0) return false;
-        const getLinkedNode = (value: string | RenderNode) =>
-            typeof value === "object" ? value : nodes.find((node) => node.id === value);
+        const getLinkedNode = (value: GraphEndpoint) => {
+            if (value && typeof value === "object") {
+                return value;
+            }
+
+            const nodeId = getGraphNodeId(value);
+            return nodeId ? nodeLookup.get(nodeId) : undefined;
+        };
 
         const chargeForce = graphRef.current.d3Force("charge");
-        chargeForce?.strength?.((rawNode) => {
-            const node = rawNode as RenderNode;
+        chargeForce?.strength?.((rawNode: ForceGraphNode) => {
+            const node = rawNode;
             return -240 - getNodeRadius(node) * CHARGE_RADIUS_MULTIPLIER;
         });
         chargeForce?.distanceMax?.(1200);
 
         const linkForce = graphRef.current.d3Force("link");
-        linkForce?.distance?.((rawLink) => {
-            const link = rawLink as RenderLink;
+        linkForce?.distance?.((rawLink: ForceGraphLink) => {
+            const link = rawLink;
             const sourceNode = getLinkedNode(link.source);
             const targetNode = getLinkedNode(link.target);
             return 120 + (getNodeRadius(sourceNode) + getNodeRadius(targetNode)) * LINK_DISTANCE_RADIUS_MULTIPLIER;
@@ -339,7 +350,7 @@ export default function InteractiveGraphViewer(props: {
 
         graphRef.current.d3ReheatSimulation();
         return true;
-    }, [dimensions.height, dimensions.width, nodes]);
+    }, [dimensions.height, dimensions.width, nodeLookup, nodes.length]);
 
     const getSourceColor = useCallback((sourceStr?: string | number) => {
         if (!sourceStr) return readThemeVar("--graph-node", "#7c3aed");
@@ -357,16 +368,19 @@ export default function InteractiveGraphViewer(props: {
         return `hsl(${hue}, 70%, 60%)`;
     }, []);
 
-    const getNodeLabel = useCallback((value: string | RenderNode) => {
-        if (typeof value === "object" && value !== null) {
-            return value.label || value.id || "Unknown";
+    const getNodeLabel = useCallback((value: GraphEndpoint) => {
+        if (value && typeof value === "object") {
+            const fallbackId = typeof value.id === "number" ? String(value.id) : value.id;
+            return value.label || fallbackId || "Unknown";
         }
 
-        const matchedNode = nodes.find((node) => node.id === value);
-        return matchedNode?.label || value || "Unknown";
-    }, [nodes]);
+        const nodeId = getGraphNodeId(value);
+        if (!nodeId) return "Unknown";
 
-    const getEdgeTemporalLabel = useCallback((link: GraphViewerLink) => {
+        return nodeLookup.get(nodeId)?.label || nodeId;
+    }, [nodeLookup]);
+
+    const getEdgeTemporalLabel = useCallback((link: ForceGraphLink) => {
         if (typeof link.source_book === "number" && typeof link.source_chunk === "number" && link.source_book > 0 && link.source_chunk >= 0) {
             return `Book ${link.source_book} > Chunk ${link.source_chunk}`;
         }
@@ -422,7 +436,7 @@ export default function InteractiveGraphViewer(props: {
     }, [applyGraphLayout, dimensions.height, dimensions.width, nodes.length]);
 
     const nodeCanvasObject = useCallback(
-        (node: RenderNode, ctx: CanvasRenderingContext2D) => {
+        (node: ForceGraphNode, ctx: CanvasRenderingContext2D) => {
             const primaryNodeColor = readThemeVar("--graph-node", "#7c3aed");
             const entryNodeColor = readThemeVar("--primary", "#7c3aed");
             const expandedNodeColor = readThemeVar("--status-info-pill-fg", "#60a5fa");
@@ -463,7 +477,7 @@ export default function InteractiveGraphViewer(props: {
             ctx.globalAlpha = opacity;
             const { radius, x, y } = paintNodeCircle(ctx, node, color);
 
-            ctx.font = `${Math.max(3, radius * 0.6)}px Inter, sans-serif`;
+            ctx.font = `${Math.max(3, radius * 0.6)}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
             ctx.fillStyle = labelColor;
@@ -473,12 +487,12 @@ export default function InteractiveGraphViewer(props: {
         [colorBySource, getSourceColor, hoveredNodeId, searchResults, selectedNodeId, useEntryRoleColors]
     );
 
-    const getLinkStrokeStyle = useCallback((link: RenderLink) => {
+    const getLinkStrokeStyle = useCallback((link: ForceGraphLink) => {
         const isSearching = searchResults.length > 0;
-        const sourceId = typeof link.source === "object" ? link.source.id : link.source;
-        const targetId = typeof link.target === "object" ? link.target.id : link.target;
-        const sourceMatch = searchResults.includes(sourceId);
-        const targetMatch = searchResults.includes(targetId);
+        const sourceId = getGraphNodeId(link.source);
+        const targetId = getGraphNodeId(link.target);
+        const sourceMatch = sourceId ? searchResults.includes(sourceId) : false;
+        const targetMatch = targetId ? searchResults.includes(targetId) : false;
         const opacity = isSearching ? (sourceMatch && targetMatch ? 0.6 : 0.05) : 0.4;
 
         if (!useEntryRoleColors && colorBySource && link.source_book) {
@@ -487,7 +501,7 @@ export default function InteractiveGraphViewer(props: {
         }
         const graphLink = readThemeVar("--graph-link", "rgba(74, 74, 74, 0.4)");
         return graphLink.replace(/rgba?\(([^)]+)\)/, (_, values) => {
-            const parts = values.split(",").map((value) => value.trim());
+            const parts = values.split(",").map((value: string) => value.trim());
             if (parts.length >= 3) {
                 return `rgba(${parts[0]}, ${parts[1]}, ${parts[2]}, ${opacity})`;
             }
@@ -495,7 +509,7 @@ export default function InteractiveGraphViewer(props: {
         });
     }, [colorBySource, getSourceColor, searchResults, useEntryRoleColors]);
 
-    const resolveNodeClick = useCallback(async (node: GraphViewerNode) => {
+    const resolveNodeClick = useCallback(async (node: ForceGraphNode) => {
         const nextDetail = resolveNodeDetail
             ? await Promise.resolve(resolveNodeDetail(node))
             : getFallbackNodeDetail(node);
@@ -505,7 +519,7 @@ export default function InteractiveGraphViewer(props: {
         }
     }, [resolveNodeDetail]);
 
-    const handleNodeHover = useCallback((node: GraphViewerNode | null) => {
+    const handleNodeHover = useCallback((node: ForceGraphNode | null) => {
         setHoveredNodeId(node?.id ?? null);
     }, []);
 
@@ -530,7 +544,7 @@ export default function InteractiveGraphViewer(props: {
                         ref={graphRef}
                         graphData={graphData}
                         nodeCanvasObject={nodeCanvasObject}
-                        nodePointerAreaPaint={(node: RenderNode, color: string, ctx: CanvasRenderingContext2D) => {
+                        nodePointerAreaPaint={(node: ForceGraphNode, color: string, ctx: CanvasRenderingContext2D) => {
                             paintNodeCircle(ctx, node, color);
                         }}
                         d3AlphaDecay={0.02}
@@ -551,7 +565,7 @@ export default function InteractiveGraphViewer(props: {
                         backgroundColor={readThemeVar("--graph-bg", "#0f0f0f")}
                         width={dimensions.width}
                         height={dimensions.height}
-                        nodeLabel={(node: RenderNode) => {
+                        nodeLabel={(node: ForceGraphNode) => {
                             const firstSource = node.source_chunks && node.source_chunks.length > 0 ? node.source_chunks[0] : null;
                             const createdAt = node.created_at ? new Date(node.created_at).toLocaleString() : null;
                             const connectionLine = `${node.connection_count || 0} connected nodes`;
@@ -573,7 +587,7 @@ export default function InteractiveGraphViewer(props: {
                                 </div>
                             `;
                         }}
-                        linkLabel={(link: RenderLink) => {
+                        linkLabel={(link: ForceGraphLink) => {
                             const sourceName = escapeHtml(getNodeLabel(link.source));
                             const targetName = escapeHtml(getNodeLabel(link.target));
                             const description = escapeHtml((link.description || "").trim() || "No description available.");

@@ -83,10 +83,12 @@ Frontend:
 ```bash
 cd frontend
 npm install
+# Optional: copy .env.local.example to .env.local and change the API URL if needed
 npm run dev
 ```
 
 By default the frontend talks to `http://localhost:8000`.
+The repo now includes `frontend/.env.local.example` with that default value for clean local setup.
 
 ## First Run Behavior
 

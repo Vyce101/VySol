@@ -1,10 +1,7 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { GlobalIngestionStatus } from "@/components/GlobalIngestionStatus";
 import { ThemeController } from "@/components/ThemeController";
-
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
     title: "VySol",
@@ -23,7 +20,7 @@ export default function RootLayout({
 }) {
     return (
         <html lang="en" data-theme="dark">
-            <body className={`${inter.variable} font-sans antialiased`}>
+            <body className="font-sans antialiased">
                 <ThemeController />
                 {children}
                 <GlobalIngestionStatus />

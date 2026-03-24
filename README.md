@@ -1,7 +1,7 @@
 # VySol
 
 <p align="center">
-  <img src="docs/assets/branding/horizontal.png" alt="VySol logo" width="560">
+  <img src="docs/assets/branding/social.png" alt="VySol logo" width="560">
 </p>
 
 ![License](https://img.shields.io/badge/license-AGPLv3-blue)
