@@ -21,11 +21,20 @@ from .config import (
     resolve_slot_provider,
 )
 from .intenserp_provider import stream_intenserp_chat
-from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
+from .key_manager import assess_transient_provider_error, classify_transient_provider_error, get_key_manager, jittered_delay
 from .openai_compatible_provider import create_openai_compatible_chat_completion, stream_openai_compatible_chat
 from .retrieval_engine import RetrievalEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _build_context_limit_message(*, context_characters: int, limit_characters: int) -> str:
+    return (
+        "I did not send your prompt to the AI because the retrieved context was "
+        f"{context_characters:,} characters, which is over your current Retrieval Settings "
+        f"context limit of {limit_characters:,} characters. "
+        "Increase `Context Limit (Chars)` or narrow retrieval, then try again."
+    )
 
 
 def _serialize_gemini_payload_value(value: Any) -> Any:
@@ -210,6 +219,45 @@ def stream_chat(
         nodes_used = retrieval_result.get("graph_nodes", [])
         retrieval_meta = retrieval_result.get("retrieval_meta", {})
         context_graph = retrieval_result.get("context_graph")
+        context_characters = len(context_string)
+
+        try:
+            context_char_limit = max(0, int(settings.get("retrieval_context_char_limit", 0)))
+        except (TypeError, ValueError):
+            context_char_limit = 0
+        if isinstance(settings_override, dict) and "retrieval_context_char_limit" in settings_override:
+            try:
+                context_char_limit = max(0, int(settings_override["retrieval_context_char_limit"]))
+            except (TypeError, ValueError):
+                context_char_limit = 0
+
+        if context_char_limit > 0 and context_characters > context_char_limit:
+            blocked_message = _build_context_limit_message(
+                context_characters=context_characters,
+                limit_characters=context_char_limit,
+            )
+            blocked_context_payload = {
+                "blocked_by_context_limit": True,
+                "context_characters": context_characters,
+                "context_char_limit": context_char_limit,
+                "message": blocked_message,
+            }
+            blocked_context_meta = {
+                "blocked_by_context_limit": True,
+                "retrieval": {
+                    **retrieval_meta,
+                    "retrieval_blocked": True,
+                    "block_reason": "context_limit_exceeded",
+                    "context_characters": context_characters,
+                    "context_char_limit": context_char_limit,
+                },
+                "visualization": {
+                    "context_graph": context_graph,
+                },
+            }
+            yield f"data: {json.dumps({'token': blocked_message})}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'nodes_used': nodes_used, 'context_payload': blocked_context_payload, 'context_meta': blocked_context_meta, 'thought_text': '', 'gemini_parts': []})}\n\n"
+            return
 
         system_prompt = load_prompt("chat_system_prompt")
         full_system = f"{system_prompt}\n\n{context_string}" if context_string else system_prompt
@@ -427,12 +475,21 @@ def stream_chat(
         km = get_key_manager()
         backoff = [2, 4, 8]
         tried_key_indices: set[int] = set()
+        request_backoff_attempts = 0
+        reused_key: tuple[str, int] | None = None
 
         while True:
             key_idx: int | None = None
+            api_key: str | None = None
             emitted_token = False
             try:
-                api_key, key_idx = km.wait_for_request_key(tried_key_indices)
+                if reused_key is not None:
+                    api_key, key_idx = reused_key
+                    reused_key = None
+                elif hasattr(km, "wait_for_request_key"):
+                    api_key, key_idx = km.wait_for_request_key(tried_key_indices)
+                else:
+                    api_key, key_idx = km.wait_for_available_key()
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content_stream(
                     model=model_name,
@@ -476,7 +533,40 @@ def stream_chat(
             except Exception as e:
                 if emitted_token:
                     raise
-                transient_kind = classify_transient_provider_error(e)
+                assessment = assess_transient_provider_error(e, provider="gemini")
+                if assessment and key_idx is not None:
+                    if assessment.action == "request_backoff" and api_key is not None:
+                        request_backoff_attempts += 1
+                        if request_backoff_attempts <= len(backoff):
+                            delay = assessment.retry_after_seconds
+                            if delay is None:
+                                delay = backoff[min(request_backoff_attempts - 1, len(backoff) - 1)]
+                            logger.warning(
+                                "Gemini chat request throttled for world %s; retrying key %s without cooldown (%s).",
+                                world_id,
+                                key_idx,
+                                assessment.provider_message or e,
+                            )
+                            time.sleep(jittered_delay(delay))
+                            reused_key = (api_key, key_idx)
+                            continue
+                        raise
+                    if assessment.action == "cooldown_key":
+                        request_backoff_attempts = 0
+                        km.report_error(key_idx, assessment.kind)
+                        tried_key_indices.add(key_idx)
+                        delay = assessment.retry_after_seconds
+                        if delay is None:
+                            delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
+                        logger.warning(
+                            "Gemini chat key %s entered cooldown after explicit limit signal for world %s (%s).",
+                            key_idx,
+                            world_id,
+                            assessment.provider_message or e,
+                        )
+                        time.sleep(jittered_delay(delay))
+                        continue
+                transient_kind = assessment.kind if assessment is not None else classify_transient_provider_error(e)
                 if transient_kind and key_idx is not None:
                     km.report_error(key_idx, transient_kind)
                     tried_key_indices.add(key_idx)

@@ -32,6 +32,45 @@ def test_stream_chat_turns_setup_failures_into_error_events(monkeypatch):
     assert "dimension mismatch" in payload["message"]
 
 
+def test_stream_chat_blocks_when_context_exceeds_character_limit(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "A" * 120,
+                "graph_nodes": [{"id": "a", "display_name": "A", "entity_type": "Unknown"}],
+                "retrieval_meta": {"context_characters": 120},
+                "context_graph": None,
+            }
+
+    class DummyClient:
+        def __init__(self, api_key: str):
+            raise AssertionError("Gemini client should not be created when context limit blocks the request.")
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "chat_provider": "gemini",
+            "default_model_chat": "gemini-test-model",
+            "chat_history_messages": 10,
+            "retrieval_context_char_limit": 100,
+        },
+    )
+    monkeypatch.setattr(chat_engine.genai, "Client", DummyClient)
+
+    events = _parse_sse_events(list(chat_engine.stream_chat("world-123", "hello")))
+
+    assert events[0]["token"].startswith("I did not send your prompt to the AI because the retrieved context was 120 characters")
+    assert events[-1]["event"] == "done"
+    assert events[-1]["context_meta"]["retrieval"]["retrieval_blocked"] is True
+    assert events[-1]["context_meta"]["retrieval"]["block_reason"] == "context_limit_exceeded"
+
+
 def test_stream_chat_gemini_emits_exact_context_payload_and_separate_meta(monkeypatch):
     class DummyRetriever:
         def __init__(self, world_id: str):
@@ -379,6 +418,161 @@ def test_stream_chat_gemini_retries_transient_failure_before_first_token(monkeyp
     assert [event.get("token") for event in events if "token" in event] == ["hello"]
     assert events[-1]["event"] == "done"
     assert dummy_km.reported == [(0, "timeout")]
+
+
+def test_stream_chat_gemini_generic_429_retries_same_key_without_cooldown(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "",
+                "graph_nodes": [],
+                "retrieval_meta": {},
+                "context_graph": None,
+            }
+
+    class DummyKM:
+        def __init__(self):
+            self.wait_calls = 0
+            self.reported: list[tuple[int, str]] = []
+
+        def wait_for_request_key(self, used_indices=None):
+            self.wait_calls += 1
+            return ("k1", 0)
+
+        def report_error(self, key_index: int, error_type: str) -> None:
+            self.reported.append((key_index, error_type))
+
+    class FailingResponse:
+        def __iter__(self):
+            raise RuntimeError("429 Too Many Requests")
+            yield  # pragma: no cover
+
+    class SuccessfulResponse:
+        def __iter__(self):
+            class Chunk:
+                text = "hello"
+
+            yield Chunk()
+
+    class DummyModels:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_content_stream(self, *, model, contents, config):
+            self.calls += 1
+            if self.calls == 1:
+                return FailingResponse()
+            return SuccessfulResponse()
+
+    class DummyClient:
+        models_instance = DummyModels()
+
+        def __init__(self, api_key: str):
+            self.models = self.models_instance
+
+    dummy_km = DummyKM()
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "chat_provider": "gemini",
+            "default_model_chat": "gemini-test-model",
+            "chat_history_messages": 10,
+        },
+    )
+    monkeypatch.setattr(chat_engine, "get_key_manager", lambda: dummy_km)
+    monkeypatch.setattr(chat_engine.genai, "Client", DummyClient)
+    monkeypatch.setattr(chat_engine.time, "sleep", lambda seconds: None)
+
+    events = _parse_sse_events(list(chat_engine.stream_chat("world-123", "hello")))
+
+    assert [event.get("token") for event in events if "token" in event] == ["hello"]
+    assert events[-1]["event"] == "done"
+    assert dummy_km.wait_calls == 1
+    assert dummy_km.reported == []
+
+
+def test_stream_chat_gemini_explicit_key_quota_429_cools_down_and_rotates(monkeypatch):
+    class DummyRetriever:
+        def __init__(self, world_id: str):
+            self.world_id = world_id
+
+        def retrieve(self, query: str, settings_override=None):
+            return {
+                "context_string": "",
+                "graph_nodes": [],
+                "retrieval_meta": {},
+                "context_graph": None,
+            }
+
+    class DummyKM:
+        def __init__(self):
+            self.wait_calls = 0
+            self.reported: list[tuple[int, str]] = []
+
+        def wait_for_request_key(self, used_indices=None):
+            keys = [("k1", 0), ("k2", 1)]
+            key = keys[min(self.wait_calls, len(keys) - 1)]
+            self.wait_calls += 1
+            return key
+
+        def report_error(self, key_index: int, error_type: str) -> None:
+            self.reported.append((key_index, error_type))
+
+    class FailingResponse:
+        def __iter__(self):
+            raise RuntimeError("429 API key quota exceeded")
+            yield  # pragma: no cover
+
+    class SuccessfulResponse:
+        def __iter__(self):
+            class Chunk:
+                text = "hello"
+
+            yield Chunk()
+
+    class DummyModels:
+        def __init__(self, api_key: str):
+            self.api_key = api_key
+
+        def generate_content_stream(self, *, model, contents, config):
+            if self.api_key == "k1":
+                return FailingResponse()
+            return SuccessfulResponse()
+
+    class DummyClient:
+        def __init__(self, api_key: str):
+            self.models = DummyModels(api_key)
+
+    dummy_km = DummyKM()
+
+    monkeypatch.setattr(chat_engine, "RetrievalEngine", DummyRetriever)
+    monkeypatch.setattr(chat_engine, "load_prompt", lambda key: "BASE SYSTEM")
+    monkeypatch.setattr(
+        chat_engine,
+        "load_settings",
+        lambda: {
+            "chat_provider": "gemini",
+            "default_model_chat": "gemini-test-model",
+            "chat_history_messages": 10,
+        },
+    )
+    monkeypatch.setattr(chat_engine, "get_key_manager", lambda: dummy_km)
+    monkeypatch.setattr(chat_engine.genai, "Client", DummyClient)
+    monkeypatch.setattr(chat_engine.time, "sleep", lambda seconds: None)
+
+    events = _parse_sse_events(list(chat_engine.stream_chat("world-123", "hello")))
+
+    assert [event.get("token") for event in events if "token" in event] == ["hello"]
+    assert events[-1]["event"] == "done"
+    assert dummy_km.wait_calls == 2
+    assert dummy_km.reported == [(0, "429")]
 
 
 def test_stream_chat_gemini_does_not_retry_after_first_token(monkeypatch):

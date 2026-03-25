@@ -21,7 +21,7 @@ from .config import (
     set_world_ingest_settings,
     world_chroma_dir,
 )
-from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
+from .key_manager import assess_transient_provider_error, classify_transient_provider_error, get_key_manager, jittered_delay
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,18 @@ def _get_provider_key_manager(provider: str):
         return get_key_manager(provider)
     except TypeError:
         return get_key_manager()
+
+
+def _coerce_collection_field(data: dict, key: str) -> list:
+    value = data.get(key)
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        return list(value)
+    except TypeError:
+        return []
 
 
 class VectorStoreReadError(RuntimeError):
@@ -159,6 +171,40 @@ class VectorStore:
             self._embed_clients[api_key] = client
         return client
 
+    def _get_max_upsert_batch_size(self) -> int | None:
+        try:
+            max_batch_size = int(self.client.get_max_batch_size())
+        except Exception:
+            return None
+        return max_batch_size if max_batch_size > 0 else None
+
+    def _upsert_precomputed_batches(
+        self,
+        *,
+        document_ids: list[str],
+        texts: list[str],
+        metadatas: list[dict],
+        embeddings: list[list[float]],
+    ) -> None:
+        max_batch_size = self._get_max_upsert_batch_size()
+        if max_batch_size is None or len(document_ids) <= max_batch_size:
+            self.collection.upsert(
+                ids=document_ids,
+                embeddings=embeddings,
+                documents=texts,
+                metadatas=metadatas,
+            )
+            return
+
+        for start in range(0, len(document_ids), max_batch_size):
+            end = start + max_batch_size
+            self.collection.upsert(
+                ids=document_ids[start:end],
+                embeddings=embeddings[start:end],
+                documents=texts[start:end],
+                metadatas=metadatas[start:end],
+            )
+
     def _candidate_embedding_models(self) -> list[str]:
         if self.embedding_provider != "gemini":
             return [self.embedding_model]
@@ -212,6 +258,7 @@ class VectorStore:
 
         candidates = self._candidate_embedding_models()
         last_error: Exception | None = None
+        backoff = [2, 4, 8]
         key_manager = _get_provider_key_manager(self.embedding_provider)
         tried_key_indices: set[int] = set()
         if api_key:
@@ -226,33 +273,74 @@ class VectorStore:
 
         while True:
             client = self._get_embed_client(current_api_key)
+            rotated_key = False
             for model_name in candidates:
-                try:
-                    payload: str | list[str] = texts if len(texts) > 1 else texts[0]
-                    result = client.models.embed_content(model=model_name, contents=payload)
-                    embeddings = [list(item.values) for item in (result.embeddings or [])]
-                    if len(embeddings) != len(texts):
-                        raise RuntimeError(
-                            f"Embedding API returned {len(embeddings)} embeddings for {len(texts)} texts."
-                        )
-                    self._record_effective_embedding_model(candidates, model_name)
-                    return embeddings
-                except Exception as e:
-                    last_error = e
-                    message = str(e).lower()
-                    transient_kind = classify_transient_provider_error(e)
+                request_backoff_attempts = 0
+                while True:
+                    try:
+                        payload: str | list[str] = texts if len(texts) > 1 else texts[0]
+                        result = client.models.embed_content(model=model_name, contents=payload)
+                        embeddings = [list(item.values) for item in (result.embeddings or [])]
+                        if len(embeddings) != len(texts):
+                            raise RuntimeError(
+                                f"Embedding API returned {len(embeddings)} embeddings for {len(texts)} texts."
+                            )
+                        self._record_effective_embedding_model(candidates, model_name)
+                        return embeddings
+                    except Exception as e:
+                        last_error = e
+                        message = str(e).lower()
+                        assessment = assess_transient_provider_error(e, provider="gemini")
 
-                    if transient_kind and current_key_index is not None:
-                        tried_key_indices.add(current_key_index)
-                        key_manager.report_error(current_key_index, transient_kind)
-                        time.sleep(jittered_delay(0.5))
-                        current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
-                        break
+                        if assessment and current_key_index is not None:
+                            if assessment.action == "request_backoff":
+                                request_backoff_attempts += 1
+                                if request_backoff_attempts <= len(backoff):
+                                    delay = assessment.retry_after_seconds
+                                    if delay is None:
+                                        delay = backoff[min(request_backoff_attempts - 1, len(backoff) - 1)]
+                                    logger.warning(
+                                        "Gemini embedding request throttled for world %s; retrying key %s without cooldown (%s).",
+                                        self.world_id,
+                                        current_key_index,
+                                        assessment.provider_message or e,
+                                    )
+                                    time.sleep(jittered_delay(delay))
+                                    continue
+                                raise
 
-                    if ("not found" in message or "not supported" in message) and model_name != candidates[-1]:
-                        continue
-                    raise
-            else:
+                            if assessment.action == "cooldown_key":
+                                tried_key_indices.add(current_key_index)
+                                key_manager.report_error(current_key_index, assessment.kind)
+                                delay = assessment.retry_after_seconds if assessment.retry_after_seconds is not None else 0.5
+                                logger.warning(
+                                    "Gemini embedding key %s entered cooldown for world %s after explicit limit signal (%s).",
+                                    current_key_index,
+                                    self.world_id,
+                                    assessment.provider_message or e,
+                                )
+                                time.sleep(jittered_delay(delay))
+                                current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
+                                client = self._get_embed_client(current_api_key)
+                                rotated_key = True
+                                break
+
+                        transient_kind = assessment.kind if assessment is not None else classify_transient_provider_error(e)
+                        if transient_kind and current_key_index is not None:
+                            tried_key_indices.add(current_key_index)
+                            key_manager.report_error(current_key_index, transient_kind)
+                            time.sleep(jittered_delay(0.5))
+                            current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
+                            client = self._get_embed_client(current_api_key)
+                            rotated_key = True
+                            break
+
+                        if ("not found" in message or "not supported" in message) and model_name != candidates[-1]:
+                            break
+                        raise
+                if rotated_key:
+                    break
+            if not rotated_key:
                 break
             continue
 
@@ -310,11 +398,11 @@ class VectorStore:
             return
         if not (len(document_ids) == len(texts) == len(metadatas) == len(embeddings)):
             raise ValueError("Document ids, texts, metadatas, and embeddings must have matching lengths.")
-        self.collection.upsert(
-            ids=document_ids,
-            embeddings=embeddings,
-            documents=texts,
+        self._upsert_precomputed_batches(
+            document_ids=document_ids,
+            texts=texts,
             metadatas=metadatas,
+            embeddings=embeddings,
         )
         self._set_recorded_embedding_model(self.embedding_model)
 
@@ -434,11 +522,19 @@ class VectorStore:
     def count(self) -> int:
         return self.collection.count()
 
-    def get_all_records(self, *, include_documents: bool = False, raise_on_error: bool = False) -> list[dict]:
-        """Return all stored ids with optional documents and metadata."""
+    def get_all_records(
+        self,
+        *,
+        include_documents: bool = False,
+        include_embeddings: bool = False,
+        raise_on_error: bool = False,
+    ) -> list[dict]:
+        """Return all stored ids with optional documents, embeddings, and metadata."""
         include: list[str] = ["metadatas"]
         if include_documents:
             include.append("documents")
+        if include_embeddings:
+            include.append("embeddings")
         try:
             data = self.collection.get(include=include)
         except Exception as exc:
@@ -448,15 +544,19 @@ class VectorStore:
                 ) from exc
             return []
 
-        ids = data.get("ids") or []
-        metas = data.get("metadatas") or []
-        docs = data.get("documents") or []
+        ids = _coerce_collection_field(data, "ids")
+        metas = _coerce_collection_field(data, "metadatas")
+        docs = _coerce_collection_field(data, "documents")
+        embeddings = _coerce_collection_field(data, "embeddings")
         output: list[dict] = []
         for i, record_id in enumerate(ids):
             meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
             row = {"id": str(record_id), "metadata": meta}
             if include_documents:
                 row["document"] = docs[i] if i < len(docs) else ""
+            if include_embeddings:
+                raw_embedding = embeddings[i] if i < len(embeddings) else []
+                row["embedding"] = list(raw_embedding) if raw_embedding is not None else []
             output.append(row)
         return output
 
@@ -492,18 +592,10 @@ class VectorStore:
                 ) from exc
             return []
 
-        ids = data.get("ids")
-        metas = data.get("metadatas")
-        docs = data.get("documents")
-        embeddings = data.get("embeddings")
-        if ids is None:
-            ids = []
-        if metas is None:
-            metas = []
-        if docs is None:
-            docs = []
-        if embeddings is None:
-            embeddings = []
+        ids = _coerce_collection_field(data, "ids")
+        metas = _coerce_collection_field(data, "metadatas")
+        docs = _coerce_collection_field(data, "documents")
+        embeddings = _coerce_collection_field(data, "embeddings")
         output: list[dict] = []
         for i, record_id in enumerate(ids):
             meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
@@ -531,17 +623,17 @@ class VectorStore:
             documents.append(str(record.get("document") or ""))
             metadata = record.get("metadata")
             metadatas.append(metadata if isinstance(metadata, dict) else {})
-            raw_embedding = record.get("embedding") or []
-            embeddings.append(list(raw_embedding))
+            raw_embedding = record.get("embedding")
+            embeddings.append(list(raw_embedding) if raw_embedding is not None else [])
 
         if not document_ids:
             return
 
-        self.collection.upsert(
-            ids=document_ids,
-            embeddings=embeddings,
-            documents=documents,
+        self._upsert_precomputed_batches(
+            document_ids=document_ids,
+            texts=documents,
             metadatas=metadatas,
+            embeddings=embeddings,
         )
         self._set_recorded_embedding_model(self.embedding_model)
 

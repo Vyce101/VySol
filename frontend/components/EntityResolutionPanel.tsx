@@ -152,8 +152,22 @@ function getResolutionStatusDetail(payload: {
     message?: unknown;
     reason?: unknown;
 }, failureMessage?: string | null): string | null {
-    if (failureMessage) return null;
-    return normalizeResolutionText(payload.message) ?? normalizeResolutionText(payload.reason);
+    const message = normalizeResolutionText(payload.message);
+    const reason = normalizeResolutionText(payload.reason);
+    if (!failureMessage) {
+        return message ?? reason;
+    }
+    if (reason && reason !== failureMessage) {
+        return reason;
+    }
+    return null;
+}
+
+function isGenericTransportFailureMessage(message: string | null | undefined): boolean {
+    const normalized = typeof message === "string" ? message.trim().toLowerCase() : "";
+    if (!normalized) return false;
+    return normalized.startsWith("could not reach the backend at ")
+        || normalized.includes("could not read the api response");
 }
 
 export default function EntityResolutionPanel({
@@ -295,16 +309,19 @@ export default function EntityResolutionPanel({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [worldId]);
 
+    const resumable = Boolean(status?.can_resume);
     useEffect(() => {
-        if (!running && !canRunExactThenAi && resolutionMode === "exact_then_ai") {
+        if (!running && !resumable && !canRunExactThenAi && resolutionMode === "exact_then_ai") {
             setResolutionMode("exact_only");
         }
-    }, [canRunExactThenAi, resolutionMode, running]);
+    }, [canRunExactThenAi, resolutionMode, resumable, running]);
 
     const gateMessage = running
         ? status?.phase === "aborting"
             ? "Entity resolution is stopping after the current in-flight work finishes."
             : "Entity resolution is running and can be monitored here."
+        : resumable
+            ? "Entity resolution can resume from committed progress."
         : disabledReason
             ? disabledReason
         : isIngesting
@@ -317,8 +334,8 @@ export default function EntityResolutionPanel({
                         ? "Finish ingestion or retry failed chunks before resolving entities."
                         : "Entity resolution is currently unavailable for this world.";
 
-    const triggerLabel = running ? "Monitor Entities" : "Resolve Entities";
-    const triggerDisabled = !running && !canResolve;
+    const triggerLabel = running ? "Monitor Entities" : resumable ? "Resume Entities" : "Resolve Entities";
+    const triggerDisabled = !running && !canResolve && !resumable;
     const abortRequested = running && status?.phase === "aborting";
     const badge = statusBadge(status?.status || (running ? "running" : "idle"), status?.phase);
     const lastUsedResolutionMode = status?.resolution_mode as EntityResolutionRunMode | undefined;
@@ -358,7 +375,7 @@ export default function EntityResolutionPanel({
                 status?.embedding_completed_entities as number | undefined,
                 status?.embedding_total_entities as number | undefined,
             ),
-            tooltip: "Shows how many staged entities have finished embedding for the current or last entity-resolution run.",
+            tooltip: "Shows how many merged winners finished embedding during the current or last entity-resolution run.",
         },
     ];
     const lastTopKValue = lastUsedResolutionMode === undefined
@@ -404,7 +421,7 @@ export default function EntityResolutionPanel({
     const eventRows = [...logs].reverse();
 
     const handleStart = async () => {
-        if (resolutionMode === "exact_then_ai" && !canRunExactThenAi) {
+        if (!resumable && resolutionMode === "exact_then_ai" && !canRunExactThenAi) {
             setFailureMessage(exactThenAiDisabledReason ?? "Exact + chooser/combiner is still locked for this world.");
             setStatusDetail(null);
             return;
@@ -422,8 +439,24 @@ export default function EntityResolutionPanel({
             setOpen(true);
             await loadSnapshot(true);
         } catch (startError) {
-            setFailureMessage(startError instanceof Error ? startError.message : "Unable to start entity resolution.");
-            setStatusDetail(null);
+            const startErrorMessage = startError instanceof Error ? startError.message : "Unable to start entity resolution.";
+            const synced = await loadSnapshot(false);
+            const persistedFailureMessage = getResolutionFailureMessage(statusRef.current ?? {});
+
+            if (persistedFailureMessage) {
+                if (isGenericTransportFailureMessage(startErrorMessage)) {
+                    setFailureMessage(persistedFailureMessage);
+                } else {
+                    setFailureMessage(startErrorMessage);
+                    setStatusDetail((previous) => previous ?? persistedFailureMessage);
+                }
+            } else if (!synced) {
+                setFailureMessage(startErrorMessage);
+                setStatusDetail(null);
+            } else if (!statusRef.current) {
+                setFailureMessage(startErrorMessage);
+                setStatusDetail(null);
+            }
             setRunning(false);
         } finally {
             setBusy(false);
@@ -591,10 +624,10 @@ export default function EntityResolutionPanel({
                                                     style={controlInputStyle}
                                                 >
                                                     <option value="exact_only">Exact only</option>
-                                                    <option value="exact_then_ai" disabled={!canRunExactThenAi}>Exact + chooser/combiner</option>
+                                                    <option value="exact_then_ai" disabled={!canRunExactThenAi && !resumable}>Exact + chooser/combiner</option>
                                                 </select>
                                             </label>
-                                            {!canRunExactThenAi && (
+                                            {!resumable && !canRunExactThenAi && (
                                                 <div style={{
                                                     padding: "10px 12px",
                                                     borderRadius: 10,
@@ -685,16 +718,16 @@ export default function EntityResolutionPanel({
                                                 {!running ? (
                                                     <button
                                                         onClick={() => void handleStart()}
-                                                        disabled={!canResolve || busy}
+                                                        disabled={(!canResolve && !resumable) || busy}
                                                         style={{
                                                             ...buttonStyle,
                                                             background: "var(--primary)",
                                                             color: "var(--primary-contrast)",
-                                                            opacity: !canResolve || busy ? 0.45 : 1,
+                                                            opacity: ((!canResolve && !resumable) || busy) ? 0.45 : 1,
                                                         }}
                                                     >
                                                         {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={14} />}
-                                                        Start Resolution
+                                                        {resumable ? "Resume Resolution" : "Start Resolution"}
                                                     </button>
                                                 ) : (
                                                     <button

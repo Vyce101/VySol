@@ -151,6 +151,8 @@ def test_get_world_skips_heavy_checks_during_active_ingest(monkeypatch):
     assert payload["active_ingestion_run"] is True
     assert payload["ingestion_audit"]["world"]["embedded_chunks"] == 2
     assert payload["reembed_eligibility"]["reason_code"] == "ingestion_in_progress"
+    assert payload["entity_resolution_eligibility"]["exact_only"]["reason_code"] == "ingestion_in_progress"
+    assert payload["entity_resolution_eligibility"]["exact_then_ai"]["reason_code"] == "ingestion_in_progress"
     assert payload["embedding_provider"] == "gemini"
 
 

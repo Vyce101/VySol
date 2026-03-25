@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -137,3 +138,48 @@ def test_wait_for_request_key_raises_when_remaining_untried_keys_are_cooling_dow
 
     with pytest.raises(key_manager.AllKeysInCooldownError):
         manager.wait_for_request_key({0})
+
+
+class _DummyGeminiRateLimitError(RuntimeError):
+    def __init__(self, *, message: str, headers: dict[str, str] | None = None):
+        self.code = 429
+        self.status = "RESOURCE_EXHAUSTED"
+        self.message = message
+        self.details = {"error": {"message": message}}
+        self.response = SimpleNamespace(headers=headers or {})
+        super().__init__(message)
+
+
+def test_generic_gemini_429_is_request_backoff_not_cooldown():
+    assessment = key_manager.assess_transient_provider_error(
+        _DummyGeminiRateLimitError(message="Too Many Requests"),
+        provider="gemini",
+    )
+
+    assert assessment is not None
+    assert assessment.kind == "429"
+    assert assessment.action == "request_backoff"
+
+
+def test_explicit_gemini_api_key_quota_429_triggers_cooldown():
+    assessment = key_manager.assess_transient_provider_error(
+        _DummyGeminiRateLimitError(message="API key quota exceeded for this request."),
+        provider="gemini",
+    )
+
+    assert assessment is not None
+    assert assessment.kind == "429"
+    assert assessment.action == "cooldown_key"
+
+
+def test_gemini_429_retry_after_header_is_parsed():
+    assessment = key_manager.assess_transient_provider_error(
+        _DummyGeminiRateLimitError(
+            message="Too Many Requests",
+            headers={"Retry-After": "12"},
+        ),
+        provider="gemini",
+    )
+
+    assert assessment is not None
+    assert assessment.retry_after_seconds == 12.0

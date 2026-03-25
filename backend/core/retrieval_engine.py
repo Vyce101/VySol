@@ -104,6 +104,20 @@ class RetrievalEngine:
             entry_k = top_k
         hops = settings.get("retrieval_graph_hops", 2)
         max_nodes = settings.get("retrieval_max_nodes", 50)
+        try:
+            max_nodes = max(1, int(max_nodes))
+        except (TypeError, ValueError):
+            max_nodes = 50
+        max_neighbors_per_node = settings.get("retrieval_max_neighbors_per_node", 15)
+        try:
+            max_neighbors_per_node = max(1, int(max_neighbors_per_node))
+        except (TypeError, ValueError):
+            max_neighbors_per_node = 15
+        max_node_description_chars = settings.get("retrieval_max_node_description_chars", 0)
+        try:
+            max_node_description_chars = max(0, int(max_node_description_chars))
+        except (TypeError, ValueError):
+            max_node_description_chars = 0
 
         total_graph_nodes = self.graph_store.get_node_count()
         force_all = total_graph_nodes > 0 and entry_k >= total_graph_nodes
@@ -170,44 +184,62 @@ class RetrievalEngine:
             node_results=node_results,
             requested=entry_k,
         )
-        matched_node_ids = {node.get("id", "") for node in entry_nodes if node.get("id")}
+        node_similarity_map = self._node_similarity_map_from_query_results(node_results)
+        matched_node_ids = [
+            str(node.get("id") or "").strip()
+            for node in entry_nodes
+            if str(node.get("id") or "").strip()
+        ]
 
         # Step 4: Graph node selection
-        graph_nodes = []
-        if force_all:
-            graph_nodes = self._all_graph_nodes()
-        elif matched_node_ids:
-            graph_nodes = self.graph_store.get_bfs_neighborhood(
-                start_nodes=sorted(matched_node_ids),
+        candidate_graph_nodes: list[dict] = []
+        if matched_node_ids:
+            candidate_graph_nodes = self.graph_store.get_ranked_neighborhood_candidates(
+                start_nodes=matched_node_ids,
                 hops=hops,
-                max_nodes=max_nodes,
+                node_similarity_map=node_similarity_map,
             )
+        entry_nodes, graph_nodes = self._select_context_graph_nodes(
+            entry_nodes=entry_nodes,
+            candidate_graph_nodes=candidate_graph_nodes,
+            max_nodes=max_nodes,
+        )
 
         # Step 5: Collect relationships
-        graph_edges = []
-        node_ids = {n.get("id", "") for n in graph_nodes}
-        for u, v, attrs in self.graph_store.graph.edges(data=True):
-            if u in node_ids and v in node_ids:
-                u_node = self.graph_store.get_node(u) or {}
-                v_node = self.graph_store.get_node(v) or {}
-                u_name = u_node.get("display_name", u)
-                v_name = v_node.get("display_name", v)
-                graph_edges.append({
-                    "source_id": u,
-                    "target_id": v,
-                    "source_label": u_name,
-                    "target_label": v_name,
-                    "source": u_name,
-                    "target": v_name,
-                    "label": attrs.get("label", ""),
-                    "description": attrs.get("description", ""),
-                    "source_book": attrs.get("source_book", 0),
-                    "source_chunk": attrs.get("source_chunk", 0),
-                })
+        graph_edges = self._select_context_graph_edges(
+            graph_nodes=graph_nodes,
+            candidate_graph_nodes=candidate_graph_nodes,
+            node_similarity_map=node_similarity_map,
+            max_neighbors_per_node=max_neighbors_per_node,
+        )
 
         # Step 6: Assemble context string
-        context = self._assemble_context(rag_results, entry_nodes, graph_nodes, graph_edges)
-        context_graph = self._build_context_graph_snapshot(entry_nodes, graph_nodes, graph_edges)
+        node_descriptions, truncated_node_descriptions = self._prepare_context_node_descriptions(
+            entry_nodes=entry_nodes,
+            graph_nodes=graph_nodes,
+            max_node_description_chars=max_node_description_chars,
+        )
+        context = self._assemble_context(
+            rag_results,
+            entry_nodes,
+            graph_nodes,
+            graph_edges,
+            node_descriptions=node_descriptions,
+        )
+        context_characters = len(context)
+        context_section_character_counts = self._context_character_counts(
+            rag_chunks=rag_results,
+            entry_nodes=entry_nodes,
+            graph_nodes=graph_nodes,
+            graph_edges=graph_edges,
+            node_descriptions=node_descriptions,
+        )
+        context_graph = self._build_context_graph_snapshot(
+            entry_nodes,
+            graph_nodes,
+            graph_edges,
+            node_descriptions=node_descriptions,
+        )
 
         serialized_nodes = []
         for node in graph_nodes:
@@ -231,6 +263,10 @@ class RetrievalEngine:
                 "selected_entry_nodes": len(entry_nodes),
                 "total_graph_nodes": total_graph_nodes,
                 "force_all_nodes": force_all,
+                "graph_candidate_nodes": len(candidate_graph_nodes),
+                "selected_graph_nodes": len(graph_nodes),
+                "graph_edge_count": len(graph_edges),
+                "max_neighbors_per_node": max_neighbors_per_node,
                 "ranked_entry_candidates": len(node_results),
                 "entry_backfill_count": 0,
                 "vector_results_count": len(vector_results),
@@ -248,6 +284,10 @@ class RetrievalEngine:
                 "node_index_complete": node_index_complete,
                 "passive_blockers": passive_blockers,
                 "retrieval_blocked": False,
+                "context_characters": context_characters,
+                "node_description_char_limit": max_node_description_chars,
+                "truncated_node_descriptions": truncated_node_descriptions,
+                **context_section_character_counts,
             },
         }
 
@@ -287,17 +327,87 @@ class RetrievalEngine:
             "passive_blockers": passive_blockers,
         }
 
+    def _node_similarity_map_from_query_results(self, node_results: list[dict]) -> dict[str, float]:
+        ranked_scores: dict[str, float] = {}
+        for index, result in enumerate(node_results):
+            metadata = result.get("metadata", {}) or {}
+            node_id = str(metadata.get("node_id") or result.get("id", "")).strip()
+            if not node_id or node_id not in self.graph_store.graph.nodes():
+                continue
+            raw_distance = result.get("distance")
+            try:
+                score = float(raw_distance)
+            except (TypeError, ValueError):
+                # Keep deterministic rank ordering even in tests or legacy payloads
+                # that do not include an explicit distance.
+                score = float(index) * 0.000001
+            previous = ranked_scores.get(node_id)
+            if previous is None or score < previous:
+                ranked_scores[node_id] = score
+        return ranked_scores
+
     def _assemble_context(
         self,
         rag_chunks: list[dict],
         entry_nodes: list[dict],
         graph_nodes: list[dict],
         graph_edges: list[dict],
+        *,
+        node_descriptions: dict[str, str] | None = None,
     ) -> str:
-        parts = []
-        entry_nodes_section = self._build_nodes_section("# Entry Nodes", entry_nodes)
+        sections = self._build_context_sections(
+            rag_chunks=rag_chunks,
+            entry_nodes=entry_nodes,
+            graph_nodes=graph_nodes,
+            graph_edges=graph_edges,
+            node_descriptions=node_descriptions,
+        )
+        return "\n\n".join(section_text for _key, section_text in sections)
+
+    def _context_character_counts(
+        self,
+        *,
+        rag_chunks: list[dict],
+        entry_nodes: list[dict],
+        graph_nodes: list[dict],
+        graph_edges: list[dict],
+        node_descriptions: dict[str, str] | None = None,
+    ) -> dict[str, int]:
+        counts = {
+            "entry_node_characters": 0,
+            "graph_node_characters": 0,
+            "graph_edge_characters": 0,
+            "rag_chunk_characters": 0,
+        }
+        ordered_sections = self._build_context_sections(
+            rag_chunks=rag_chunks,
+            entry_nodes=entry_nodes,
+            graph_nodes=graph_nodes,
+            graph_edges=graph_edges,
+            node_descriptions=node_descriptions,
+        )
+        for index, (key, section_text) in enumerate(ordered_sections):
+            counts[key] = len(section_text) + (2 if index > 0 else 0)
+        return counts
+
+    def _build_context_sections(
+        self,
+        *,
+        rag_chunks: list[dict],
+        entry_nodes: list[dict],
+        graph_nodes: list[dict],
+        graph_edges: list[dict],
+        node_descriptions: dict[str, str] | None = None,
+    ) -> list[tuple[str, str]]:
+        sections: list[tuple[str, str]] = []
+
+        entry_nodes_section = self._build_nodes_section(
+            "# Entry Nodes",
+            entry_nodes,
+            node_descriptions=node_descriptions,
+        )
         if entry_nodes_section:
-            parts.append(entry_nodes_section)
+            sections.append(("entry_node_characters", entry_nodes_section))
 
         entry_node_ids = {str(node.get("id", "")) for node in entry_nodes if node.get("id")}
         graph_nodes_only = [
@@ -305,12 +415,14 @@ class RetrievalEngine:
             for node in graph_nodes
             if str(node.get("id", "")) not in entry_node_ids
         ]
-
-        graph_nodes_section = self._build_nodes_section("# Graph Nodes", graph_nodes_only)
+        graph_nodes_section = self._build_nodes_section(
+            "# Graph Nodes",
+            graph_nodes_only,
+            node_descriptions=node_descriptions,
+        )
         if graph_nodes_section:
-            parts.append(graph_nodes_section)
+            sections.append(("graph_node_characters", graph_nodes_section))
 
-        # Edges
         if graph_edges:
             edge_strs = []
             unique_edges: set[tuple[str, str, str, int, int]] = set()
@@ -327,9 +439,9 @@ class RetrievalEngine:
 
                 unique_edges.add(edge_identity)
                 edge_strs.append(self._format_context_edge_line(edge))
-            parts.append("# Graph Edges\n" + "\n".join(edge_strs))
+            if edge_strs:
+                sections.append(("graph_edge_characters", "# Graph Edges\n" + "\n".join(edge_strs)))
 
-        # RAG Chunks
         if rag_chunks:
             chunk_strs = []
             seen_chunk_ids: set[str] = set()
@@ -347,9 +459,9 @@ class RetrievalEngine:
                 if doc:
                     chunk_strs.append(doc)
             if chunk_strs:
-                parts.append("# RAG Chunks\n" + "\n\n".join(chunk_strs))
+                sections.append(("rag_chunk_characters", "# RAG Chunks\n" + "\n\n".join(chunk_strs)))
 
-        return "\n\n".join(parts)
+        return sections
 
     def _format_context_edge_line(self, edge: dict) -> str:
         s = edge.get("source_label") or edge.get("source", "?")
@@ -360,7 +472,13 @@ class RetrievalEngine:
         temporal_prefix = f"[B{book}:C{chunk_id}] " if book or chunk_id else ""
         return f"{temporal_prefix}{s}, {desc}, {t}"
 
-    def _build_nodes_section(self, heading: str, nodes: list[dict]) -> str:
+    def _build_nodes_section(
+        self,
+        heading: str,
+        nodes: list[dict],
+        *,
+        node_descriptions: dict[str, str] | None = None,
+    ) -> str:
         node_lines: list[str] = []
         seen_node_ids: set[str] = set()
         for node in nodes:
@@ -369,7 +487,7 @@ class RetrievalEngine:
                 continue
             seen_node_ids.add(node_id)
             display_name = str(node.get("display_name") or node_id or "Unknown")
-            description = _normalize_context_text(node.get("description", ""))
+            description = self._get_context_node_description(node, node_descriptions=node_descriptions)
             node_lines.append(f"{display_name}: {description}")
 
         if not node_lines:
@@ -382,6 +500,8 @@ class RetrievalEngine:
         entry_nodes: list[dict],
         graph_nodes: list[dict],
         graph_edges: list[dict],
+        *,
+        node_descriptions: dict[str, str] | None = None,
     ) -> dict:
         entry_node_ids = {str(node.get("id", "")) for node in entry_nodes if node.get("id")}
         snapshot_nodes_by_id: dict[str, dict] = {}
@@ -392,7 +512,7 @@ class RetrievalEngine:
             snapshot_nodes_by_id.setdefault(node_id, {
                 "id": node_id,
                 "label": str(node.get("display_name") or node_id or "Unknown"),
-                "description": _normalize_context_text(node.get("description", "")),
+                "description": self._get_context_node_description(node, node_descriptions=node_descriptions),
                 "entity_type": node.get("entity_type") or "Unknown",
                 "is_entry_node": node_id in entry_node_ids,
             })
@@ -487,6 +607,207 @@ class RetrievalEngine:
             "nodes": serialized_nodes,
             "edges": ordered_edges,
         }
+
+    def _prepare_context_node_descriptions(
+        self,
+        *,
+        entry_nodes: list[dict],
+        graph_nodes: list[dict],
+        max_node_description_chars: int,
+    ) -> tuple[dict[str, str], int]:
+        node_descriptions: dict[str, str] = {}
+        truncated_count = 0
+
+        for node in [*entry_nodes, *graph_nodes]:
+            node_id = str(node.get("id", "") or "")
+            if not node_id or node_id in node_descriptions:
+                continue
+            description, truncated = self._truncate_node_description(
+                node.get("description", ""),
+                max_node_description_chars=max_node_description_chars,
+            )
+            node_descriptions[node_id] = description
+            if truncated:
+                truncated_count += 1
+
+        return node_descriptions, truncated_count
+
+    def _get_context_node_description(
+        self,
+        node: dict,
+        *,
+        node_descriptions: dict[str, str] | None = None,
+    ) -> str:
+        node_id = str(node.get("id", "") or "")
+        if node_descriptions and node_id in node_descriptions:
+            return node_descriptions[node_id]
+        description, _ = self._truncate_node_description(
+            node.get("description", ""),
+            max_node_description_chars=0,
+        )
+        return description
+
+    def _truncate_node_description(
+        self,
+        description: str,
+        *,
+        max_node_description_chars: int,
+    ) -> tuple[str, bool]:
+        normalized = _normalize_context_text(description)
+        if max_node_description_chars <= 0 or len(normalized) <= max_node_description_chars:
+            return normalized, False
+        if max_node_description_chars <= 3:
+            return normalized[:max_node_description_chars], True
+        return normalized[: max_node_description_chars - 3] + "...", True
+
+    def _selected_node_rank_map(self, candidate_graph_nodes: list[dict]) -> dict[str, int]:
+        candidate_rank_map: dict[str, int] = {}
+        for index, node in enumerate(candidate_graph_nodes):
+            node_id = str(node.get("id", "") or "")
+            if not node_id or node_id in candidate_rank_map:
+                continue
+            candidate_rank_map[node_id] = index
+        return candidate_rank_map
+
+    def _neighbor_rank_key(
+        self,
+        node_id: str,
+        *,
+        node_similarity_map: dict[str, float],
+        candidate_rank_map: dict[str, int],
+    ) -> tuple[int, float, int, str, str]:
+        node_data = self.graph_store.get_node(node_id) or {}
+        label = str(node_data.get("display_name") or node_id or "Unknown").strip().lower()
+        if node_id in node_similarity_map:
+            return (0, float(node_similarity_map[node_id]), candidate_rank_map.get(node_id, 0), label, node_id.lower())
+        if node_id in candidate_rank_map:
+            return (1, float(candidate_rank_map[node_id]), candidate_rank_map[node_id], label, node_id.lower())
+        return (2, float("inf"), 0, label, node_id.lower())
+
+    def _select_context_graph_edges(
+        self,
+        *,
+        graph_nodes: list[dict],
+        candidate_graph_nodes: list[dict],
+        node_similarity_map: dict[str, float],
+        max_neighbors_per_node: int,
+    ) -> list[dict]:
+        try:
+            normalized_max_neighbors = max(1, int(max_neighbors_per_node))
+        except (TypeError, ValueError):
+            normalized_max_neighbors = 1
+
+        selected_node_ids = {
+            str(node.get("id", "") or "")
+            for node in graph_nodes
+            if str(node.get("id", "") or "")
+        }
+        if not selected_node_ids:
+            return []
+
+        candidate_rank_map = self._selected_node_rank_map(candidate_graph_nodes)
+        node_adjacency: dict[str, set[str]] = {node_id: set() for node_id in selected_node_ids}
+        candidate_edges: list[dict] = []
+
+        for u, v, attrs in self.graph_store.graph.edges(data=True):
+            source_id = str(u or "")
+            target_id = str(v or "")
+            if source_id not in selected_node_ids or target_id not in selected_node_ids:
+                continue
+
+            node_adjacency.setdefault(source_id, set()).add(target_id)
+            node_adjacency.setdefault(target_id, set()).add(source_id)
+
+            source_node = self.graph_store.get_node(source_id) or {}
+            target_node = self.graph_store.get_node(target_id) or {}
+            source_name = source_node.get("display_name", source_id)
+            target_name = target_node.get("display_name", target_id)
+            candidate_edges.append({
+                "source_id": source_id,
+                "target_id": target_id,
+                "source_label": source_name,
+                "target_label": target_name,
+                "source": source_name,
+                "target": target_name,
+                "label": attrs.get("label", ""),
+                "description": attrs.get("description", ""),
+                "source_book": attrs.get("source_book", 0),
+                "source_chunk": attrs.get("source_chunk", 0),
+            })
+
+        retained_neighbors_by_node: dict[str, set[str]] = {}
+        for node_id, neighbor_ids in node_adjacency.items():
+            ranked_neighbor_ids = sorted(
+                neighbor_ids,
+                key=lambda neighbor_id: self._neighbor_rank_key(
+                    neighbor_id,
+                    node_similarity_map=node_similarity_map,
+                    candidate_rank_map=candidate_rank_map,
+                ),
+            )
+            retained_neighbors_by_node[node_id] = set(ranked_neighbor_ids[:normalized_max_neighbors])
+
+        retained_edges: list[dict] = []
+        for edge in candidate_edges:
+            source_id = str(edge.get("source_id", "") or "")
+            target_id = str(edge.get("target_id", "") or "")
+            if (
+                target_id in retained_neighbors_by_node.get(source_id, set())
+                and source_id in retained_neighbors_by_node.get(target_id, set())
+            ):
+                retained_edges.append(edge)
+
+        return retained_edges
+
+    def _select_context_graph_nodes(
+        self,
+        *,
+        entry_nodes: list[dict],
+        candidate_graph_nodes: list[dict],
+        max_nodes: int,
+    ) -> tuple[list[dict], list[dict]]:
+        try:
+            normalized_max_nodes = max(1, int(max_nodes))
+        except (TypeError, ValueError):
+            normalized_max_nodes = 1
+
+        ranked_nodes_by_id: dict[str, dict] = {}
+        ranked_candidate_ids: list[str] = []
+        for node in candidate_graph_nodes:
+            node_id = str(node.get("id", "") or "")
+            if not node_id or node_id in ranked_nodes_by_id:
+                continue
+            ranked_nodes_by_id[node_id] = node
+            ranked_candidate_ids.append(node_id)
+
+        ranked_entry_ids: list[str] = []
+        for node in entry_nodes:
+            node_id = str(node.get("id", "") or "")
+            if not node_id or node_id not in ranked_nodes_by_id or node_id in ranked_entry_ids:
+                continue
+            ranked_entry_ids.append(node_id)
+
+        selected_ids: list[str] = []
+        for node_id in ranked_entry_ids:
+            if len(selected_ids) >= normalized_max_nodes:
+                break
+            selected_ids.append(node_id)
+
+        for node_id in ranked_candidate_ids:
+            if len(selected_ids) >= normalized_max_nodes:
+                break
+            if node_id in selected_ids:
+                continue
+            selected_ids.append(node_id)
+
+        selected_id_set = set(selected_ids)
+        selected_entry_nodes = [
+            node
+            for node in entry_nodes
+            if str(node.get("id", "") or "") in selected_id_set
+        ]
+        selected_graph_nodes = [ranked_nodes_by_id[node_id] for node_id in selected_ids if node_id in ranked_nodes_by_id]
+        return selected_entry_nodes, selected_graph_nodes
 
     def _node_record(self, node_id: str, attrs: dict) -> dict:
         return {

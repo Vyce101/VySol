@@ -136,6 +136,9 @@ TOP_LEVEL_SETTINGS_DEFAULTS = {
     "retrieval_top_k_chunks": 5,
     "retrieval_graph_hops": 2,
     "retrieval_max_nodes": 50,
+    "retrieval_max_neighbors_per_node": 15,
+    "retrieval_max_node_description_chars": 0,
+    "retrieval_context_char_limit": 0,
     "retrieval_context_messages": 3,
     "chat_history_messages": 1000,
     "entity_resolution_top_k": 50,
@@ -621,6 +624,21 @@ def sanitize_settings(settings: dict) -> dict:
         TOP_LEVEL_SETTINGS_DEFAULTS["retrieval_max_nodes"],
         minimum=1,
     )
+    data["retrieval_max_neighbors_per_node"] = _coerce_int(
+        data.get("retrieval_max_neighbors_per_node"),
+        TOP_LEVEL_SETTINGS_DEFAULTS["retrieval_max_neighbors_per_node"],
+        minimum=1,
+    )
+    data["retrieval_max_node_description_chars"] = _coerce_int(
+        data.get("retrieval_max_node_description_chars"),
+        TOP_LEVEL_SETTINGS_DEFAULTS["retrieval_max_node_description_chars"],
+        minimum=0,
+    )
+    data["retrieval_context_char_limit"] = _coerce_int(
+        data.get("retrieval_context_char_limit"),
+        TOP_LEVEL_SETTINGS_DEFAULTS["retrieval_context_char_limit"],
+        minimum=0,
+    )
     data["retrieval_context_messages"] = _coerce_int(
         data.get("retrieval_context_messages"),
         TOP_LEVEL_SETTINGS_DEFAULTS["retrieval_context_messages"],
@@ -667,9 +685,9 @@ def sanitize_settings(settings: dict) -> dict:
 
 
 def _normalize_top_level_value(key: str, value: Any) -> Any:
-    if key in {"chunk_size_chars", "chunk_overlap_chars", "retrieval_top_k_chunks", "retrieval_graph_hops", "retrieval_max_nodes", "retrieval_context_messages", "chat_history_messages", "entity_resolution_top_k", "glean_amount", "retrieval_entry_top_k_nodes"}:
+    if key in {"chunk_size_chars", "chunk_overlap_chars", "retrieval_top_k_chunks", "retrieval_graph_hops", "retrieval_max_nodes", "retrieval_max_neighbors_per_node", "retrieval_max_node_description_chars", "retrieval_context_char_limit", "retrieval_context_messages", "chat_history_messages", "entity_resolution_top_k", "glean_amount", "retrieval_entry_top_k_nodes"}:
         default = int(TOP_LEVEL_SETTINGS_DEFAULTS.get(key, 0))
-        minimum = 1 if key not in {"chunk_overlap_chars", "retrieval_graph_hops", "glean_amount"} else 0
+        minimum = 1 if key not in {"chunk_overlap_chars", "retrieval_graph_hops", "retrieval_max_node_description_chars", "retrieval_context_char_limit", "glean_amount"} else 0
         return _coerce_int(value, default, minimum=minimum)
     if key == "extract_entity_types":
         return _coerce_bool(value, TOP_LEVEL_SETTINGS_DEFAULTS[key])

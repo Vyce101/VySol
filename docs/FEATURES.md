@@ -27,29 +27,36 @@ Entity resolution now has two run modes.
 
 - Runs the normalized-name pass only
 - Auto-resolves obvious duplicates without spending chooser or combiner model calls
-- Still rebuilds the unique-node index before the run is considered complete
+- Batch-embeds only the exact winners that actually changed
+- Commits completed embedded exact batches live as the run progresses
 - This is now the default mode for fresh and idle worlds
 
 `Exact + chooser/combiner`
 
 - Starts with the same normalized exact pass
+- Finishes the exact winner embedding and exact apply phases first
 - Then builds a Top K candidate list for each remaining anchor entity with vector search
 - The chooser model decides which candidates are actually the same entity as the anchor
 - The combiner model merges the chosen group into one canonical result
+- Only the merged winner is re-embedded before that AI merge is committed live
 - All entities that were merged are removed from the remaining list
 - Repeat until the unresolved list is exhausted
 
 Important behavior:
 
 - Exact-only runs never enter candidate search, chooser, or combiner phases
-- Both run modes still need a successful unique-node index refresh before their results are finalized
-- Entity resolution now stages graph and unique-node-index changes first and only commits them live after the full run succeeds
-- If a chooser, combiner, embedding, or finalization step fails, the run now reports a real error instead of silently degrading or leaving partial live merges behind
+- Exact runs now expose truthful `exact_match_scan`, `exact_match_embedding`, and `exact_match_apply` phases instead of collapsing the whole pass into one vague rebuild step
+- Untouched entities are not re-embedded during entity resolution
+- Completed embedded merges are committed live during the run and survive aborts or crashes
+- Unfinished work is left resumable, so the panel can offer `Resume Resolution` instead of restarting from zero
+- If a chooser, combiner, embedding, or commit step fails, the run now reports a real error instead of silently degrading or leaving merged-but-unembedded state behind
 - Exact + chooser/combiner runs still preserve temporal graph edges while merging entities
+- `Exact only` is now blocked when the current unique-node index is unreadable, stale, or incomplete for the current graph, but it can still run when the only remaining ingest problems are chunk-level failures that do not affect current unique-node coverage
+- `Exact + chooser/combiner` still requires a fully healthy world
 - Older data that predates the new run-mode field still maps safely to the previous behavior for historical status display instead of being relabeled to the new default
-- Every run now also exposes unique-node embedding batch and delay controls for the index rebuild step used by entity resolution
-- Those embedding controls affect only entity resolution's unique-node rebuild path, not chooser/combiner model calls and not normal ingestion
-- The entity-resolution panel now shows `Embedded N / N` while the unique-node index rebuild is running, using the post-merge unique-node total instead of the raw pre-merge extraction count
+- Every run now also exposes unique-node embedding batch and delay controls for the exact-winner and AI-winner embedding work used by entity resolution
+- Those embedding controls affect only entity resolution's changed-winner embedding path, not chooser/combiner model calls, not untouched entities, and not normal ingestion
+- The entity-resolution panel now shows `Embedded N / N` against the current changed-winner work for that run, not against the raw pre-merge extraction total
 - Exact-only result summaries now label unresolved exact-pass leftovers as `Left Unchanged`
 
 ## Provider Presets And Key Library
@@ -169,8 +176,12 @@ Important behavior:
 
 - A repeated entity that appears in many chunks no longer crowds out other entry candidates just because it had many chunk-local node records
 - `Re-embed All` rebuilds chunk vectors from the saved chunks and rebuilds unique node vectors from the current saved graph state
-- In `Exact + chooser/combiner`, the unique-node index is rebuilt immediately after the exact pass and then incrementally refreshed after later AI merges
+- In entity resolution, only changed exact winners and later AI winners are re-embedded instead of rebuilding untouched node vectors
 - Existing worlds can migrate to this retrieval model by running `Re-embed All` once; world recreation is not required
+- `Max Graph Nodes` is now applied after stable graph-candidate discovery and ranking, so lowering the cap trims the lowest-relevance reachable nodes instead of reshaping the walk unpredictably
+- `Max Neighbors Per Node` now caps each node's final retained neighbors in the sent context graph, using mutual top-N retained edges so the Context Graph view matches the configured cap
+- `Max Node Description (Chars)` truncates each retrieved node description before prompt assembly and before final context counting
+- `Context Limit (Chars)` blocks the provider call before chat generation if the final built retrieval context is too large, and the saved AI reply explains that the request was skipped because the context budget was exceeded
 
 ## World Duplication
 

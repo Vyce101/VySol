@@ -2205,6 +2205,60 @@ def test_ingest_runtime_summary_route_returns_engine_summary(monkeypatch):
     assert result == summary
 
 
+def test_get_ingest_runtime_summary_exposes_entity_resolution_eligibility(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "world_name": "World 1",
+        "ingestion_status": "partial_failure",
+        "total_nodes": 4,
+        "embedded_unique_nodes": 4,
+        "sources": [{"source_id": "source-1", "status": "partial_failure", "chunk_count": 3}],
+        "ingestion_audit": {
+            "world": {
+                "current_unique_nodes": 4,
+                "embedded_unique_nodes": 4,
+                "stale_unique_node_vectors": 0,
+                "failed_records": 6,
+            },
+            "blocking_issues": [{"code": "chunk_vector_store_unreadable", "message": "chunk vectors are unreadable"}],
+            "failures": [],
+        },
+    }
+
+    monkeypatch.setattr(ingestion_engine, "recover_stale_ingestion", lambda _world_id: dict(meta))
+    monkeypatch.setattr(ingestion_engine, "_load_checkpoint", lambda _world_id: {})
+    monkeypatch.setattr(ingestion_engine, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(ingestion_engine, "get_actionable_resume_sources", lambda _world_id, sources=None: [])
+    monkeypatch.setattr(ingestion_engine, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 2})
+    monkeypatch.setattr(ingestion_engine, "_build_progress_event", lambda *args, **kwargs: {})
+
+    summary = ingestion_engine.get_ingest_runtime_summary("world-1")
+
+    assert summary["world"]["entity_resolution_eligibility"]["exact_only"] == {
+        "can_run": True,
+        "reason_code": None,
+        "reason": None,
+    }
+    assert summary["world"]["entity_resolution_eligibility"]["exact_then_ai"] == {
+        "can_run": False,
+        "reason_code": "world_blocked",
+        "reason": "chunk vectors are unreadable",
+    }
+
+
+def test_probe_unique_node_embedding_readability_requires_embedding_payloads():
+    class FakeUniqueNodeStore:
+        collection_name = "world_unique_nodes"
+
+        def get_all_records(self, *, include_documents: bool = False, include_embeddings: bool = False, raise_on_error: bool = False):
+            if include_embeddings:
+                raise ingestion_engine.VectorStoreReadError("embeddings unreadable")
+            return []
+
+    with pytest.raises(ingestion_engine.VectorStoreReadError):
+        ingestion_engine._probe_unique_node_embedding_readability(FakeUniqueNodeStore())
+
+
 def test_graph_layout_manifest_and_level_payload_include_progressive_cache_data(monkeypatch):
     graph = nx.MultiDiGraph()
     graph.add_node("node-a", display_name="Node A", description="A", claims=[], source_chunks=["chunk-a"], created_at="2026-01-01T00:00:00+00:00")

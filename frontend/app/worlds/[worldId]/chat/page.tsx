@@ -717,6 +717,9 @@ interface ChatSettingsSidebarProps {
     entryTopK: number;
     hops: number;
     maxNodes: number;
+    maxNeighborsPerNode: number;
+    maxNodeDescriptionChars: number;
+    contextCharLimit: number;
     sendThinking: boolean;
     thinkingToggleLabel: string;
     thinkingToggleHelp: string;
@@ -731,6 +734,9 @@ interface ChatSettingsSidebarProps {
     onEntryTopKChange: (value: number) => void;
     onHopsChange: (value: number) => void;
     onMaxNodesChange: (value: number) => void;
+    onMaxNeighborsPerNodeChange: (value: number) => void;
+    onMaxNodeDescriptionCharsChange: (value: number) => void;
+    onContextCharLimitChange: (value: number) => void;
     onSendThinkingChange: (value: boolean) => void;
     onSearchContextMsgsChange: (value: number) => void;
     onChatHistoryMsgsChange: (value: number) => void;
@@ -744,6 +750,9 @@ function ChatSettingsSidebar({
     entryTopK,
     hops,
     maxNodes,
+    maxNeighborsPerNode,
+    maxNodeDescriptionChars,
+    contextCharLimit,
     sendThinking,
     thinkingToggleLabel,
     thinkingToggleHelp,
@@ -758,6 +767,9 @@ function ChatSettingsSidebar({
     onEntryTopKChange,
     onHopsChange,
     onMaxNodesChange,
+    onMaxNeighborsPerNodeChange,
+    onMaxNodeDescriptionCharsChange,
+    onContextCharLimitChange,
     onSendThinkingChange,
     onSearchContextMsgsChange,
     onChatHistoryMsgsChange,
@@ -796,6 +808,14 @@ function ChatSettingsSidebar({
                     )}
                     <SliderField label="Vector Query (Msgs)" value={searchContextMsgs} min={1} max={10} onChange={onSearchContextMsgsChange} />
                     <SliderField label="Chat History Context (Msgs)" value={chatHistoryMsgs} min={1} max={20} onChange={onChatHistoryMsgsChange} />
+                    <NumberField
+                        label="Context Limit (Chars)"
+                        value={contextCharLimit}
+                        min={0}
+                        step={1000}
+                        helpText="0 disables the limit. If retrieval builds more context than this, the app will not call the AI."
+                        onChange={onContextCharLimitChange}
+                    />
                 </SettingsAccordionSection>
 
                 <SettingsAccordionSection value="chunk" title="Chunk Settings" isOpen={openSections.includes("chunk")}>
@@ -806,6 +826,18 @@ function ChatSettingsSidebar({
                     <SliderField label="Entry Nodes" value={entryTopK} min={1} max={20} onChange={onEntryTopKChange} />
                     <SliderField label="Graph Hops" value={hops} min={0} max={5} onChange={onHopsChange} />
                     <SliderField label="Max Graph Nodes" value={maxNodes} min={5} max={100} onChange={onMaxNodesChange} />
+                    <SliderField label="Max Neighbors Per Node" value={maxNeighborsPerNode} min={1} max={100} onChange={onMaxNeighborsPerNodeChange} />
+                    <NumberField
+                        label="Max Node Description (Chars)"
+                        value={maxNodeDescriptionChars}
+                        min={0}
+                        step={100}
+                        helpText="0 disables the limit. Applies to each retrieved node description before chat context is built."
+                        onChange={onMaxNodeDescriptionCharsChange}
+                    />
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4, marginTop: -8, marginBottom: 12 }}>
+                        Max Neighbors Per Node caps each kept node&apos;s final retained neighbors in the retrieved context graph. It does not limit discovery breadth during graph expansion.
+                    </div>
                 </SettingsAccordionSection>
 
                 <SettingsAccordionSection value="prompt" title="Prompt" isOpen={openSections.includes("prompt")}>
@@ -910,6 +942,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const [entryTopK, setEntryTopK] = useState(5);
     const [hops, setHops] = useState(2);
     const [maxNodes, setMaxNodes] = useState(50);
+    const [maxNeighborsPerNode, setMaxNeighborsPerNode] = useState(15);
+    const [maxNodeDescriptionChars, setMaxNodeDescriptionChars] = useState(0);
+    const [contextCharLimit, setContextCharLimit] = useState(0);
     const [chatProvider, setChatProvider] = useState("gemini");
     const [sendThinking, setSendThinking] = useState(true);
     const [chatPrompt, setChatPrompt] = useState("");
@@ -1064,6 +1099,15 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             }
             if (data.retrieval_graph_hops !== undefined) setHops(data.retrieval_graph_hops);
             if (data.retrieval_max_nodes !== undefined) setMaxNodes(data.retrieval_max_nodes);
+            if (data.retrieval_max_neighbors_per_node !== undefined) {
+                setMaxNeighborsPerNode(data.retrieval_max_neighbors_per_node);
+            }
+            if (data.retrieval_max_node_description_chars !== undefined) {
+                setMaxNodeDescriptionChars(data.retrieval_max_node_description_chars);
+            }
+            if (data.retrieval_context_char_limit !== undefined) {
+                setContextCharLimit(data.retrieval_context_char_limit);
+            }
                 if (data.chat_provider !== undefined) setChatProvider(data.chat_provider || "gemini");
                 if ((data.chat_provider || "gemini") === "groq") {
                     if (data.groq_chat_include_reasoning !== undefined) {
@@ -1445,6 +1489,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     retrieval_entry_top_k_nodes: entryTopK,
                     retrieval_graph_hops: hops,
                     retrieval_max_nodes: maxNodes,
+                    retrieval_max_neighbors_per_node: maxNeighborsPerNode,
+                    retrieval_max_node_description_chars: maxNodeDescriptionChars,
+                    retrieval_context_char_limit: contextCharLimit,
                     gemini_chat_send_thinking: sendThinking,
                     retrieval_context_messages: searchContextMsgs,
                     chat_history_messages: chatHistoryMsgs,
@@ -1910,6 +1957,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     entryTopK={entryTopK}
                     hops={hops}
                     maxNodes={maxNodes}
+                    maxNeighborsPerNode={maxNeighborsPerNode}
+                    maxNodeDescriptionChars={maxNodeDescriptionChars}
+                    contextCharLimit={contextCharLimit}
                     sendThinking={sendThinking}
                     thinkingToggleLabel={chatProvider === "groq" ? "Include Reasoning" : "Send Thinking"}
                     thinkingToggleHelp={chatProvider === "groq"
@@ -1937,6 +1987,20 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     onMaxNodesChange={(value) => {
                         setMaxNodes(value);
                         saveRetrievalSettings({ retrieval_max_nodes: value });
+                    }}
+                    onMaxNeighborsPerNodeChange={(value) => {
+                        setMaxNeighborsPerNode(value);
+                        saveRetrievalSettings({ retrieval_max_neighbors_per_node: value });
+                    }}
+                    onMaxNodeDescriptionCharsChange={(value) => {
+                        const normalized = Math.max(0, Math.trunc(value || 0));
+                        setMaxNodeDescriptionChars(normalized);
+                        saveRetrievalSettings({ retrieval_max_node_description_chars: normalized });
+                    }}
+                    onContextCharLimitChange={(value) => {
+                        const normalized = Math.max(0, Math.trunc(value || 0));
+                        setContextCharLimit(normalized);
+                        saveRetrievalSettings({ retrieval_context_char_limit: normalized });
                     }}
                     onSendThinkingChange={(value) => {
                         setSendThinking(value);
@@ -2099,6 +2163,36 @@ function SliderField({ label, value, min, max, onChange }: {
                 onChange={(e) => onChange(Number(e.target.value))}
                 style={{ width: "100%", accentColor: "var(--primary)" }}
             />
+        </div>
+    );
+}
+
+function NumberField({ label, value, min = 0, step = 1, helpText, onChange }: {
+    label: string;
+    value: number;
+    min?: number;
+    step?: number;
+    helpText?: string;
+    onChange: (v: number) => void;
+}) {
+    return (
+        <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 6 }}>
+                <span style={{ fontSize: 13, color: "var(--text-subtle)", display: "flex", alignItems: "center" }}>{label}</span>
+                <input
+                    type="number"
+                    min={min}
+                    step={step}
+                    value={value || 0}
+                    onChange={(e) => onChange(Number(e.target.value))}
+                    style={{ width: 110, fontSize: 13, fontWeight: 600, color: "var(--primary-light)", background: "var(--background)", border: "1px solid var(--border)", borderRadius: 4, textAlign: "right", padding: "2px 6px", fontFamily: "inherit" }}
+                />
+            </div>
+            {helpText && (
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>
+                    {helpText}
+                </div>
+            )}
         </div>
     );
 }

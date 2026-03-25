@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from typing import Literal
 
@@ -24,11 +25,13 @@ from core.entity_resolution_engine import (
 )
 from core.ingestion_engine import (
     audit_ingestion_integrity,
+    get_entity_resolution_eligibility,
     get_safety_review_summary,
     has_active_ingestion_run,
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class EntityResolutionStartRequest(BaseModel):
@@ -72,58 +75,39 @@ def _run_entity_resolution_in_thread(
 
 @router.post("/{world_id}/entity-resolution/start")
 async def entity_resolution_start(world_id: str, req: EntityResolutionStartRequest):
-    meta = _load_meta(world_id)
-    if meta.get("ingestion_status") == "in_progress" or has_active_ingestion_run(world_id):
-        raise HTTPException(status_code=409, detail="Finish ingestion before resolving entities.")
-    current_status = get_resolution_status(world_id)
-    if current_status.get("status") == "in_progress":
-        raise HTTPException(status_code=409, detail="Entity resolution is already in progress.")
+    try:
+        meta = _load_meta(world_id)
+        if meta.get("ingestion_status") == "in_progress" or has_active_ingestion_run(world_id):
+            raise HTTPException(status_code=409, detail="Finish ingestion before resolving entities.")
+        current_status = get_resolution_status(world_id)
+        if current_status.get("status") == "in_progress":
+            raise HTTPException(status_code=409, detail="Entity resolution is already in progress.")
+        resume_available = bool(current_status.get("can_resume"))
 
-    resolution_mode = resolve_entity_resolution_mode(
-        req.resolution_mode,
-        req.include_normalized_exact_pass,
-        missing_default="exact_only",
-    )
-    audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
-    meta = _load_meta(world_id)
-    sources = list(meta.get("sources", []))
-    if not sources:
-        raise HTTPException(status_code=409, detail="Ingest at least one complete source before resolving entities.")
-    blocking_issues = list(audit.get("blocking_issues", []))
-    if resolution_mode == "exact_only":
-        blocking_issues = [
-            issue
-            for issue in blocking_issues
-            if str((issue or {}).get("code") or "") not in {"chunk_vector_store_unreadable", "unique_node_vector_store_unreadable"}
-        ]
-    if blocking_issues:
-        first_issue = blocking_issues[0] if isinstance(blocking_issues[0], dict) else {}
-        detail = str(first_issue.get("message") or "Resolve world-level graph/vector audit blockers before running entity resolution.")
-        raise HTTPException(status_code=409, detail=detail)
-    current_unique_nodes = audit.get("world", {}).get("current_unique_nodes")
-    if current_unique_nodes is not None and int(current_unique_nodes or 0) <= 0:
-        raise HTTPException(status_code=409, detail="Ingest at least one extracted entity before running entity resolution.")
-
-    if resolution_mode != "exact_only":
-        if any(str(source.get("status") or "").lower() != "complete" for source in sources):
-            raise HTTPException(status_code=409, detail="Finish ingestion and repair source failures before resolving entities.")
-        if int(audit.get("world", {}).get("failed_records", 0) or 0) > 0 or str(meta.get("ingestion_status") or "").lower() == "partial_failure":
-            raise HTTPException(status_code=409, detail="Resolve retryable ingest failures before running entity resolution.")
-    safety_review_summary = get_safety_review_summary(world_id)
-    if resolution_mode != "exact_only" and int(safety_review_summary.get("unresolved_reviews", 0) or 0) > 0:
-        raise HTTPException(status_code=409, detail="Resolve or reset pending safety review items before running entity resolution.")
-    state = begin_entity_resolution_run(
-        world_id,
-        max(1, req.top_k),
-        req.review_mode,
-        req.include_normalized_exact_pass,
-        resolution_mode,
-        req.embedding_batch_size,
-        req.embedding_cooldown_seconds,
-    )
-    thread = threading.Thread(
-        target=_run_entity_resolution_in_thread,
-        args=(
+        resolution_mode = resolve_entity_resolution_mode(
+            req.resolution_mode,
+            req.include_normalized_exact_pass,
+            missing_default="exact_only",
+        )
+        if not resume_available:
+            audit = audit_ingestion_integrity(world_id, synthesize_failures=True, persist=True)
+            meta = _load_meta(world_id)
+            sources = list(meta.get("sources", []))
+            if not sources:
+                raise HTTPException(status_code=409, detail="Ingest at least one complete source before resolving entities.")
+            safety_review_summary = get_safety_review_summary(world_id)
+            eligibility = get_entity_resolution_eligibility(
+                world_id,
+                meta=meta,
+                audit_summary=audit,
+                safety_review_summary=safety_review_summary,
+                active_ingestion_run=False,
+            )
+            selected_eligibility = dict(eligibility.get(resolution_mode, {}) or {})
+            if not selected_eligibility.get("can_run"):
+                detail = str(selected_eligibility.get("reason") or "Entity resolution is not currently available for this world.")
+                raise HTTPException(status_code=409, detail=detail)
+        state = begin_entity_resolution_run(
             world_id,
             max(1, req.top_k),
             req.review_mode,
@@ -131,19 +115,32 @@ async def entity_resolution_start(world_id: str, req: EntityResolutionStartReque
             resolution_mode,
             req.embedding_batch_size,
             req.embedding_cooldown_seconds,
-        ),
-        daemon=True,
-        name=f"entity-resolution-{world_id}",
-    )
-    try:
+        )
+        thread = threading.Thread(
+            target=_run_entity_resolution_in_thread,
+            args=(
+                world_id,
+                max(1, req.top_k),
+                req.review_mode,
+                req.include_normalized_exact_pass,
+                resolution_mode,
+                req.embedding_batch_size,
+                req.embedding_cooldown_seconds,
+            ),
+            daemon=True,
+            name=f"entity-resolution-{world_id}",
+        )
         thread.start()
+    except HTTPException:
+        raise
     except Exception as exc:
+        logger.exception("Entity resolution failed during startup for %s", world_id)
         fail_entity_resolution_startup(
             world_id,
-            "Entity resolution failed to start.",
+            "Entity resolution failed during startup. No graph changes were kept.",
             reason=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Unable to start entity resolution.") from exc
+        raise HTTPException(status_code=500, detail=str(exc) or "Unable to start entity resolution.") from exc
     return {"status": "accepted", "world_id": world_id, "state": state}
 
 

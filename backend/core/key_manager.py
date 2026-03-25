@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
+import re
 import threading
 import time
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +28,17 @@ class RequestKeyPoolExhaustedError(RuntimeError):
     """Raised when a single request has already tried every currently available key."""
 
 
+@dataclass(frozen=True)
+class TransientErrorAssessment:
+    """Normalized retry guidance for transient provider/runtime failures."""
+
+    kind: str
+    action: str
+    retry_after_seconds: float | None = None
+    provider_message: str | None = None
+    provider_status: str | None = None
+
+
 _RATE_LIMIT_COOLDOWN_SECONDS = 65.0
 _SERVER_ERROR_COOLDOWN_SECONDS = 10.0
 _TRANSIENT_COOLDOWN_SECONDS = 15.0
@@ -33,6 +49,22 @@ _COOLDOWN_SECONDS_BY_ERROR = {
     "temporary_unavailable": _TRANSIENT_COOLDOWN_SECONDS,
 }
 
+_KEY_EXHAUSTION_PATTERNS = (
+    "api key quota exceeded",
+    "api key limit exceeded",
+    "api key has been exhausted",
+    "api key exhausted",
+    "key quota exceeded",
+    "key limit exceeded",
+    "key has been exhausted",
+    "credential quota exceeded",
+    "credential limit exceeded",
+)
+_RETRY_AFTER_MESSAGE_PATTERNS = (
+    re.compile(r"retry (?:after|in) (?P<value>\d+(?:\.\d+)?)\s*(?P<unit>milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)\b"),
+    re.compile(r"try again in (?P<value>\d+(?:\.\d+)?)\s*(?P<unit>milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)\b"),
+)
+
 
 def jittered_delay(base_seconds: float, *, jitter_seconds: float = 0.25) -> float:
     """Add a small jitter so concurrent workers do not all resume at once."""
@@ -41,22 +73,179 @@ def jittered_delay(base_seconds: float, *, jitter_seconds: float = 0.25) -> floa
     return normalized_base + (random.uniform(0.0, normalized_jitter) if normalized_jitter > 0 else 0.0)
 
 
-def classify_transient_provider_error(exc: Exception | str) -> str | None:
-    """Return a cooldown code for transient provider/runtime failures."""
-    message = str(exc or "").lower()
+def _coerce_status_code(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
+
+def _serialize_error_details(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
+def _extract_error_response(exc: Exception | str) -> Any:
+    if isinstance(exc, str):
+        return None
+    return getattr(exc, "response", None)
+
+
+def _extract_error_headers(exc: Exception | str) -> dict[str, str]:
+    response = _extract_error_response(exc)
+    raw_headers = getattr(response, "headers", None)
+    if raw_headers is None:
+        return {}
+    try:
+        items = raw_headers.items()
+    except Exception:
+        return {}
+    return {
+        str(key).strip().lower(): str(value).strip()
+        for key, value in items
+        if key is not None and value is not None
+    }
+
+
+def _extract_status_code(exc: Exception | str) -> int | None:
+    if isinstance(exc, str):
+        message = str(exc).strip()
+        if message.startswith(("429", "500", "503")):
+            return _coerce_status_code(message.split(" ", 1)[0])
+        return None
+
+    for attr in ("code", "status_code"):
+        status_code = _coerce_status_code(getattr(exc, attr, None))
+        if status_code is not None:
+            return status_code
+
+    response = _extract_error_response(exc)
+    for attr in ("status_code", "status"):
+        status_code = _coerce_status_code(getattr(response, attr, None))
+        if status_code is not None:
+            return status_code
+
+    return None
+
+
+def _extract_provider_message(exc: Exception | str) -> str:
+    if isinstance(exc, str):
+        return str(exc)
+    raw_message = getattr(exc, "message", None)
+    if isinstance(raw_message, str) and raw_message.strip():
+        return raw_message
+    return str(exc or "")
+
+
+def _extract_provider_status(exc: Exception | str) -> str | None:
+    if isinstance(exc, str):
+        return None
+    raw_status = getattr(exc, "status", None)
+    if raw_status is not None:
+        return str(raw_status)
+    return None
+
+
+def _extract_provider_details(exc: Exception | str) -> str:
+    if isinstance(exc, str):
+        return ""
+    return _serialize_error_details(getattr(exc, "details", None))
+
+
+def _extract_retry_after_seconds(headers: dict[str, str], message: str = "", details_text: str = "") -> float | None:
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                return max(0.0, retry_at.timestamp() - time.time())
+            except Exception:
+                pass
+
+    combined = " ".join(part for part in (message, details_text) if part).lower()
+    for pattern in _RETRY_AFTER_MESSAGE_PATTERNS:
+        match = pattern.search(combined)
+        if not match:
+            continue
+        value = float(match.group("value"))
+        unit = match.group("unit")
+        if unit.startswith(("m", "min")) and unit != "ms":
+            return value * 60.0
+        if unit.startswith("ms"):
+            return value / 1000.0
+        return value
+    return None
+
+
+def _default_transient_assessment(exc: Exception | str, kind: str) -> TransientErrorAssessment:
+    message = _extract_provider_message(exc)
+    details_text = _extract_provider_details(exc)
+    return TransientErrorAssessment(
+        kind=kind,
+        action="cooldown_key",
+        retry_after_seconds=_extract_retry_after_seconds(_extract_error_headers(exc), message, details_text)
+        if kind == "429"
+        else None,
+        provider_message=message or None,
+        provider_status=_extract_provider_status(exc),
+    )
+
+
+def _assess_gemini_rate_limit_error(exc: Exception | str) -> TransientErrorAssessment:
+    message = _extract_provider_message(exc)
+    status = _extract_provider_status(exc)
+    details_text = _extract_provider_details(exc)
+    combined = " ".join(part for part in (message, status or "", details_text) if part).lower()
+    retry_after_seconds = _extract_retry_after_seconds(_extract_error_headers(exc), message, details_text)
+
+    action = "request_backoff"
+    if any(pattern in combined for pattern in _KEY_EXHAUSTION_PATTERNS):
+        action = "cooldown_key"
+
+    return TransientErrorAssessment(
+        kind="429",
+        action=action,
+        retry_after_seconds=retry_after_seconds,
+        provider_message=message or None,
+        provider_status=status,
+    )
+
+
+def assess_transient_provider_error(
+    exc: Exception | str,
+    *,
+    provider: str | None = None,
+) -> TransientErrorAssessment | None:
+    """Return normalized retry guidance for transient provider/runtime failures."""
+    message = _extract_provider_message(exc).lower()
+    status_code = _extract_status_code(exc)
+
+    kind: str | None = None
     if (
-        "429" in message
+        status_code == 429
+        or "429" in message
         or "resource has been exhausted" in message
         or "resource_exhausted" in message
         or "rate limit" in message
+        or "too many requests" in message
     ):
-        return "429"
-
-    if "500" in message or "internal server error" in message or "internal" in message:
-        return "500"
-
-    if (
+        kind = "429"
+    elif (
+        (status_code is not None and 500 <= status_code < 600)
+        or "500" in message
+        or "internal server error" in message
+        or "internal" in message
+    ):
+        kind = "500"
+    elif (
         isinstance(exc, TimeoutError)
         or "timeout" in message
         or "timed out" in message
@@ -65,9 +254,8 @@ def classify_transient_provider_error(exc: Exception | str) -> str | None:
         or "connecttimeout" in message
         or "request timed out" in message
     ):
-        return "timeout"
-
-    if (
+        kind = "timeout"
+    elif (
         "connecterror" in message
         or "connection error" in message
         or "connection reset" in message
@@ -78,9 +266,21 @@ def classify_transient_provider_error(exc: Exception | str) -> str | None:
         or "503" in message
         or "overloaded" in message
     ):
-        return "temporary_unavailable"
+        kind = "temporary_unavailable"
 
-    return None
+    if kind is None:
+        return None
+
+    if provider == "gemini" and kind == "429":
+        return _assess_gemini_rate_limit_error(exc)
+
+    return _default_transient_assessment(exc, kind)
+
+
+def classify_transient_provider_error(exc: Exception | str) -> str | None:
+    """Return a cooldown code for transient provider/runtime failures."""
+    assessment = assess_transient_provider_error(exc)
+    return assessment.kind if assessment is not None else None
 
 
 class KeyManager:

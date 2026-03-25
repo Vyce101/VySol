@@ -12,12 +12,18 @@ All notable user-visible changes to this project will be documented in this file
 - Changed Key Library entries so saved provider labels remain the source of truth and existing credentials can be renamed inline without reverting to default generated names.
 - Changed the Safety Queue to add a top-level bulk retry action with batch-size and delay controls, and to retry only unresolved items that have not fully passed yet.
 - Changed the ingest page to mount from a lightweight runtime-summary endpoint so world status, counters, and resume state appear without waiting for overlapping full audit endpoints to finish.
+- Changed local launcher and dev defaults to use `127.0.0.1` loopback URLs, allow the common local frontend origins (`localhost`, `127.0.0.1`, and `[::1]`), and refuse to auto-close unrelated apps when ports `3000` or `8000` are already occupied.
+- Changed entity resolution to use a durable incremental workflow with exact `scan -> embed -> apply` phases, resumable saved progress, exact-only eligibility tied to trustworthy current unique-node coverage, and per-run embedding controls that affect only changed winners instead of untouched entities.
+- Changed chat retrieval budgeting so graph-node selection is ranked before the final node cap, `Max Neighbors Per Node` now caps final retained mutual graph connections, and chat exposes both per-node description caps and an overall context-character limit.
 
 ### Fixed
 
 - Fixed pooled-provider retry behavior so Gemini and OpenAI-compatible calls now try every currently available non-cooldown key for a request before failing after transient rate-limit or cooldown-classified errors.
 - Fixed chat edit, delete, and regenerate flows to use targeted backend mutations so unloaded older history pages are not lost when working inside long threads.
 - Fixed ingest source decoding so Windows-authored text files with non-UTF-8 encodings can still be chunked and recovered instead of failing when the app rereads source text.
+- Fixed local frontend/backend startup truthfulness so browser-side failures now distinguish unreachable backends from blocked/unreadable responses, launcher port conflicts surface cleanly, and localhost CORS mismatches no longer masquerade as generic backend-down errors.
+- Fixed Gemini chat and retrieval-query embedding retries so ambiguous Gemini `429` throttles now back off at the request level instead of falsely cooling down every shared Gemini key.
+- Fixed entity-resolution startup, batching, and persistence so large unique-node clones respect Chroma batch limits, exact-only batching now uses the configured embedding batch size for changed winners, already committed embedded merges survive aborts, and Windows graph saves retry cleanly through temporary file-lock collisions.
 
 ## [0.3.0] - 2026-03-25
 

@@ -3749,6 +3749,25 @@ def _collect_unique_node_embedding_records(unique_node_vector_store: VectorStore
     return records
 
 
+def _probe_unique_node_embedding_readability(unique_node_vector_store: VectorStore) -> None:
+    if hasattr(unique_node_vector_store, "get_all_records"):
+        try:
+            unique_node_vector_store.get_all_records(
+                include_documents=True,
+                include_embeddings=True,
+                raise_on_error=True,
+            )
+            return
+        except TypeError:
+            pass
+    try:
+        unique_node_vector_store.collection.get(include=["documents", "metadatas", "embeddings"])
+    except Exception as exc:
+        raise VectorStoreReadError(
+            f"Unable to read collection '{unique_node_vector_store.collection_name}'."
+        ) from exc
+
+
 def _collect_orphan_graph_nodes(world_id: str, graph_store: GraphStore) -> list[dict]:
     orphans: list[dict] = []
     for node_id, attrs in graph_store.graph.nodes(data=True):
@@ -3810,6 +3829,7 @@ def audit_ingestion_integrity(
     canonical_node_documents = _collect_canonical_unique_node_documents(graph_store)
     try:
         embedded_unique_node_records = _collect_unique_node_embedding_records(unique_node_vector_store)
+        _probe_unique_node_embedding_readability(unique_node_vector_store)
         unique_node_audit_error: str | None = None
     except VectorStoreReadError as exc:
         embedded_unique_node_records = {}
@@ -5887,6 +5907,122 @@ def _cached_runtime_reembed_eligibility(meta: dict, *, active_run: bool, safety_
     }
 
 
+def get_entity_resolution_eligibility(
+    world_id: str,
+    *,
+    meta: dict | None = None,
+    audit_summary: dict | None = None,
+    safety_review_summary: dict | None = None,
+    active_ingestion_run: bool | None = None,
+) -> dict:
+    local_meta = dict(meta or _load_meta(world_id))
+    local_audit = dict(audit_summary or {})
+    local_world = dict(local_audit.get("world") or {})
+    local_safety_summary = dict(safety_review_summary or get_safety_review_summary(world_id))
+    active_run = bool(active_ingestion_run)
+    if active_ingestion_run is None:
+        active_run = bool(local_meta.get("ingestion_status") == "in_progress" and has_active_ingestion_run(world_id))
+
+    sources = [source for source in list(local_meta.get("sources", [])) if isinstance(source, dict)]
+    blocking_issues = [issue for issue in list(local_audit.get("blocking_issues", [])) if isinstance(issue, dict)]
+    blocking_by_code = {
+        str(issue.get("code") or "").strip(): issue
+        for issue in blocking_issues
+        if str(issue.get("code") or "").strip()
+    }
+    exact_then_ai_blocking_issue = blocking_issues[0] if blocking_issues else None
+    disallowed_exact_only_issue = next(
+        (
+            issue
+            for issue in blocking_issues
+            if str(issue.get("code") or "").strip() not in {"chunk_vector_store_unreadable"}
+        ),
+        None,
+    )
+    current_unique_nodes = _coerce_non_negative_int(local_world.get("current_unique_nodes"))
+    if current_unique_nodes is None:
+        current_unique_nodes = _coerce_non_negative_int(local_meta.get("total_nodes")) or 0
+    embedded_unique_nodes = _coerce_non_negative_int(local_world.get("embedded_unique_nodes"))
+    if embedded_unique_nodes is None:
+        embedded_unique_nodes = _coerce_non_negative_int(local_meta.get("embedded_unique_nodes")) or 0
+    stale_unique_node_vectors = _coerce_non_negative_int(local_world.get("stale_unique_node_vectors")) or 0
+    failed_records = _coerce_non_negative_int(local_world.get("failed_records")) or 0
+    unresolved_reviews = _coerce_non_negative_int(local_safety_summary.get("unresolved_reviews")) or 0
+    incomplete_sources = [source for source in sources if str(source.get("status") or "").lower() != "complete"]
+
+    def _payload(can_run: bool, reason_code: str | None = None, reason: str | None = None) -> dict[str, Any]:
+        return {
+            "can_run": can_run,
+            "reason_code": reason_code,
+            "reason": reason,
+        }
+
+    wait_for_ingest = "Wait for ingestion to finish before starting entity resolution."
+    no_sources_reason = "Ingest at least one complete source before resolving entities."
+    no_entities_reason = "Ingest at least one extracted entity before running entity resolution."
+    exact_only_repair_reason = (
+        "Finish unique-node embedding repair before running Exact Only. "
+        "Exact Only now requires every current graph node to already have a valid unique-node embedding."
+    )
+    exact_then_ai_failure_reason = "Finish ingestion and repair source failures before running exact + chooser/combiner."
+    exact_then_ai_retry_reason = "Resolve retryable ingest failures before running exact + chooser/combiner."
+    exact_then_ai_safety_reason = "Resolve or reset pending safety review items before running exact + chooser/combiner."
+
+    if active_run or str(local_meta.get("ingestion_status") or "").lower() == "in_progress":
+        exact_only = _payload(False, "ingestion_in_progress", wait_for_ingest)
+        exact_then_ai = _payload(False, "ingestion_in_progress", wait_for_ingest)
+    elif not sources:
+        exact_only = _payload(False, "no_sources", no_sources_reason)
+        exact_then_ai = _payload(False, "no_sources", no_sources_reason)
+    elif current_unique_nodes <= 0:
+        exact_only = _payload(False, "no_entities", no_entities_reason)
+        exact_then_ai = _payload(False, "no_entities", no_entities_reason)
+    elif "unique_node_vector_store_unreadable" in blocking_by_code:
+        exact_only = _payload(False, "unique_node_index_unreadable", exact_only_repair_reason)
+        exact_then_ai = _payload(
+            False,
+            "world_blocked",
+            str(
+                blocking_by_code["unique_node_vector_store_unreadable"].get("message")
+                or "Resolve world-level graph or vector blockers before running exact + chooser/combiner."
+            ),
+        )
+    elif embedded_unique_nodes < current_unique_nodes or stale_unique_node_vectors > 0:
+        exact_only = _payload(False, "unique_node_embeddings_incomplete", exact_only_repair_reason)
+        exact_then_ai = _payload(False, "retryable_ingest_failures", exact_then_ai_retry_reason)
+    elif disallowed_exact_only_issue is not None:
+        issue_message = str(
+            disallowed_exact_only_issue.get("message")
+            or "Resolve world-level graph or vector blockers before running entity resolution."
+        )
+        exact_only = _payload(False, "world_blocked", issue_message)
+        exact_then_ai = _payload(False, "world_blocked", issue_message)
+    else:
+        exact_only = _payload(True)
+        if exact_then_ai_blocking_issue is not None:
+            exact_then_ai = _payload(
+                False,
+                "world_blocked",
+                str(
+                    exact_then_ai_blocking_issue.get("message")
+                    or "Resolve world-level graph or vector blockers before running exact + chooser/combiner."
+                ),
+            )
+        elif incomplete_sources:
+            exact_then_ai = _payload(False, "sources_incomplete", exact_then_ai_failure_reason)
+        elif failed_records > 0 or str(local_meta.get("ingestion_status") or "").lower() == "partial_failure":
+            exact_then_ai = _payload(False, "retryable_ingest_failures", exact_then_ai_retry_reason)
+        elif unresolved_reviews > 0:
+            exact_then_ai = _payload(False, "safety_reviews_pending", exact_then_ai_safety_reason)
+        else:
+            exact_then_ai = _payload(True)
+
+    return {
+        "exact_only": exact_only,
+        "exact_then_ai": exact_then_ai,
+    }
+
+
 def get_ingest_runtime_summary(world_id: str) -> dict:
     """
     Return a lightweight, mostly persisted ingest summary for fast page loads.
@@ -5910,6 +6046,13 @@ def get_ingest_runtime_summary(world_id: str) -> dict:
     failures = list(active_audit.get("failures") or _live_failure_rows(meta))
     safety_review_summary = get_safety_review_summary(world_id)
     actionable_resume_sources = get_actionable_resume_sources(world_id, sources=sources)
+    entity_resolution_eligibility = get_entity_resolution_eligibility(
+        world_id,
+        meta=meta,
+        audit_summary=active_audit,
+        safety_review_summary=safety_review_summary,
+        active_ingestion_run=active_run,
+    )
 
     checkpoint_source = source_by_id.get(str(checkpoint.get("source_id") or "")) if checkpoint else None
     progress_source = checkpoint_source or _progress_source(meta)
@@ -5979,6 +6122,7 @@ def get_ingest_runtime_summary(world_id: str) -> dict:
                 active_run=active_run,
                 safety_review_summary=safety_review_summary,
             ),
+            "entity_resolution_eligibility": entity_resolution_eligibility,
             "safety_review_summary": safety_review_summary,
         },
         "checkpoint": runtime_checkpoint,

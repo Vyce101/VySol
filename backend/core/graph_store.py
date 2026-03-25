@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
+from heapq import heappop, heappush
 import json
 import logging
 import math
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 import networkx as nx
@@ -23,6 +25,7 @@ GRAPH_RING_SIZE_STEP = 8
 GRAPH_RING_RADIUS_STEP = 170.0
 GRAPH_COMPONENT_BASE_RADIUS = 520.0
 GRAPH_COMPONENT_RADIUS_STEP = 950.0
+_RETRIEVAL_PROPAGATION_HOP_PENALTY = 0.0001
 
 
 @dataclass
@@ -76,11 +79,14 @@ class ActiveIngestGraphSession:
 
 _active_ingest_graph_sessions: dict[str, ActiveIngestGraphSession] = {}
 _active_ingest_graph_sessions_lock = threading.RLock()
+_graph_file_locks: dict[str, threading.Lock] = {}
+_graph_file_locks_guard = threading.Lock()
+_GRAPH_SAVE_REPLACE_RETRY_ATTEMPTS = 30
+_GRAPH_SAVE_REPLACE_RETRY_SECONDS = 0.1
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _cast_node(attrs: dict) -> dict:
     """Cast GEXF string attributes back to proper Python types."""
@@ -94,6 +100,11 @@ def _cast_node(attrs: dict) -> dict:
             attrs["source_chunks"] = json.loads(attrs["source_chunks"])
         except (json.JSONDecodeError, TypeError):
             attrs["source_chunks"] = []
+    if "merge_provenance" in attrs and isinstance(attrs["merge_provenance"], str):
+        try:
+            attrs["merge_provenance"] = json.loads(attrs["merge_provenance"])
+        except (json.JSONDecodeError, TypeError):
+            attrs["merge_provenance"] = []
     return attrs
 
 
@@ -111,6 +122,16 @@ def _cast_edge(attrs: dict) -> dict:
 def _normalize_id(name: str) -> str:
     """Convert display name to lowercase_with_underscores."""
     return name.lower().replace(" ", "_").replace("-", "_")
+
+
+def _get_graph_file_lock(path: os.PathLike[str] | str) -> threading.Lock:
+    normalized = os.path.normcase(os.path.abspath(str(path)))
+    with _graph_file_locks_guard:
+        lock = _graph_file_locks.get(normalized)
+        if lock is None:
+            lock = threading.Lock()
+            _graph_file_locks[normalized] = lock
+        return lock
 
 
 class GraphStore:
@@ -134,23 +155,24 @@ class GraphStore:
 
     def _load(self) -> nx.Graph:
         """Load GEXF or return empty graph."""
-        if self.path.exists() and self.path.stat().st_size > 0:
-            try:
-                g = nx.read_gexf(str(self.path))
-                # Cast attributes
-                for nid in g.nodes:
-                    g.nodes[nid].update(_cast_node(dict(g.nodes[nid])))
-                if isinstance(g, nx.MultiDiGraph):
-                    for u, v, k in g.edges(keys=True):
-                        g.edges[u, v, k].update(_cast_edge(dict(g.edges[u, v, k])))
-                else:
-                    for u, v in g.edges():
-                        g.edges[u, v].update(_cast_edge(dict(g.edges[u, v])))
-                return g
-            except Exception as e:
-                logger.error(f"Failed to load GEXF for {self.world_id}: {e}")
-                return nx.MultiDiGraph()
-        return nx.MultiDiGraph()
+        with _get_graph_file_lock(self.path):
+            if self.path.exists() and self.path.stat().st_size > 0:
+                try:
+                    g = nx.read_gexf(str(self.path))
+                    # Cast attributes
+                    for nid in g.nodes:
+                        g.nodes[nid].update(_cast_node(dict(g.nodes[nid])))
+                    if isinstance(g, nx.MultiDiGraph):
+                        for u, v, k in g.edges(keys=True):
+                            g.edges[u, v, k].update(_cast_edge(dict(g.edges[u, v, k])))
+                    else:
+                        for u, v in g.edges():
+                            g.edges[u, v].update(_cast_edge(dict(g.edges[u, v])))
+                    return g
+                except Exception as e:
+                    logger.error(f"Failed to load GEXF for {self.world_id}: {e}")
+                    return nx.MultiDiGraph()
+            return nx.MultiDiGraph()
 
     def _save(self) -> None:
         """Atomic write: .tmp.gexf → os.replace()."""
@@ -163,9 +185,37 @@ class GraphStore:
                 attrs["claims"] = json.dumps(attrs["claims"])
             if "source_chunks" in attrs and isinstance(attrs["source_chunks"], list):
                 attrs["source_chunks"] = json.dumps(attrs["source_chunks"])
-        tmp = self.path.with_suffix(".tmp.gexf")
-        nx.write_gexf(g_copy, str(tmp))
-        os.replace(str(tmp), str(self.path))
+            if "merge_provenance" in attrs and isinstance(attrs["merge_provenance"], list):
+                attrs["merge_provenance"] = json.dumps(attrs["merge_provenance"])
+        tmp = self.path.with_name(f"{self.path.stem}.{uuid.uuid4().hex}.tmp.gexf")
+        with _get_graph_file_lock(self.path):
+            nx.write_gexf(g_copy, str(tmp))
+            last_error: PermissionError | None = None
+            for attempt in range(1, _GRAPH_SAVE_REPLACE_RETRY_ATTEMPTS + 1):
+                try:
+                    os.replace(str(tmp), str(self.path))
+                    return
+                except PermissionError as exc:
+                    last_error = exc
+                    if attempt == _GRAPH_SAVE_REPLACE_RETRY_ATTEMPTS:
+                        break
+                    logger.warning(
+                        "Retrying graph save for %s after file-lock collision (attempt %s/%s).",
+                        self.world_id,
+                        attempt,
+                        _GRAPH_SAVE_REPLACE_RETRY_ATTEMPTS,
+                    )
+                    time.sleep(_GRAPH_SAVE_REPLACE_RETRY_SECONDS)
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    logger.warning("Failed to clean up temporary graph file for %s", self.world_id, exc_info=True)
+            if last_error is not None:
+                raise PermissionError(
+                    f"Timed out replacing graph file after {_GRAPH_SAVE_REPLACE_RETRY_ATTEMPTS} attempts. "
+                    "Another process is holding the world graph open."
+                ) from last_error
 
     def upsert_node(
         self,
@@ -776,33 +826,131 @@ class GraphStore:
             "removed_claims": removed_claims,
         }
 
-    def get_bfs_neighborhood(self, start_nodes: list[str], hops: int, max_nodes: int) -> list[dict]:
-        """BFS from start_nodes for N hops. Return up to max_nodes unique nodes."""
-        visited = set()
-        queue = list(start_nodes)
-        depth = {n: 0 for n in start_nodes}
+    def get_ranked_neighborhood_candidates(
+        self,
+        start_nodes: list[str],
+        hops: int,
+        *,
+        node_similarity_map: dict[str, float] | None = None,
+        max_neighbors_per_node: int | None = None,
+    ) -> list[dict]:
+        """Return all discovered neighborhood candidates in stable ranked order."""
+        normalized_start_nodes = [
+            str(node_id).strip()
+            for node_id in start_nodes
+            if str(node_id).strip() and str(node_id).strip() in self.graph.nodes
+        ]
+        if not normalized_start_nodes:
+            return []
 
-        while queue and len(visited) < max_nodes:
-            current = queue.pop(0)
-            if current in visited:
+        try:
+            normalized_hops = max(0, int(hops))
+        except (TypeError, ValueError):
+            normalized_hops = 0
+        similarity_scores: dict[str, float] = {}
+        for raw_node_id, raw_score in (node_similarity_map or {}).items():
+            node_id = str(raw_node_id).strip()
+            if not node_id or node_id not in self.graph.nodes:
                 continue
-            if current not in self.graph.nodes:
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
                 continue
-            visited.add(current)
+            previous = similarity_scores.get(node_id)
+            if previous is None or score < previous:
+                similarity_scores[node_id] = score
 
-            if depth.get(current, 0) < hops:
-                for neighbor in self.graph.neighbors(current):
-                    if neighbor not in visited:
-                        queue.append(neighbor)
-                        depth[neighbor] = depth.get(current, 0) + 1
+        def _node_sort_key(node_id: str) -> tuple[str, str]:
+            attrs = self.graph.nodes[node_id] if node_id in self.graph.nodes else {}
+            label = str(attrs.get("display_name", node_id) or node_id).strip().lower()
+            return label, node_id.lower()
 
-        results = []
-        for nid in visited:
-            if nid in self.graph.nodes:
-                node_data = self.get_node(nid)
-                if node_data:
-                    results.append(node_data)
-        return results[:max_nodes]
+        frontier: list[tuple[float, int, str, str, str]] = []
+        best_frontier_scores: dict[str, float] = {}
+        queued_depths: dict[str, int] = {}
+        for index, node_id in enumerate(normalized_start_nodes):
+            score = similarity_scores.get(node_id, float(index) * 0.000001)
+            label_key, node_key = _node_sort_key(node_id)
+            existing = best_frontier_scores.get(node_id)
+            if existing is not None and score >= existing:
+                continue
+            best_frontier_scores[node_id] = score
+            queued_depths[node_id] = 0
+            heappush(frontier, (score, 0, label_key, node_key, node_id))
+
+        visited: set[str] = set()
+        ordered_visited: list[str] = []
+        while frontier:
+            current_score, current_depth, _label_key, _node_key, current_id = heappop(frontier)
+            if current_id in visited or current_id not in self.graph.nodes:
+                continue
+            best_score = best_frontier_scores.get(current_id)
+            best_depth = queued_depths.get(current_id)
+            if best_score is not None and current_score > best_score:
+                continue
+            if best_depth is not None and current_depth > best_depth:
+                continue
+
+            visited.add(current_id)
+            ordered_visited.append(current_id)
+            if current_depth >= normalized_hops:
+                continue
+
+            ranked_neighbors: list[tuple[float, str, str, str]] = []
+            for raw_neighbor_id in self.graph.neighbors(current_id):
+                neighbor_id = str(raw_neighbor_id).strip()
+                if not neighbor_id or neighbor_id in visited or neighbor_id not in self.graph.nodes:
+                    continue
+                neighbor_score = similarity_scores.get(
+                    neighbor_id,
+                    current_score + _RETRIEVAL_PROPAGATION_HOP_PENALTY,
+                )
+                label_key, node_key = _node_sort_key(neighbor_id)
+                ranked_neighbors.append((neighbor_score, label_key, node_key, neighbor_id))
+
+            ranked_neighbors.sort()
+
+            next_depth = current_depth + 1
+            for neighbor_score, label_key, node_key, neighbor_id in ranked_neighbors:
+                previous_score = best_frontier_scores.get(neighbor_id)
+                previous_depth = queued_depths.get(neighbor_id)
+                if previous_score is not None:
+                    if neighbor_score > previous_score:
+                        continue
+                    if neighbor_score == previous_score and previous_depth is not None and next_depth >= previous_depth:
+                        continue
+                best_frontier_scores[neighbor_id] = neighbor_score
+                queued_depths[neighbor_id] = next_depth
+                heappush(frontier, (neighbor_score, next_depth, label_key, node_key, neighbor_id))
+
+        results: list[dict] = []
+        for node_id in ordered_visited:
+            node_data = self.get_node(node_id)
+            if node_data:
+                results.append(node_data)
+        return results
+
+    def get_bfs_neighborhood(
+        self,
+        start_nodes: list[str],
+        hops: int,
+        max_nodes: int,
+        *,
+        node_similarity_map: dict[str, float] | None = None,
+        max_neighbors_per_node: int | None = None,
+    ) -> list[dict]:
+        """Similarity-ranked bounded BFS from start_nodes."""
+        try:
+            normalized_max_nodes = max(1, int(max_nodes))
+        except (TypeError, ValueError):
+            normalized_max_nodes = 1
+        results = self.get_ranked_neighborhood_candidates(
+            start_nodes,
+            hops,
+            node_similarity_map=node_similarity_map,
+            max_neighbors_per_node=max_neighbors_per_node,
+        )
+        return results[:normalized_max_nodes]
 
 
 def create_active_ingest_graph_session(

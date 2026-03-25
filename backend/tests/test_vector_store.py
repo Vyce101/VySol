@@ -57,11 +57,12 @@ class DummyCollection:
 
 
 class DummyClient:
-    def __init__(self, path: str, collection: DummyCollection):
+    def __init__(self, path: str, collection: DummyCollection, *, max_batch_size: int | None = None):
         self.path = path
         self._collections: dict[str, DummyCollection] = {}
         self._fallback_collection = collection
         self.deleted: list[str] = []
+        self.max_batch_size = max_batch_size
 
     def get_or_create_collection(self, name: str):
         if name in self._collections:
@@ -80,9 +81,19 @@ class DummyClient:
         self.deleted.append(name)
         self._collections.pop(name, None)
 
+    def get_max_batch_size(self) -> int:
+        return self.max_batch_size or 1000000
 
-def _patch_vector_dependencies(monkeypatch, *, collection: DummyCollection, embedding_model: str = "gemini-embedding-001", world_dir=None):
-    client = DummyClient("dummy-path", collection)
+
+def _patch_vector_dependencies(
+    monkeypatch,
+    *,
+    collection: DummyCollection,
+    embedding_model: str = "gemini-embedding-001",
+    world_dir=None,
+    max_batch_size: int | None = None,
+):
+    client = DummyClient("dummy-path", collection, max_batch_size=max_batch_size)
     monkeypatch.setattr(
         vector_store.chromadb,
         "PersistentClient",
@@ -161,7 +172,7 @@ def test_vector_store_embed_texts_retries_timeout_on_next_key(monkeypatch):
         def __init__(self):
             self.reported: list[tuple[int, str]] = []
 
-        def wait_for_available_key(self, *, jitter_seconds: float = 0.25):
+        def wait_for_request_key(self, used_indices=None):
             return ("k2", 1)
 
         def report_error(self, key_index: int, error_type: str) -> None:
@@ -194,6 +205,106 @@ def test_vector_store_embed_texts_retries_timeout_on_next_key(monkeypatch):
     assert embedding == [0.7, 0.8, 0.9]
     assert calls == ["k1", "k2"]
     assert dummy_km.reported == [(0, "timeout")]
+
+
+def test_vector_store_embed_texts_generic_429_retries_same_key_without_cooldown(monkeypatch):
+    collection = DummyCollection()
+    calls: list[str] = []
+
+    class DummyKM:
+        api_keys = ["k1", "k2"]
+        key_count = 2
+
+        def __init__(self):
+            self.wait_calls = 0
+            self.reported: list[tuple[int, str]] = []
+
+        def wait_for_request_key(self, used_indices=None):
+            self.wait_calls += 1
+            return ("k2", 1)
+
+        def report_error(self, key_index: int, error_type: str) -> None:
+            self.reported.append((key_index, error_type))
+
+    class DummyModels:
+        def __init__(self, api_key: str):
+            self.api_key = api_key
+            self.calls = 0
+
+        def embed_content(self, *, model: str, contents):
+            calls.append(self.api_key)
+            self.calls += 1
+            if self.api_key == "k1" and self.calls == 1:
+                raise RuntimeError("429 Too Many Requests")
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.7, 0.8, 0.9])])
+
+    class DummyGenAIClient:
+        def __init__(self, api_key: str):
+            self.models = DummyModels(api_key)
+
+    dummy_km = DummyKM()
+
+    _patch_vector_dependencies(monkeypatch, collection=collection, embedding_model="gemini-embedding-001")
+    monkeypatch.setattr(vector_store.genai, "Client", DummyGenAIClient)
+    monkeypatch.setattr(vector_store, "get_key_manager", lambda: dummy_km)
+    monkeypatch.setattr(vector_store.time, "sleep", lambda seconds: None)
+
+    store = vector_store.VectorStore("world-123")
+    embedding = store.embed_text("hello world", api_key="k1")
+
+    assert embedding == [0.7, 0.8, 0.9]
+    assert calls == ["k1", "k1"]
+    assert dummy_km.wait_calls == 0
+    assert dummy_km.reported == []
+
+
+def test_vector_store_embed_texts_explicit_key_quota_429_rotates_key(monkeypatch):
+    collection = DummyCollection()
+    calls: list[str] = []
+
+    class DummyKM:
+        api_keys = ["k1", "k2"]
+        key_count = 2
+
+        def __init__(self):
+            self.wait_calls = 0
+            self.reported: list[tuple[int, str]] = []
+
+        def wait_for_request_key(self, used_indices=None):
+            self.wait_calls += 1
+            return ("k2", 1)
+
+        def report_error(self, key_index: int, error_type: str) -> None:
+            self.reported.append((key_index, error_type))
+
+    class DummyModels:
+        def __init__(self, api_key: str):
+            self.api_key = api_key
+
+        def embed_content(self, *, model: str, contents):
+            calls.append(self.api_key)
+            if self.api_key == "k1":
+                raise RuntimeError("429 API key quota exceeded")
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.7, 0.8, 0.9])])
+
+    class DummyGenAIClient:
+        def __init__(self, api_key: str):
+            self.models = DummyModels(api_key)
+
+    dummy_km = DummyKM()
+
+    _patch_vector_dependencies(monkeypatch, collection=collection, embedding_model="gemini-embedding-001")
+    monkeypatch.setattr(vector_store.genai, "Client", DummyGenAIClient)
+    monkeypatch.setattr(vector_store, "get_key_manager", lambda: dummy_km)
+    monkeypatch.setattr(vector_store.time, "sleep", lambda seconds: None)
+
+    store = vector_store.VectorStore("world-123")
+    embedding = store.embed_text("hello world", api_key="k1")
+
+    assert embedding == [0.7, 0.8, 0.9]
+    assert calls == ["k1", "k2"]
+    assert dummy_km.wait_calls == 1
+    assert dummy_km.reported == [(0, "429")]
 
 
 def test_vector_store_query_blocks_when_manifest_model_is_stale(monkeypatch):
@@ -248,6 +359,66 @@ def test_vector_store_query_dimension_mismatch_requires_rebuild(monkeypatch):
         store.query_by_embedding([0.9, 0.8, 0.7], n_results=1)
 
     assert "Re-embed All or Rechunk And Re-ingest" in str(exc.value)
+
+
+def test_get_all_records_with_array_like_embeddings_avoids_truthiness_crash(monkeypatch):
+    class ArrayLikeRows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __iter__(self):
+            return iter(self._rows)
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __bool__(self):
+            raise ValueError("ambiguous truth value")
+
+    class EmbeddingCollection(DummyCollection):
+        def get(self, ids=None, include=None):
+            return {
+                "ids": ["node-1"],
+                "documents": ["Node doc"],
+                "metadatas": [{"kind": "unique_node"}],
+                "embeddings": ArrayLikeRows([[0.1, 0.2, 0.3]]),
+            }
+
+    collection = EmbeddingCollection()
+    _patch_vector_dependencies(monkeypatch, collection=collection, embedding_model="gemini-embedding-001")
+
+    store = vector_store.VectorStore("world-array-like-embeddings", collection_suffix="unique_nodes")
+    records = store.get_all_records(include_documents=True, include_embeddings=True, raise_on_error=True)
+
+    assert records == [
+        {
+            "id": "node-1",
+            "document": "Node doc",
+            "metadata": {"kind": "unique_node"},
+            "embedding": [0.1, 0.2, 0.3],
+        }
+    ]
+
+
+def test_upsert_records_batches_to_collection_limit(monkeypatch):
+    collection = DummyCollection()
+    _patch_vector_dependencies(
+        monkeypatch,
+        collection=collection,
+        embedding_model="gemini-embedding-001",
+        max_batch_size=2,
+    )
+
+    store = vector_store.VectorStore("world-batched-upsert", collection_suffix="unique_nodes")
+    store.upsert_records(
+        [
+            {"id": "node-1", "document": "Doc 1", "metadata": {"n": 1}, "embedding": [0.1]},
+            {"id": "node-2", "document": "Doc 2", "metadata": {"n": 2}, "embedding": [0.2]},
+            {"id": "node-3", "document": "Doc 3", "metadata": {"n": 3}, "embedding": [0.3]},
+        ]
+    )
+
+    assert [call["ids"] for call in collection.upserts] == [["node-1", "node-2"], ["node-3"]]
 
 
 def test_vector_store_swap_staged_collection_replaces_live_name(monkeypatch):

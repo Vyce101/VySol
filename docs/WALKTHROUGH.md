@@ -292,7 +292,8 @@ Important:
 
 - The chooser and combiner prompts matter only when you run `Exact + chooser/combiner`
 - `Exact only` does not call either model stage
-- `Exact only` still needs to rebuild the unique-node index before the run is complete
+- `Exact only` now runs as `exact match scan -> exact winner embedding -> exact apply`
+- Only the changed winners from that run are re-embedded; untouched entities are left alone
 
 ## Ingestion Flow
 
@@ -363,14 +364,19 @@ If extraction hits a safety block:
 Entity-resolution controls:
 
 - `Resolution mode` chooses whether the run stops after exact normalized matching or continues into chooser/combiner review
-- Exact-only still rebuilds the unique-node index before it reports success
-- `Complete` now means the merge result and the unique-node index refresh both committed successfully
-- If entity resolution fails, the run now reports the backend reason instead of a generic stream disconnect and avoids keeping partial live merges
+- `Exact only` is available when the current graph's unique-node coverage is trustworthy, even if some unrelated chunk-level ingest failures still exist
+- `Exact + chooser/combiner` stays locked until the world is fully healthy
+- Exact-only now runs in three main phases: scan exact groups, embed the changed winners, then apply the embedded exact batches
+- Completed embedded batches are committed live during the run instead of waiting for one giant final exact-only swap
+- `Resume Resolution` appears when a previous run already committed some work and still has pending exact or AI merges left to finish
+- `Complete` now means no pending exact or AI work remains
+- If entity resolution fails, the run now reports the backend reason instead of a generic stream disconnect, keeps already committed embedded merges, and leaves the unfinished remainder resumable when possible
 - `Top K candidates` is used only for `Exact + chooser/combiner`
-- `Embedding batch size` controls unique-node embedding rebuild batch size for that entity-resolution run
-- `Embedding delay (seconds)` adds a per-batch cooldown to that same unique-node embedding rebuild step
+- `Embedding batch size` controls entity resolution's changed-winner embedding batches for exact winners and later AI winners
+- `Embedding delay (seconds)` adds a per-batch cooldown to that same changed-winner embedding step
 - The embedding controls apply to entity resolution only; they do not change ingest or `Re-embed All`
-- The entity-resolution status panel now shows `Embedded N / N` during the unique-node index rebuild, using the post-merge unique-node total instead of the raw pre-merge extraction total
+- When Gemini embedding throttles entity resolution, the status can now explicitly show that it is waiting for embedding API cooldown instead of just appearing hung
+- The entity-resolution status panel now shows `Embedded N / N` against the winners being embedded for that run, not the raw pre-merge extraction total
 - Exact-only summaries now label unresolved exact-pass leftovers as `Left Unchanged`
 
 ## Rebuild And Retry Actions
@@ -465,7 +471,27 @@ The retrieval sidebar is grouped into collapsible sections. All sections start c
 `Max Graph Nodes`
 
 - A hard cap on how many graph nodes can be included
+- VySol applies the cap after graph candidates are ranked, so lowering the cap keeps the highest-relevance reachable nodes instead of changing the walk order arbitrarily
 - Actual returned graph size can still be lower if the selected entry nodes simply do not reach that many unique nodes
+
+`Max Neighbors Per Node`
+
+- Caps each kept node's final retained neighbors in the retrieved context graph
+- The cap applies after final node selection, not during discovery
+- VySol keeps only mutual top-N retained connections, so no node in the final `Context Graph` should end up above that cap
+
+`Max Node Description (Chars)`
+
+- Caps each retrieved node description before prompt context is assembled
+- The truncation happens before the final context size is counted
+- `0` disables the per-node description cap
+
+`Context Limit (Chars)`
+
+- Lives under `General Settings`
+- If the final built retrieval context is larger than this limit, VySol does not send the request to the model
+- Instead, VySol saves a normal model-side reply explaining that the request was skipped because the retrieval context exceeded the limit
+- `0` disables the overall context limit
 
 `Prompt`
 

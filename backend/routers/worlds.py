@@ -22,6 +22,7 @@ from core.config import (
 )
 from core.atomic_json import dump_json_atomic
 from core.ingestion_engine import (
+    get_entity_resolution_eligibility,
     get_checkpoint_info,
     get_ingestion_audit_snapshot,
     get_reembed_eligibility,
@@ -277,6 +278,13 @@ async def get_world(world_id: str):
                 "eligible_sources_count": 0,
             }
     meta["safety_review_summary"] = get_safety_review_summary(world_id)
+    meta["entity_resolution_eligibility"] = get_entity_resolution_eligibility(
+        world_id,
+        meta=meta,
+        audit_summary=audit,
+        safety_review_summary=meta["safety_review_summary"],
+        active_ingestion_run=bool(meta.get("active_ingestion_run")),
+    )
     return _with_effective_ingest_settings(meta)
 
 

@@ -109,12 +109,24 @@ interface ReembedEligibility {
     eligible_sources_count: number;
 }
 
+interface EntityResolutionModeEligibility {
+    can_run: boolean;
+    reason_code?: string | null;
+    reason?: string | null;
+}
+
+interface EntityResolutionEligibility {
+    exact_only: EntityResolutionModeEligibility;
+    exact_then_ai: EntityResolutionModeEligibility;
+}
+
 interface WorldResponse {
     world_name?: string;
     ingestion_status?: string;
     ingest_settings?: WorldIngestSettings;
     active_ingestion_run?: boolean;
     reembed_eligibility?: ReembedEligibility;
+    entity_resolution_eligibility?: EntityResolutionEligibility;
     safety_review_summary?: SafetyReviewSummary;
 }
 
@@ -385,6 +397,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [worldName, setWorldName] = useState("World");
     const [savedIngestSettings, setSavedIngestSettings] = useState<WorldIngestSettings | null>(null);
     const [reembedEligibility, setReembedEligibility] = useState<ReembedEligibility | null>(null);
+    const [entityResolutionEligibility, setEntityResolutionEligibility] = useState<EntityResolutionEligibility | null>(null);
     const [prompts, setPrompts] = useState<Record<string, WorldPromptState>>({} as Record<string, WorldPromptState>);
     const [initialIngestDraft, setInitialIngestDraft] = useState<WorldIngestSetupDraft | null>(null);
     const [initialIngestDraftDirty, setInitialIngestDraftDirty] = useState(false);
@@ -454,6 +467,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setWorldIngestionStatus(null);
         setWorldActiveIngestionRun(false);
         setOptimisticIngestRun(false);
+        setEntityResolutionEligibility(null);
         setInitialIngestDraft(null);
         setInitialIngestDraftDirty(false);
         initialIngestDraftWorldIdRef.current = null;
@@ -527,6 +541,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         setWorldIngestionStatus(data.ingestion_status ?? null);
         setWorldActiveIngestionRun(data.active_ingestion_run === true);
         setReembedEligibility(data.reembed_eligibility ?? null);
+        setEntityResolutionEligibility(data.entity_resolution_eligibility ?? null);
         setSafetyReviewSummary(data.safety_review_summary ?? null);
     };
 
@@ -1298,9 +1313,6 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedEmbeddingProviderLabel} | ${savedIngestSettings.embedding_model}`
         : null;
     const blockingIssues = checkpoint?.blocking_issues ?? [];
-    const exactOnlyAllowedBlockingCodes = new Set(["chunk_vector_store_unreadable", "unique_node_vector_store_unreadable"]);
-    const hasExactOnlyBlockingIssue = blockingIssues.some((issue) => !exactOnlyAllowedBlockingCodes.has(String(issue?.code ?? "")));
-    const canResolveEntitiesBase = !ingesting && hasAnyIngested && !hasExactOnlyBlockingIssue;
     const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
         lookup[source.source_id] = source.display_name;
@@ -1345,24 +1357,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const hasAnySafetyQueueHistory = totalReviewCount > 0;
     const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
     const showSafetyQueueUnavailableState = safetyReviews.length === 0 && Boolean(safetyReviewLoadError);
-    const canResolveExactThenAi = !ingesting && allComplete && failedRecordCount === 0 && blockingIssueCount === 0 && !hasUnresolvedSafetyQueue;
-    const canResolveEntities = canResolveEntitiesBase;
+    const exactOnlyEligibility = entityResolutionEligibility?.exact_only ?? null;
+    const exactThenAiEligibility = entityResolutionEligibility?.exact_then_ai ?? null;
+    const canResolveEntities = !ingesting && exactOnlyEligibility?.can_run === true;
+    const canResolveExactThenAi = !ingesting && exactThenAiEligibility?.can_run === true;
     const resolveEntitiesDisabledReason = ingesting
         ? "Wait for ingestion to finish before starting entity resolution."
-        : hasExactOnlyBlockingIssue
-            ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running entity resolution.")
-            : !hasAnyIngested
-                ? "Ingest at least one source before running entity resolution."
-                : null;
+        : (exactOnlyEligibility?.reason ?? (!hasAnyIngested
+            ? "Ingest at least one source before running entity resolution."
+            : "Entity resolution is not currently available for this world."));
     const exactThenAiDisabledReason = ingesting
         ? "Wait for ingestion to finish before starting entity resolution."
-        : blockingIssueCount > 0
-            ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running exact + chooser/combiner.")
-            : hasUnresolvedSafetyQueue
-                ? "Resolve or reset pending safety review items before running exact + chooser/combiner."
-                : !allComplete || failedRecordCount > 0
-                    ? "Finish ingestion and retry remaining failures before running exact + chooser/combiner."
-                    : null;
+        : (exactThenAiEligibility?.reason ?? (!hasAnyIngested
+            ? "Ingest at least one source before running exact + chooser/combiner."
+            : "Exact + chooser/combiner is not currently available for this world."));
     const rebuildBlockedReason = unresolvedReviewCount > 0
         ? "This world has unresolved safety review items. Resolve or reset them before running Re-ingest."
         : null;
