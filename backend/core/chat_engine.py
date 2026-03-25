@@ -426,13 +426,13 @@ def stream_chat(
 
         km = get_key_manager()
         backoff = [2, 4, 8]
-        max_retries = 3
+        tried_key_indices: set[int] = set()
 
-        for attempt in range(max_retries):
+        while True:
             key_idx: int | None = None
             emitted_token = False
             try:
-                api_key, key_idx = km.wait_for_available_key()
+                api_key, key_idx = km.wait_for_request_key(tried_key_indices)
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content_stream(
                     model=model_name,
@@ -479,9 +479,10 @@ def stream_chat(
                 transient_kind = classify_transient_provider_error(e)
                 if transient_kind and key_idx is not None:
                     km.report_error(key_idx, transient_kind)
-                    if attempt < max_retries - 1:
-                        time.sleep(jittered_delay(backoff[attempt]))
-                        continue
+                    tried_key_indices.add(key_idx)
+                    delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
+                    time.sleep(jittered_delay(delay))
+                    continue
                 raise
 
     except Exception as e:

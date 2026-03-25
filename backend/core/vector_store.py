@@ -213,15 +213,19 @@ class VectorStore:
         candidates = self._candidate_embedding_models()
         last_error: Exception | None = None
         key_manager = _get_provider_key_manager(self.embedding_provider)
-        current_api_key = api_key
-        current_key_index = self._lookup_key_index(current_api_key, set())
-        used_key_indices: set[int] = set()
-        max_key_attempts = max(3, key_manager.key_count * 2)
+        tried_key_indices: set[int] = set()
+        if api_key:
+            existing_index = self._lookup_key_index(api_key, set())
+            if existing_index is not None:
+                current_api_key = api_key
+                current_key_index = existing_index
+            else:
+                current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
+        else:
+            current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
 
-        for attempt in range(max_key_attempts):
+        while True:
             client = self._get_embed_client(current_api_key)
-            rotate_key = False
-
             for model_name in candidates:
                 try:
                     payload: str | list[str] = texts if len(texts) > 1 else texts[0]
@@ -239,22 +243,18 @@ class VectorStore:
                     transient_kind = classify_transient_provider_error(e)
 
                     if transient_kind and current_key_index is not None:
-                        used_key_indices.add(current_key_index)
+                        tried_key_indices.add(current_key_index)
                         key_manager.report_error(current_key_index, transient_kind)
-                        current_api_key, current_key_index = key_manager.wait_for_available_key()
-                        rotate_key = True
+                        time.sleep(jittered_delay(0.5))
+                        current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
                         break
 
                     if ("not found" in message or "not supported" in message) and model_name != candidates[-1]:
                         continue
-                    rotate_key = False
-                    break
-
-            if rotate_key:
-                if attempt < max_key_attempts - 1:
-                    time.sleep(jittered_delay(0.5))
-                continue
-            break
+                    raise
+            else:
+                break
+            continue
 
         if last_error:
             raise last_error

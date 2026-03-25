@@ -21,7 +21,13 @@ from .config import (
     resolve_groq_reasoning_effort,
     resolve_slot_provider,
 )
-from .key_manager import classify_transient_provider_error, get_key_manager, jittered_delay
+from .key_manager import (
+    AllKeysInCooldownError,
+    RequestKeyPoolExhaustedError,
+    classify_transient_provider_error,
+    get_key_manager,
+    jittered_delay,
+)
 from .openai_compatible_provider import async_create_openai_compatible_chat_completion
 
 logger = logging.getLogger(__name__)
@@ -177,7 +183,10 @@ async def _call_agent(
     backoff = [2, 4, 8]
     last_error: Exception | AgentCallError | None = None
 
-    for attempt in range(max_retries):
+    attempt = 0
+    tried_key_indices: set[int] = set()
+
+    while attempt < max_retries:
         key_idx: int | None = None
         try:
             if provider == "gemini":
@@ -196,7 +205,7 @@ async def _call_agent(
                         types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
                     ]
 
-                api_key, key_idx = await km.await_active_key()
+                api_key, key_idx = await km.await_request_key(tried_key_indices)
                 client = genai.Client(api_key=api_key)
 
                 config_kwargs: dict[str, Any] = {
@@ -309,6 +318,8 @@ async def _call_agent(
             if e.kind == "safety_block":
                 raise e
             last_error = e
+        except (AllKeysInCooldownError, RequestKeyPoolExhaustedError):
+            raise
         except Exception as e:
             transient_kind = classify_transient_provider_error(e)
             if transient_kind and key_idx is not None:
@@ -321,14 +332,16 @@ async def _call_agent(
                     key_idx,
                     e,
                 )
-                if transient_kind == "429" and attempt >= max_retries - 1:
-                    raise AgentCallError("rate_limit", "Provider rate limit encountered.")
+                tried_key_indices.add(key_idx)
+                await asyncio.sleep(jittered_delay(backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]))
+                continue
             else:
                 logger.warning(f"Agent {prompt_key} attempt {attempt + 1}: {e}")
             last_error = e
 
-        if attempt < max_retries - 1:
-            await asyncio.sleep(jittered_delay(backoff[attempt]))
+        attempt += 1
+        if attempt < max_retries:
+            await asyncio.sleep(jittered_delay(backoff[min(attempt - 1, len(backoff) - 1)]))
 
     logger.error(f"Agent {prompt_key}: all {max_retries} retries failed. Last error: {last_error}")
     if isinstance(last_error, AgentCallError):

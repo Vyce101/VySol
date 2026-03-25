@@ -206,6 +206,7 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const [toast, setToast] = useState("");
     const [newCredentialLabel, setNewCredentialLabel] = useState("");
     const [newCredentialValues, setNewCredentialValues] = useState<Record<string, string>>({});
+    const [credentialLabelDrafts, setCredentialLabelDrafts] = useState<Record<string, string>>({});
 
     const showToast = (message: string) => {
         setToast(message);
@@ -316,6 +317,20 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
     const deleteCredential = async (credentialId: string) => {
         await apiFetch(`/settings/key-library/${selectedProvider}/${credentialId}`, { method: "DELETE" });
         await Promise.all([loadAll(), refreshKeyLibrary()]);
+    };
+
+    const saveCredentialLabel = async (credentialId: string, label: string) => {
+        const trimmed = label.trim();
+        await apiFetch(`/settings/key-library/${selectedProvider}`, {
+            method: "POST",
+            body: JSON.stringify({
+                id: credentialId,
+                label: trimmed || undefined,
+            }),
+        });
+        setCredentialLabelDrafts((current) => ({ ...current, [credentialId]: trimmed }));
+        await Promise.all([loadAll(), refreshKeyLibrary()]);
+        showToast("Credential renamed");
     };
 
     const anyGeminiSelected = useMemo(() => {
@@ -550,7 +565,13 @@ export function SettingsSidebar({ onClose }: { onClose: () => void }) {
                                     {selectedLibrary?.entries.map((entry) => (
                                         <div key={entry.id} style={rowCardStyle}>
                                             <div style={{ flex: 1, minWidth: 0 }}>
-                                                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>{entry.label}</div>
+                                                <TextField
+                                                    label="Label"
+                                                    value={credentialLabelDrafts[entry.id] ?? entry.label}
+                                                    onChange={(value) => setCredentialLabelDrafts((current) => ({ ...current, [entry.id]: value }))}
+                                                    onSave={(value) => saveCredentialLabel(entry.id, value)}
+                                                    hideLabel
+                                                />
                                                 {entry.has_api_key ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{entry.api_key_masked}</div> : null}
                                                 {entry.base_url ? <div style={{ fontSize: 12, color: "var(--text-subtle)", fontFamily: "monospace" }}>{entry.base_url}</div> : null}
                                                 {!entry.required_ready ? <div style={{ fontSize: 11, color: "var(--error)" }}>Missing required fields for this provider.</div> : null}

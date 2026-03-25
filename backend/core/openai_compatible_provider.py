@@ -48,12 +48,13 @@ def stream_openai_compatible_chat(
     km = _get_provider_key_manager(provider)
     base_url = _provider_base_url(provider)
     backoff = [2, 4, 8]
+    tried_key_indices: set[int] = set()
 
-    for attempt in range(max_retries):
+    while True:
         key_idx: int | None = None
         emitted = False
         try:
-            api_key, key_idx = km.wait_for_available_key()
+            api_key, key_idx = km.wait_for_request_key(tried_key_indices)
             with httpx.stream(
                 "POST",
                 f"{base_url}/chat/completions",
@@ -80,10 +81,12 @@ def stream_openai_compatible_chat(
             transient_kind = classify_transient_provider_error(exc)
             if transient_kind and key_idx is not None:
                 km.report_error(key_idx, transient_kind)
-                if attempt < max_retries - 1:
+                tried_key_indices.add(key_idx)
+                if len(tried_key_indices) <= max(max_retries, 1):
                     import time
-                    time.sleep(jittered_delay(backoff[attempt]))
-                    continue
+                    delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
+                    time.sleep(jittered_delay(delay))
+                continue
             raise
 
 
@@ -98,11 +101,12 @@ def create_openai_compatible_chat_completion(
     km = _get_provider_key_manager(provider)
     base_url = _provider_base_url(provider)
     backoff = [2, 4, 8]
+    tried_key_indices: set[int] = set()
 
-    for attempt in range(max_retries):
+    while True:
         key_idx: int | None = None
         try:
-            api_key, key_idx = km.wait_for_available_key()
+            api_key, key_idx = km.wait_for_request_key(tried_key_indices)
             response = httpx.post(
                 f"{base_url}/chat/completions",
                 headers=_headers(api_key),
@@ -115,13 +119,13 @@ def create_openai_compatible_chat_completion(
             transient_kind = classify_transient_provider_error(exc)
             if transient_kind and key_idx is not None:
                 km.report_error(key_idx, transient_kind)
-                if attempt < max_retries - 1:
+                tried_key_indices.add(key_idx)
+                if len(tried_key_indices) <= max(max_retries, 1):
                     import time
-                    time.sleep(jittered_delay(backoff[attempt]))
-                    continue
+                    delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
+                    time.sleep(jittered_delay(delay))
+                continue
             raise
-
-    raise RuntimeError("OpenAI-compatible provider request failed.")
 
 
 async def async_create_openai_compatible_chat_completion(
@@ -135,12 +139,13 @@ async def async_create_openai_compatible_chat_completion(
     km = _get_provider_key_manager(provider)
     base_url = _provider_base_url(provider)
     backoff = [2, 4, 8]
+    tried_key_indices: set[int] = set()
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(max_retries):
+        while True:
             key_idx: int | None = None
             try:
-                api_key, key_idx = await km.await_active_key()
+                api_key, key_idx = await km.await_request_key(tried_key_indices)
                 response = await client.post(
                     f"{base_url}/chat/completions",
                     headers=_headers(api_key),
@@ -152,9 +157,9 @@ async def async_create_openai_compatible_chat_completion(
                 transient_kind = classify_transient_provider_error(exc)
                 if transient_kind and key_idx is not None:
                     km.report_error(key_idx, transient_kind)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(jittered_delay(backoff[attempt]))
-                        continue
+                    tried_key_indices.add(key_idx)
+                    if len(tried_key_indices) <= max(max_retries, 1):
+                        delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
+                        await asyncio.sleep(jittered_delay(delay))
+                    continue
                 raise
-
-    raise RuntimeError("OpenAI-compatible provider request failed.")

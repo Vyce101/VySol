@@ -19,6 +19,10 @@ class AllKeysInCooldownError(RuntimeError):
         super().__init__(f"All API keys are in cooldown. Retry in {self.retry_after_seconds:.0f} seconds.")
 
 
+class RequestKeyPoolExhaustedError(RuntimeError):
+    """Raised when a single request has already tried every currently available key."""
+
+
 _RATE_LIMIT_COOLDOWN_SECONDS = 65.0
 _SERVER_ERROR_COOLDOWN_SECONDS = 10.0
 _TRANSIENT_COOLDOWN_SECONDS = 15.0
@@ -124,6 +128,28 @@ class KeyManager:
         min_wait = min(self._cooldown_remaining_unlocked(i) for i in range(key_count))
         return AllKeysInCooldownError(min_wait)
 
+    def _next_available_index_unlocked(self, *, exclude_indices: set[int] | None = None) -> int | None:
+        excluded = exclude_indices or set()
+        key_count = len(self.api_keys)
+
+        if self.mode == "ROUND_ROBIN":
+            for offset in range(key_count):
+                idx = (self._current_index + offset) % key_count
+                if idx in excluded or self._is_in_cooldown_unlocked(idx):
+                    continue
+                self._call_count += 1
+                self._current_index = (idx + 1) % key_count
+                return idx
+            return None
+
+        for offset in range(key_count):
+            idx = (self._current_index + offset) % key_count
+            if idx in excluded or self._is_in_cooldown_unlocked(idx):
+                continue
+            self._current_index = idx
+            return idx
+        return None
+
     def get_active_key(self) -> tuple[str, int]:
         """Return (key, index). Raises AllKeysInCooldownError if all keys are cooling down."""
         with self._lock:
@@ -148,6 +174,26 @@ class KeyManager:
                     return self.api_keys[idx], idx
             raise self._all_keys_cooling_down_error_unlocked(key_count)
 
+    def get_request_key(self, tried_indices: set[int] | None = None) -> tuple[str, int]:
+        """Return the next available key for one logical request, excluding already-tried indices."""
+        with self._lock:
+            if not self.api_keys:
+                raise RuntimeError(f"No API keys configured for {self.provider}. Add keys in Key Library.")
+
+            excluded = set(tried_indices or ())
+            idx = self._next_available_index_unlocked(exclude_indices=excluded)
+            if idx is not None:
+                return self.api_keys[idx], idx
+
+            remaining = [index for index in range(len(self.api_keys)) if index not in excluded]
+            if not remaining:
+                raise RequestKeyPoolExhaustedError(
+                    f"Every configured key for {self.provider} has already been tried for this request."
+                )
+
+            min_wait = min(self._cooldown_remaining_unlocked(index) for index in remaining)
+            raise AllKeysInCooldownError(min_wait)
+
     def wait_for_available_key(self, *, jitter_seconds: float = 0.25) -> tuple[str, int]:
         """Block until a key is available, sleeping through cooldown windows."""
         while True:
@@ -156,12 +202,44 @@ class KeyManager:
             except AllKeysInCooldownError as exc:
                 time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
+    def wait_for_request_key(
+        self,
+        tried_indices: set[int] | None = None,
+        *,
+        jitter_seconds: float = 0.25,
+    ) -> tuple[str, int]:
+        """Wait for the first available key, then only rotate across untried keys for this request."""
+        excluded = set(tried_indices or ())
+        while True:
+            try:
+                return self.get_request_key(excluded)
+            except AllKeysInCooldownError as exc:
+                if excluded:
+                    raise
+                time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+
     async def await_active_key(self, *, jitter_seconds: float = 0.25) -> tuple[str, int]:
         """Async variant of wait_for_available_key()."""
         while True:
             try:
                 return self.get_active_key()
             except AllKeysInCooldownError as exc:
+                await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+
+    async def await_request_key(
+        self,
+        tried_indices: set[int] | None = None,
+        *,
+        jitter_seconds: float = 0.25,
+    ) -> tuple[str, int]:
+        """Async variant of wait_for_request_key()."""
+        excluded = set(tried_indices or ())
+        while True:
+            try:
+                return self.get_request_key(excluded)
+            except AllKeysInCooldownError as exc:
+                if excluded:
+                    raise
                 await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
     def report_error(self, key_index: int, error_type: str) -> None:

@@ -421,6 +421,76 @@ def test_save_settings_persists_legacy_api_key_enabled_state_into_gemini_library
         _cleanup_temp_paths(settings_path, prompts_path)
 
 
+def test_save_settings_preserves_existing_provider_labels_when_legacy_api_keys_are_reposted(monkeypatch):
+    settings_path, prompts_path = _make_temp_paths("settings-preserve-provider-labels")
+    try:
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": config.SETTINGS_SCHEMA_VERSION,
+                    "settings_presets": [
+                        {
+                            "id": "default",
+                            "name": "Default",
+                            "locked": True,
+                            "values": dict(config.PRESET_SETTINGS_DEFAULTS),
+                        }
+                    ],
+                    "active_settings_preset_id": "default",
+                    "provider_credentials": {
+                        "gemini": [
+                            {
+                                "id": "gem-1",
+                                "label": "Main Gemini Key",
+                                "enabled": True,
+                                "api_key": "k1",
+                            },
+                            {
+                                "id": "gem-2",
+                                "label": "Backup Gemini Key",
+                                "enabled": False,
+                                "api_key": "k2",
+                            },
+                        ],
+                        "groq": [],
+                        "intenserp": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+        config.save_settings(
+            {
+                "api_keys": [
+                    {"value": "k1", "enabled": True},
+                    {"value": "k2", "enabled": False},
+                ],
+            }
+        )
+
+        saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        assert saved["provider_credentials"]["gemini"] == [
+            {
+                "id": "gem-1",
+                "label": "Main Gemini Key",
+                "enabled": True,
+                "api_key": "k1",
+            },
+            {
+                "id": "gem-2",
+                "label": "Backup Gemini Key",
+                "enabled": False,
+                "api_key": "k2",
+            },
+        ]
+    finally:
+        _cleanup_temp_paths(settings_path, prompts_path)
+
+
 def test_get_settings_reports_active_and_total_api_key_counts(monkeypatch):
     settings_path, prompts_path = _make_temp_paths("settings-key-counts")
     try:

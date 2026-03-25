@@ -99,3 +99,29 @@ def test_round_robin_does_not_skip_next_key_after_transient_cooldown():
     manager.report_error(0, "timeout")
 
     assert manager.get_active_key() == ("k2", 1)
+
+
+def test_wait_for_request_key_exhausts_currently_available_keys_before_failing(monkeypatch):
+    manager = key_manager.KeyManager(api_keys=["k1", "k2", "k3"], mode="FAIL_OVER")
+    now = 100.0
+
+    monkeypatch.setattr(key_manager.time, "time", lambda: now)
+    manager.report_error(2, "429")
+
+    tried: set[int] = set()
+    assert manager.wait_for_request_key(tried) == ("k1", 0)
+    tried.add(0)
+    assert manager.wait_for_request_key(tried) == ("k2", 1)
+    tried.add(1)
+
+    with pytest.raises(key_manager.AllKeysInCooldownError) as exc:
+        manager.wait_for_request_key(tried)
+
+    assert exc.value.retry_after_seconds == 65.0
+
+
+def test_get_request_key_raises_when_every_key_was_already_tried():
+    manager = key_manager.KeyManager(api_keys=["k1", "k2"], mode="ROUND_ROBIN")
+
+    with pytest.raises(key_manager.RequestKeyPoolExhaustedError):
+        manager.get_request_key({0, 1})

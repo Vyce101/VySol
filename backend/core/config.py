@@ -697,14 +697,29 @@ def _apply_chat_provider_alias(target: dict[str, Any], provider_value: object) -
         target["default_model_chat_provider"] = PROVIDER_GEMINI
 
 
-def _build_legacy_provider_credentials_from_api_keys(api_keys_value: object) -> list[dict[str, Any]]:
+def _build_legacy_provider_credentials_from_api_keys(
+    api_keys_value: object,
+    *,
+    existing_entries: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     normalized_keys = normalize_api_key_entries(api_keys_value)
+    existing = list(existing_entries or [])
     output: list[dict[str, Any]] = []
     for index, entry in enumerate(normalized_keys, start=1):
+        matching_existing = next(
+            (
+                item
+                for item in existing
+                if str(item.get("api_key") or "").strip() == str(entry.get("value") or "").strip()
+            ),
+            None,
+        )
+        if matching_existing is None and index - 1 < len(existing):
+            matching_existing = existing[index - 1]
         output.append(
             {
-                "id": uuid4().hex,
-                "label": _default_provider_label(PROVIDER_GEMINI, index),
+                "id": str((matching_existing or {}).get("id") or uuid4().hex),
+                "label": str((matching_existing or {}).get("label") or "").strip() or _default_provider_label(PROVIDER_GEMINI, index),
                 "enabled": bool(entry.get("enabled", True)),
                 "api_key": str(entry.get("value") or "").strip(),
             }
@@ -1047,7 +1062,10 @@ def save_settings(settings: dict) -> None:
     incoming = dict(settings or {})
 
     if "api_keys" in incoming:
-        raw_settings["provider_credentials"][PROVIDER_GEMINI] = _build_legacy_provider_credentials_from_api_keys(incoming.get("api_keys"))
+        raw_settings["provider_credentials"][PROVIDER_GEMINI] = _build_legacy_provider_credentials_from_api_keys(
+            incoming.get("api_keys"),
+            existing_entries=raw_settings.get("provider_credentials", {}).get(PROVIDER_GEMINI, []),
+        )
     if "provider_credentials" in incoming and isinstance(incoming["provider_credentials"], dict):
         raw_settings["provider_credentials"] = _normalize_provider_credentials_map(incoming["provider_credentials"])
     if "chat_provider" in incoming and "default_model_chat_provider" not in incoming:

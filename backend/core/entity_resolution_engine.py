@@ -597,14 +597,18 @@ async def _sleep_with_abort(expected_event: threading.Event | None, seconds: flo
 
 async def _await_available_key(
     abort_event: threading.Event | None,
+    tried_indices: set[int] | None = None,
 ) -> tuple[str, int]:
     key_manager = get_key_manager()
+    excluded = set(tried_indices or ())
     while True:
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
         try:
-            return key_manager.get_active_key()
+            return key_manager.get_request_key(excluded)
         except AllKeysInCooldownError as exc:
+            if excluded:
+                raise
             await _sleep_with_abort(abort_event, jittered_delay(exc.retry_after_seconds))
 
 
@@ -620,14 +624,13 @@ async def _embed_texts_abortable(
     candidates = vector_store._candidate_embedding_models()
     key_manager = get_key_manager()
     last_error: Exception | None = None
-    current_api_key, current_key_index = await _await_available_key(abort_event)
-    max_key_attempts = max(3, key_manager.key_count * 2)
+    tried_key_indices: set[int] = set()
+    current_api_key, current_key_index = await _await_available_key(abort_event, tried_key_indices)
 
-    for attempt in range(max_key_attempts):
+    while True:
         if abort_event is not None and abort_event.is_set():
             raise asyncio.CancelledError()
         client = vector_store._get_embed_client(current_api_key)
-        rotate_key = False
 
         for model_name in candidates:
             if abort_event is not None and abort_event.is_set():
@@ -648,19 +651,16 @@ async def _embed_texts_abortable(
                 transient_kind = classify_transient_provider_error(exc)
                 if transient_kind and current_key_index is not None:
                     key_manager.report_error(current_key_index, transient_kind)
-                    current_api_key, current_key_index = await _await_available_key(abort_event)
-                    rotate_key = True
+                    tried_key_indices.add(current_key_index)
+                    await _sleep_with_abort(abort_event, jittered_delay(0.5))
+                    current_api_key, current_key_index = await _await_available_key(abort_event, tried_key_indices)
                     break
                 if ("not found" in message or "not supported" in message) and model_name != candidates[-1]:
                     continue
-                rotate_key = False
-                break
-
-        if rotate_key:
-            if attempt < max_key_attempts - 1:
-                await _sleep_with_abort(abort_event, jittered_delay(0.5))
-            continue
-        break
+                raise
+        else:
+            break
+        continue
 
     if last_error:
         raise last_error
