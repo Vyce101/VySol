@@ -4,6 +4,21 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-25
+
+### Changed
+
+- Changed active-ingest graph handling to keep a committed in-memory graph session per world, serve graph/chat reads from the last durably saved snapshot during ingest, and acknowledge aborts without waiting for large graph saves to finish first.
+- Changed chat on partial worlds to degrade gracefully instead of hard-blocking when chunk or unique-node vector coverage is incomplete, while still using whatever chunk and graph context is currently available.
+- Changed entity resolution so `Exact only` can now run on aborted or partial worlds after ingest stops, while `Exact + AI` still waits for a fully completed world.
+- Changed Safety Queue behavior after entity resolution so repaired chunks that were already made live and used by the last entity-resolution run become read-only until a later graph-changing ingest starts again.
+
+### Fixed
+
+- Fixed resume/recovery so node-only unique-node embedding gaps no longer trigger chunk re-embedding.
+- Fixed resume/retry cleanup so chunks that already have chunk vectors no longer delete and rebuild those vectors just because extraction coverage needs to be repaired.
+- Fixed chat retrieval to reuse partial unique-node coverage and restore `Context Graph` results instead of dropping graph context whenever the unique-node index is incomplete.
+
 ## [0.2.0] - 2026-03-25
 
 ### Changed
