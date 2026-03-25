@@ -4,6 +4,17 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-25
+
+### Changed
+
+- Changed graph extraction defaults to use a new Graph Architect prompt that keeps the app's `nodes`/`edges` JSON schema while asking for more detailed relationship descriptions.
+- Changed ingest to stream chunk embedding, graph extraction/glean, and unique-node embedding in parallel so chunk vectors start earlier and node vectors no longer wait for the end of the run.
+
+### Fixed
+
+- Fixed ingest durability and progress tracking so checkpoints only advance after both chunk embedding and durable extraction succeed, resume no longer skips extraction for chunk-only vector hits, and staged node-vector work no longer overstates committed graph coverage during active runs.
+
 ## [0.1.1] - 2026-03-24
 
 ### Added
