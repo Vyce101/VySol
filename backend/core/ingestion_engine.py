@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
 import os
 import threading
 import time
+from uuid import uuid4
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Literal
 
@@ -62,6 +64,7 @@ WaitStage = Literal["extracting", "embedding"]
 ProgressScope = Literal["source", "world"]
 IngestProgressPhase = Literal["extracting", "chunk_embedding", "unique_node_rebuild", "audit_finalization", "aborting", "idle"]
 _STALE_RUN_GRACE_SECONDS = 15
+_CHUNK_VECTOR_BATCH_SIZE = 8
 _UNIQUE_NODE_VECTOR_BATCH_SIZE = 8
 _WAIT_LOG_THRESHOLD_SECONDS = 2.0
 _WAIT_STATE_PRIORITY: dict[str, int] = {
@@ -150,6 +153,19 @@ class _StageScheduler:
 
 _extraction_scheduler = _StageScheduler("graph_extraction")
 _embedding_scheduler = _StageScheduler("embedding")
+_node_embedding_scheduler = _StageScheduler("node_embedding")
+
+
+@dataclass
+class _StagedChunkArtifacts:
+    chunk_id: str
+    book_number: int
+    chunk_index: int
+    nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    edges: list[dict[str, Any]] = field(default_factory=list)
+    node_uuid_by_ref: dict[str, str] = field(default_factory=dict)
+    node_uuid_by_display_ref: dict[str, str | None] = field(default_factory=dict)
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def _now_iso() -> str:
@@ -300,6 +316,7 @@ def _wake_stage_schedulers() -> None:
         return
     loop.create_task(_extraction_scheduler.wake_all())
     loop.create_task(_embedding_scheduler.wake_all())
+    loop.create_task(_node_embedding_scheduler.wake_all())
 
 
 def _mark_ingestion_live(
@@ -639,8 +656,7 @@ def _live_stage_counters(meta: dict) -> dict[str, int]:
     blocking_issues = len(list(meta.get("ingestion_blocking_issues", [])))
     current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
     embedded_unique_nodes = _coerce_non_negative_int(meta.get("embedded_unique_nodes"))
-    if current_unique_nodes > 0:
-        embedded_unique_nodes = min(embedded_unique_nodes, current_unique_nodes)
+    embedded_unique_nodes = min(embedded_unique_nodes, current_unique_nodes)
     return {
         "expected_chunks": expected_chunks,
         "extracted_chunks": extracted_chunks,
@@ -2125,6 +2141,111 @@ def _normalize_chunk_local_ref(value: str | None) -> str:
     return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
 
 
+def _stage_chunk_graph_artifacts(
+    stage: _StagedChunkArtifacts,
+    *,
+    nodes: list[Any],
+    edges: list[Any],
+) -> list[dict]:
+    new_node_records: list[dict] = []
+
+    for node in nodes:
+        node_ref = _normalize_chunk_local_ref(getattr(node, "node_id", ""))
+        display_ref = _normalize_chunk_local_ref(getattr(node, "display_name", ""))
+
+        existing_uuid = stage.node_uuid_by_ref.get(node_ref) if node_ref else None
+        if existing_uuid is None and display_ref:
+            existing_uuid = stage.node_uuid_by_display_ref.get(display_ref)
+
+        if existing_uuid:
+            continue
+
+        node_uuid = str(uuid4())
+        attrs = {
+            "node_id": node_uuid,
+            "display_name": getattr(node, "display_name", ""),
+            "normalized_id": _normalize_chunk_local_ref(getattr(node, "node_id", "") or getattr(node, "display_name", "")),
+            "description": getattr(node, "description", ""),
+            "claims": [],
+            "source_chunks": [stage.chunk_id],
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        stage.nodes[node_uuid] = {
+            "id": node_uuid,
+            "attrs": attrs,
+        }
+        if node_ref:
+            stage.node_uuid_by_ref[node_ref] = node_uuid
+        if display_ref:
+            if display_ref not in stage.node_uuid_by_display_ref:
+                stage.node_uuid_by_display_ref[display_ref] = node_uuid
+            elif stage.node_uuid_by_display_ref[display_ref] != node_uuid:
+                stage.node_uuid_by_display_ref[display_ref] = None
+
+        new_node_records.append(
+            {
+                "id": node_uuid,
+                "display_name": attrs["display_name"],
+                "normalized_id": attrs["normalized_id"],
+                "description": attrs["description"],
+                "claims": attrs["claims"],
+                "source_chunks": list(attrs["source_chunks"]),
+            }
+        )
+
+    def resolve_uuid(raw_ref: str) -> str | None:
+        normalized_ref = _normalize_chunk_local_ref(raw_ref)
+        if not normalized_ref:
+            return None
+        return stage.node_uuid_by_ref.get(normalized_ref) or stage.node_uuid_by_display_ref.get(normalized_ref)
+
+    for edge in edges:
+        source_uuid = resolve_uuid(getattr(edge, "source_node_id", ""))
+        target_uuid = resolve_uuid(getattr(edge, "target_node_id", ""))
+        if not source_uuid or not target_uuid:
+            logger.warning(
+                "Edge skipped for staged chunk %s because one or both endpoints were not created in this chunk: %s -> %s",
+                stage.chunk_id,
+                getattr(edge, "source_node_id", ""),
+                getattr(edge, "target_node_id", ""),
+            )
+            continue
+        stage.edges.append(
+            {
+                "source": source_uuid,
+                "target": target_uuid,
+                "attrs": {
+                    "edge_id": str(uuid4()),
+                    "source_node_id": source_uuid,
+                    "target_node_id": target_uuid,
+                    "description": getattr(edge, "description", ""),
+                    "strength": getattr(edge, "strength", 5),
+                    "source_book": stage.book_number,
+                    "source_chunk": stage.chunk_index,
+                    "created_at": _now_iso(),
+                },
+            }
+        )
+
+    return new_node_records
+
+
+def _staged_chunk_graph_snapshot(stage: _StagedChunkArtifacts) -> dict:
+    return {
+        "nodes": [stage.nodes[node_id] for node_id in sorted(stage.nodes.keys())],
+        "edges": list(stage.edges),
+    }
+
+
+def _staged_chunk_node_ids(stage: _StagedChunkArtifacts) -> list[str]:
+    return sorted(stage.nodes.keys())
+
+
+def _staged_chunk_has_graph_coverage(stage: _StagedChunkArtifacts) -> bool:
+    return bool(stage.nodes)
+
+
 def _persist_chunk_graph_artifacts(
     graph_store: GraphStore,
     *,
@@ -2468,6 +2589,7 @@ def _record_stage_failure(
     node_id: str | None = None,
     node_display_name: str | None = None,
     parent_chunk_id: str | None = None,
+    clear_embedded_chunk: bool = True,
 ) -> None:
     _ensure_source_tracking(source)
     stage_failures = source["stage_failures"]
@@ -2515,7 +2637,8 @@ def _record_stage_failure(
     source["embedded_chunks"] = _normalize_index_list(source.get("embedded_chunks", []))
     if stage == "extraction":
         source["extracted_chunks"] = [i for i in source["extracted_chunks"] if i != chunk_index]
-        source["embedded_chunks"] = [i for i in source["embedded_chunks"] if i != chunk_index]
+        if clear_embedded_chunk:
+            source["embedded_chunks"] = [i for i in source["embedded_chunks"] if i != chunk_index]
     else:
         source["embedded_chunks"] = [i for i in source["embedded_chunks"] if i != chunk_index]
 
@@ -3449,7 +3572,7 @@ def _build_chunk_plan(
             start_from = max(0, int(checkpoint.get("last_completed_chunk_index", -1)) + 1)
         if resume:
             for idx in range(max(0, chunks_total)):
-                if idx in embedded_chunks:
+                if idx in extracted_chunks and idx in embedded_chunks:
                     continue
                 if idx in extracted_chunks:
                     plan[idx] = "embedding_only"
@@ -3506,6 +3629,51 @@ def _build_chunk_plan(
         plan.pop(idx, None)
 
     return {idx: plan[idx] for idx in sorted(plan.keys())}
+
+
+def _durable_checkpoint_index_for_source(source: dict) -> int:
+    _ensure_source_tracking(source)
+    expected = max(0, int(source.get("chunk_count") or 0))
+    if expected <= 0:
+        return -1
+
+    extracted = set(_normalize_index_list(source.get("extracted_chunks", []), max_index=expected - 1))
+    embedded = set(_normalize_index_list(source.get("embedded_chunks", []), max_index=expected - 1))
+    completed = extracted & embedded
+
+    contiguous = -1
+    for idx in range(expected):
+        if idx not in completed:
+            break
+        contiguous = idx
+    return contiguous
+
+
+async def _maybe_save_source_checkpoint(
+    world_id: str,
+    source: dict,
+    *,
+    started_at: str,
+) -> None:
+    completed_index = _durable_checkpoint_index_for_source(source)
+    if completed_index < 0:
+        return
+
+    checkpoint = _load_checkpoint(world_id) or {}
+    existing_index = int(checkpoint.get("last_completed_chunk_index", -1))
+    if checkpoint.get("source_id") == source.get("source_id") and existing_index >= completed_index:
+        return
+
+    await _save_checkpoint_async(
+        world_id,
+        {
+            "source_id": source.get("source_id"),
+            "last_completed_chunk_index": completed_index,
+            "chunks_total": int(source.get("chunk_count") or 0),
+            "started_at": checkpoint.get("started_at", started_at),
+            "updated_at": _now_iso(),
+        },
+    )
 
 
 async def start_ingestion(
@@ -3659,12 +3827,15 @@ async def start_ingestion(
             concurrency=int(settings.get("embedding_concurrency", 8)),
             cooldown_seconds=float(settings.get("embedding_cooldown_seconds", 0)),
         )
+        await _node_embedding_scheduler.configure(
+            concurrency=int(settings.get("node_embedding_concurrency", settings.get("embedding_concurrency", 8))),
+            cooldown_seconds=float(settings.get("embedding_cooldown_seconds", 0)),
+        )
 
         graph_lock = _get_async_lock(world_id, _graph_locks)
         vector_lock = _get_async_lock(world_id, _vector_locks)
         meta_lock = _get_async_lock(world_id, _meta_locks)
-        touched_unique_node_ids: set[str] = set()
-        touched_unique_node_ids_lock = asyncio.Lock()
+        chunk_embedding_batch_size = max(1, int(settings.get("chunk_embedding_batch_size", _CHUNK_VECTOR_BATCH_SIZE)))
 
         async def set_world_progress_phase(
             phase: IngestProgressPhase,
@@ -3796,372 +3967,219 @@ async def start_ingestion(
                         emit_log=acquired and not my_event.is_set() and _is_current_run(world_id, my_event),
                     )
 
-        async def process_chunk(
-            chunk_idx: int,
-            tc: Any,
-            source_id: str,
-            book_number: int,
-            temporal_chunks: list[Any],
-            source: dict,
-            mode: ChunkMode,
-        ) -> None:
-            if my_event.is_set() or not _is_current_run(world_id, my_event):
-                return
-
-            chunk = _chunk_id(world_id, source_id, chunk_idx)
-            now = _now_iso()
-            node_records_for_embedding: list[dict] = []
-            embedding_wait_agent = (
-                "embedding_rebuild"
-                if is_reembed_all
-                else ("embedding_retry" if mode == "embedding_only" else "embedding")
-            )
-
+        async def _update_live_unique_node_total() -> None:
+            async with vector_lock:
+                embedded_unique_node_total = await asyncio.to_thread(unique_node_vector_store.count)
             async with meta_lock:
+                current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
+                embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
+                meta["embedded_unique_nodes"] = embedded_unique_node_total
                 _mark_ingestion_live(meta, operation=operation_norm)
                 await _save_meta_async(world_id, meta)
 
-            if mode in ("full", "full_cleanup"):
-                extraction_slot: int | None = None
-                try:
-                    extraction_slot = await acquire_stage_slot(
-                        _extraction_scheduler,
-                        wait_state="queued_for_extraction_slot",
-                        wait_stage="extracting",
-                        source_id=source_id,
-                        book_number=book_number,
-                        chunk_index=chunk_idx,
-                        active_agent="graph_architect",
-                    )
+        async def _run_node_embedding_batch(
+            *,
+            stage: _StagedChunkArtifacts,
+            node_records: list[dict],
+            source_id: str,
+            total_chunks: int,
+        ) -> None:
+            if not node_records or stage.cancelled.is_set() or my_event.is_set() or not _is_current_run(world_id, my_event):
+                return
+
+            slot_index: int | None = None
+            try:
+                slot_index = await acquire_stage_slot(
+                    _node_embedding_scheduler,
+                    wait_state="queued_for_embedding_slot",
+                    wait_stage="embedding",
+                    source_id=source_id,
+                    book_number=stage.book_number,
+                    chunk_index=stage.chunk_index,
+                    active_agent="node_embedding",
+                )
+
+                api_key, _ = await acquire_gemini_key(
+                    source_id=source_id,
+                    book_number=stage.book_number,
+                    chunk_index=stage.chunk_index,
+                    active_agent="node_embedding",
+                )
+
+                def abort_check() -> None:
+                    if stage.cancelled.is_set():
+                        raise asyncio.CancelledError()
                     _ensure_not_aborted(world_id, my_event)
 
-                    if mode == "full_cleanup":
-                        cleanup = await _cleanup_chunk_retry_artifacts(
-                            graph_store=graph_store,
-                            vector_store=vector_store,
-                            unique_node_vector_store=unique_node_vector_store,
-                            chunk_id=chunk,
-                            source_book=book_number,
-                            source_chunk=chunk_idx,
-                            graph_lock=graph_lock,
-                            vector_lock=vector_lock,
-                        )
-                        cleanup_log = {key: value for key, value in cleanup.items() if key != "removed_node_ids"}
-                        if any(value for value in cleanup_log.values()):
-                            _append_log(
-                                world_id,
-                                {
-                                    "event": "extraction_cleanup",
-                                    "source_id": source_id,
-                                    "book_number": book_number,
-                                    "chunk_index": chunk_idx,
-                                    **cleanup_log,
-                                },
-                            )
-
-                    push_sse_event(
-                        world_id,
-                        {
-                            "event": "progress",
-                            "chunk_index": chunk_idx,
-                            "chunks_total": len(temporal_chunks),
-                            "source_id": source_id,
-                            "active_agent": "graph_architect",
-                            "book_number": book_number,
-                            **_build_progress_event(
-                                world_id,
-                                meta,
-                                source_id=source_id,
-                                active_agent="graph_architect",
-                                total_chunks=len(temporal_chunks),
-                            ),
-                        },
-                    )
-                    extraction_payload = _build_graph_extraction_payload_for_chunk(tc)
-                    ga_output, ga_usage = await _await_with_abort(
-                        world_id,
-                        my_event,
-                        ga.run(extraction_payload),
-                    )
-                    _ensure_not_aborted(world_id, my_event)
-                    final_nodes = list(ga_output.nodes)
-                    final_edges = list(ga_output.edges)
-
-                    for g_idx in range(max(0, glean_amount)):
-                        push_sse_event(
-                            world_id,
-                            {
-                                "event": "progress",
-                                "chunk_index": chunk_idx,
-                                "chunks_total": len(temporal_chunks),
-                                "source_id": source_id,
-                                "active_agent": f"graph_architect_glean_{g_idx + 1}",
-                                "book_number": book_number,
-                                **_build_progress_event(
-                                    world_id,
-                                    meta,
-                                    source_id=source_id,
-                                    active_agent=f"graph_architect_glean_{g_idx + 1}",
-                                    total_chunks=len(temporal_chunks),
-                                ),
-                            },
-                        )
-                        glean_out, _ = await _await_with_abort(
-                            world_id,
-                            my_event,
-                            ga.run_glean(extraction_payload, final_nodes, final_edges),
-                        )
-                        _ensure_not_aborted(world_id, my_event)
-                        final_nodes.extend(glean_out.nodes)
-                        final_edges.extend(glean_out.edges)
-
-                    _append_log(
-                        world_id,
-                        {
-                            "agent": "graph_architect",
-                            "chunk_index": chunk_idx,
-                            "book_number": book_number,
-                            "status": "success",
-                            "node_count": len(final_nodes),
-                            "edge_count": len(final_edges),
-                            "gleans": max(0, glean_amount),
-                            **ga_usage,
-                        },
-                    )
-
-                    _ensure_not_aborted(world_id, my_event)
-                    live_total_nodes = 0
-                    live_total_edges = 0
-                    async with graph_lock:
-                        node_records_for_embedding = await _persist_chunk_graph_artifacts_async(
-                            graph_store,
-                            nodes=final_nodes,
-                            edges=final_edges,
-                            chunk_id=chunk,
-                            book_number=book_number,
-                            chunk_index=chunk_idx,
-                        )
-                        live_total_nodes = graph_store.get_node_count()
-                        live_total_edges = graph_store.get_edge_count()
-                    _ensure_not_aborted(world_id, my_event)
-
-                    if not _chunk_has_graph_coverage(graph_store, chunk):
-                        await _cleanup_chunk_retry_artifacts(
-                            graph_store=graph_store,
-                            vector_store=vector_store,
-                            unique_node_vector_store=unique_node_vector_store,
-                            chunk_id=chunk,
-                            source_book=book_number,
-                            source_chunk=chunk_idx,
-                            graph_lock=graph_lock,
-                            vector_lock=vector_lock,
-                        )
-                        raise ExtractionCoverageError("Chunk produced no extraction coverage in graph store.")
-
-                    async with meta_lock:
-                        _mark_stage_success(source, stage="extraction", chunk_index=chunk_idx, chunk_id=chunk)
-                        meta["total_nodes"] = max(_coerce_non_negative_int(meta.get("total_nodes")), live_total_nodes)
-                        meta["total_edges"] = max(_coerce_non_negative_int(meta.get("total_edges")), live_total_edges)
-                        _mark_ingestion_live(meta, operation=operation_norm)
-                        await _save_meta_async(world_id, meta)
-
-                except asyncio.CancelledError:
+                await _upsert_unique_node_vectors(
+                    unique_node_vector_store=unique_node_vector_store,
+                    node_records=node_records,
+                    api_key=api_key,
+                    batch_size=_UNIQUE_NODE_VECTOR_BATCH_SIZE,
+                    vector_lock=vector_lock,
+                    abort_check=abort_check,
+                    awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
+                )
+                if stage.cancelled.is_set():
                     return
-                except Exception as exc:
-                    error_kind = _classify_exception_kind(exc)
-                    err_text = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
-                    safety_reason = exc.safety_reason if isinstance(exc, AgentCallError) else None
-                    logger.error("Extraction failed for chunk %s (%s): %s", chunk_idx, source_id, err_text)
-                    _append_log(
-                        world_id,
-                        {
-                            "event": "extraction_error",
-                            "source_id": source_id,
-                            "book_number": book_number,
-                            "chunk_index": chunk_idx,
-                            "error_type": error_kind,
-                            "error": err_text,
-                            "safety_reason": safety_reason,
-                        },
-                    )
-                    async with meta_lock:
-                        _record_stage_failure(
-                            source,
-                            stage="extraction",
-                            chunk_index=chunk_idx,
-                            chunk_id=chunk,
-                            source_id=source_id,
-                            book_number=book_number,
-                            error_type=error_kind,
-                            error_message=err_text,
-                        )
-                        review_item = None
-                        if error_kind == "safety_block":
-                            review_item = _upsert_safety_review(
-                                world_id,
-                                source_id=source_id,
-                                book_number=book_number,
-                                chunk_index=chunk_idx,
-                                chunk_id=chunk,
-                                original_raw_text=tc.primary_text,
-                                original_prefixed_text=tc.prefixed_text,
-                                overlap_raw_text=tc.overlap_text,
-                                safety_reason=str(safety_reason or err_text),
-                            )
-                        _mark_ingestion_live(meta, operation=operation_norm)
-                        await _save_meta_async(world_id, meta)
-                    push_sse_event(
-                        world_id,
-                        {
-                            "event": "error",
-                            "stage": "extraction",
-                            "chunk_index": chunk_idx,
-                            "book_number": book_number,
-                            "source_id": source_id,
-                            "error_type": error_kind,
-                            "safety_reason": safety_reason,
-                            "chunk_text": tc.prefixed_text if error_kind == "safety_block" else None,
-                            "review_id": review_item.get("review_id") if isinstance(review_item, dict) else None,
-                            "message": f"Extraction failed for chunk {chunk_idx}: {err_text}",
-                            "safety_review_summary": get_safety_review_summary(world_id),
-                            **_build_progress_event(
-                                world_id,
-                                meta,
-                                source_id=source_id,
-                                active_agent="graph_architect",
-                                total_chunks=len(temporal_chunks),
-                            ),
-                        },
-                    )
-                    return
-                finally:
-                    if extraction_slot is not None:
-                        await _extraction_scheduler.release(
-                            extraction_slot,
-                            aborted=my_event.is_set() or not _is_current_run(world_id, my_event),
-                        )
-            else:
+                await _update_live_unique_node_total()
                 push_sse_event(
                     world_id,
                     {
-                        "event": "progress",
-                        "chunk_index": chunk_idx,
-                        "chunks_total": len(temporal_chunks),
+                        "event": "agent_complete",
+                        "chunk_index": stage.chunk_index,
+                        "book_number": stage.book_number,
                         "source_id": source_id,
-                        "active_agent": embedding_wait_agent,
-                        "book_number": book_number,
+                        "agent": "node_embedding",
+                        "node_vector_count": len(node_records),
                         **_build_progress_event(
                             world_id,
                             meta,
                             source_id=source_id,
-                            active_agent=embedding_wait_agent,
-                            total_chunks=len(temporal_chunks),
+                            active_agent="node_embedding",
+                            total_chunks=total_chunks,
                         ),
                     },
                 )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                if stage.cancelled.is_set():
+                    return
+                error_kind = _classify_exception_kind(exc)
+                err_text = str(exc)
+                _append_log(
+                    world_id,
+                    {
+                        "event": "node_vector_error",
+                        "source_id": source_id,
+                        "book_number": stage.book_number,
+                        "chunk_index": stage.chunk_index,
+                        "error_type": error_kind,
+                        "error": err_text,
+                    },
+                )
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "error",
+                        "stage": "embedding",
+                        "chunk_index": stage.chunk_index,
+                        "book_number": stage.book_number,
+                        "source_id": source_id,
+                        "error_type": error_kind,
+                        "message": f"Node embedding failed for chunk {stage.chunk_index}: {err_text}",
+                        "safety_review_summary": get_safety_review_summary(world_id),
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            source_id=source_id,
+                            active_agent="node_embedding",
+                            total_chunks=total_chunks,
+                        ),
+                    },
+                )
+            finally:
+                if slot_index is not None:
+                    await _node_embedding_scheduler.release(
+                        slot_index,
+                        aborted=my_event.is_set() or not _is_current_run(world_id, my_event),
+                    )
 
-            _ensure_not_aborted(world_id, my_event)
+        async def _run_chunk_embedding_batch(
+            *,
+            source_id: str,
+            book_number: int,
+            source: dict,
+            temporal_chunks: list[Any],
+            batch_items: list[tuple[int, TemporalChunk, ChunkMode]],
+            started_at: str,
+        ) -> None:
+            if not batch_items or my_event.is_set() or not _is_current_run(world_id, my_event):
+                return
 
-            # Embedding stage.
-            embedding_slot: int | None = None
+            slot_index: int | None = None
+            embedding_agent = "embedding_rebuild" if is_reembed_all else "embedding"
+            chunk_ids = [_chunk_id(world_id, source_id, chunk_idx) for chunk_idx, _tc, _mode in batch_items]
             try:
-                embedding_slot = await acquire_stage_slot(
+                slot_index = await acquire_stage_slot(
                     _embedding_scheduler,
                     wait_state="queued_for_embedding_slot",
                     wait_stage="embedding",
                     source_id=source_id,
                     book_number=book_number,
-                    chunk_index=chunk_idx,
-                    active_agent=embedding_wait_agent,
+                    chunk_index=batch_items[0][0],
+                    active_agent=embedding_agent,
                 )
-                if not node_records_for_embedding:
-                    async with graph_lock:
-                        node_records_for_embedding = _chunk_node_records(graph_store, chunk)
-                _ensure_not_aborted(world_id, my_event)
-
                 api_key, _ = await acquire_gemini_key(
                     source_id=source_id,
                     book_number=book_number,
-                    chunk_index=chunk_idx,
-                    active_agent=embedding_wait_agent,
+                    chunk_index=batch_items[0][0],
+                    active_agent=embedding_agent,
                 )
                 chunk_embeddings = await _await_with_abort(
                     world_id,
                     my_event,
                     asyncio.to_thread(
                         vector_store.embed_texts,
-                        [tc.prefixed_text],
+                        [tc.prefixed_text for _chunk_idx, tc, _mode in batch_items],
                         api_key=api_key,
                     ),
                 )
                 _ensure_not_aborted(world_id, my_event)
-                chunk_embedding = chunk_embeddings[0]
 
-                _ensure_not_aborted(world_id, my_event)
                 async with vector_lock:
                     await asyncio.to_thread(
-                        vector_store.upsert_document_embedding,
-                        document_id=chunk,
-                        text=tc.prefixed_text,
-                        metadata={
-                            "world_id": world_id,
-                            "source_id": source_id,
-                            "book_number": book_number,
-                            "chunk_index": chunk_idx,
-                            "char_start": tc.char_start,
-                            "char_end": tc.char_end,
-                            "display_label": tc.display_label,
-                        },
-                        embedding=chunk_embedding,
+                        vector_store.upsert_documents_embeddings,
+                        document_ids=chunk_ids,
+                        texts=[tc.prefixed_text for _chunk_idx, tc, _mode in batch_items],
+                        metadatas=[
+                            {
+                                "world_id": world_id,
+                                "source_id": source_id,
+                                "book_number": book_number,
+                                "chunk_index": chunk_idx,
+                                "char_start": tc.char_start,
+                                "char_end": tc.char_end,
+                                "display_label": tc.display_label,
+                            }
+                            for chunk_idx, tc, _mode in batch_items
+                        ],
+                        embeddings=chunk_embeddings,
                     )
-                    _ensure_not_aborted(world_id, my_event)
-                _ensure_not_aborted(world_id, my_event)
-                touched_node_ids = {
-                    str(node.get("id") or "").strip()
-                    for node in node_records_for_embedding
-                    if isinstance(node, dict) and str(node.get("id") or "").strip()
-                }
 
                 async with meta_lock:
-                    _mark_stage_success(source, stage="embedding", chunk_index=chunk_idx, chunk_id=chunk)
-                    checkpoint = _load_checkpoint(world_id) or {}
-                    last_completed = int(checkpoint.get("last_completed_chunk_index", -1))
-                    await _save_checkpoint_async(
-                        world_id,
-                        {
-                            "source_id": source_id,
-                            "last_completed_chunk_index": max(last_completed, chunk_idx),
-                            "last_completed_agent": "vector",
-                            "chunks_total": len(temporal_chunks),
-                            "started_at": checkpoint.get("started_at", now),
-                            "updated_at": _now_iso(),
-                        },
-                    )
+                    for chunk_idx, _tc, _mode in batch_items:
+                        _mark_stage_success(
+                            source,
+                            stage="embedding",
+                            chunk_index=chunk_idx,
+                            chunk_id=_chunk_id(world_id, source_id, chunk_idx),
+                        )
+                    await _maybe_save_source_checkpoint(world_id, source, started_at=started_at)
                     _mark_ingestion_live(meta, operation=operation_norm)
                     await _save_meta_async(world_id, meta)
-                if touched_node_ids:
-                    async with touched_unique_node_ids_lock:
-                        touched_unique_node_ids.update(touched_node_ids)
 
-                push_sse_event(
-                    world_id,
-                    {
-                        "event": "agent_complete",
-                        "chunk_index": chunk_idx,
-                        "book_number": book_number,
-                        "source_id": source_id,
-                        "agent": "vector_rebuild" if is_reembed_all else "embedding",
-                        "mode": mode,
-                        "chunk_vector_count": 1,
-                        **_build_progress_event(
-                            world_id,
-                            meta,
-                            source_id=source_id,
-                            active_agent=embedding_wait_agent,
-                            total_chunks=len(temporal_chunks),
-                        ),
-                    },
-                )
+                for chunk_idx, _tc, mode in batch_items:
+                    push_sse_event(
+                        world_id,
+                        {
+                            "event": "agent_complete",
+                            "chunk_index": chunk_idx,
+                            "book_number": book_number,
+                            "source_id": source_id,
+                            "agent": "vector_rebuild" if is_reembed_all else "embedding",
+                            "mode": mode,
+                            "chunk_vector_count": 1,
+                            **_build_progress_event(
+                                world_id,
+                                meta,
+                                source_id=source_id,
+                                active_agent=embedding_agent,
+                                total_chunks=len(temporal_chunks),
+                            ),
+                        },
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -4173,59 +4191,328 @@ async def start_ingestion(
                         "event": "vector_error",
                         "source_id": source_id,
                         "book_number": book_number,
-                        "chunk_index": chunk_idx,
+                        "chunk_indices": [chunk_idx for chunk_idx, _tc, _mode in batch_items],
                         "error_type": error_kind,
                         "error": err_text,
                     },
                 )
                 async with meta_lock:
+                    for chunk_idx, _tc, _mode in batch_items:
+                        _record_stage_failure(
+                            source,
+                            stage="embedding",
+                            chunk_index=chunk_idx,
+                            chunk_id=_chunk_id(world_id, source_id, chunk_idx),
+                            source_id=source_id,
+                            book_number=book_number,
+                            error_type=error_kind,
+                            error_message=err_text,
+                        )
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+                for chunk_idx, _tc, _mode in batch_items:
+                    push_sse_event(
+                        world_id,
+                        {
+                            "event": "error",
+                            "stage": "embedding",
+                            "chunk_index": chunk_idx,
+                            "book_number": book_number,
+                            "source_id": source_id,
+                            "error_type": error_kind,
+                            "message": f"Embedding failed for chunk {chunk_idx}: {err_text}",
+                            "safety_review_summary": get_safety_review_summary(world_id),
+                            **_build_progress_event(
+                                world_id,
+                                meta,
+                                source_id=source_id,
+                                active_agent=embedding_agent,
+                                total_chunks=len(temporal_chunks),
+                            ),
+                        },
+                    )
+            finally:
+                if slot_index is not None:
+                    await _embedding_scheduler.release(
+                        slot_index,
+                        aborted=my_event.is_set() or not _is_current_run(world_id, my_event),
+                    )
+
+        async def _process_chunk_extraction(
+            chunk_idx: int,
+            tc: Any,
+            source_id: str,
+            book_number: int,
+            temporal_chunks: list[Any],
+            source: dict,
+            mode: ChunkMode,
+            started_at: str,
+        ) -> None:
+            if my_event.is_set() or not _is_current_run(world_id, my_event):
+                return
+
+            chunk = _chunk_id(world_id, source_id, chunk_idx)
+            extraction_slot: int | None = None
+            stage = _StagedChunkArtifacts(chunk_id=chunk, book_number=book_number, chunk_index=chunk_idx)
+            node_embedding_tasks: list[asyncio.Task[Any]] = []
+
+            def queue_node_embedding(node_records: list[dict]) -> None:
+                if not node_records:
+                    return
+                node_embedding_tasks.append(
+                    _register_run_task(
+                        world_id,
+                        my_event,
+                        asyncio.create_task(
+                            _run_node_embedding_batch(
+                                stage=stage,
+                                node_records=node_records,
+                                source_id=source_id,
+                                total_chunks=len(temporal_chunks),
+                            )
+                        ),
+                    )
+                )
+
+            try:
+                extraction_slot = await acquire_stage_slot(
+                    _extraction_scheduler,
+                    wait_state="queued_for_extraction_slot",
+                    wait_stage="extracting",
+                    source_id=source_id,
+                    book_number=book_number,
+                    chunk_index=chunk_idx,
+                    active_agent="graph_architect",
+                )
+                _ensure_not_aborted(world_id, my_event)
+
+                if mode == "full_cleanup":
+                    cleanup = await _cleanup_chunk_retry_artifacts(
+                        graph_store=graph_store,
+                        vector_store=vector_store,
+                        unique_node_vector_store=unique_node_vector_store,
+                        chunk_id=chunk,
+                        source_book=book_number,
+                        source_chunk=chunk_idx,
+                        graph_lock=graph_lock,
+                        vector_lock=vector_lock,
+                    )
+                    cleanup_log = {key: value for key, value in cleanup.items() if key != "removed_node_ids"}
+                    if any(value for value in cleanup_log.values()):
+                        _append_log(
+                            world_id,
+                            {
+                                "event": "extraction_cleanup",
+                                "source_id": source_id,
+                                "book_number": book_number,
+                                "chunk_index": chunk_idx,
+                                **cleanup_log,
+                            },
+                        )
+
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "progress",
+                        "chunk_index": chunk_idx,
+                        "chunks_total": len(temporal_chunks),
+                        "source_id": source_id,
+                        "active_agent": "graph_architect",
+                        "book_number": book_number,
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            source_id=source_id,
+                            active_agent="graph_architect",
+                            total_chunks=len(temporal_chunks),
+                        ),
+                    },
+                )
+                extraction_payload = _build_graph_extraction_payload_for_chunk(tc)
+                ga_output, ga_usage = await _await_with_abort(world_id, my_event, ga.run(extraction_payload))
+                _ensure_not_aborted(world_id, my_event)
+
+                initial_nodes = list(ga_output.nodes)
+                initial_edges = list(ga_output.edges)
+                queue_node_embedding(
+                    _stage_chunk_graph_artifacts(
+                        stage,
+                        nodes=initial_nodes,
+                        edges=initial_edges,
+                    )
+                )
+
+                final_nodes = list(initial_nodes)
+                final_edges = list(initial_edges)
+                for g_idx in range(max(0, glean_amount)):
+                    push_sse_event(
+                        world_id,
+                        {
+                            "event": "progress",
+                            "chunk_index": chunk_idx,
+                            "chunks_total": len(temporal_chunks),
+                            "source_id": source_id,
+                            "active_agent": f"graph_architect_glean_{g_idx + 1}",
+                            "book_number": book_number,
+                            **_build_progress_event(
+                                world_id,
+                                meta,
+                                source_id=source_id,
+                                active_agent=f"graph_architect_glean_{g_idx + 1}",
+                                total_chunks=len(temporal_chunks),
+                            ),
+                        },
+                    )
+                    glean_out, _ = await _await_with_abort(
+                        world_id,
+                        my_event,
+                        ga.run_glean(extraction_payload, final_nodes, final_edges),
+                    )
+                    _ensure_not_aborted(world_id, my_event)
+                    glean_nodes = list(glean_out.nodes)
+                    glean_edges = list(glean_out.edges)
+                    final_nodes.extend(glean_nodes)
+                    final_edges.extend(glean_edges)
+                    queue_node_embedding(
+                        _stage_chunk_graph_artifacts(
+                            stage,
+                            nodes=glean_nodes,
+                            edges=glean_edges,
+                        )
+                    )
+
+                _append_log(
+                    world_id,
+                    {
+                        "agent": "graph_architect",
+                        "chunk_index": chunk_idx,
+                        "book_number": book_number,
+                        "status": "success",
+                        "node_count": len(stage.nodes),
+                        "edge_count": len(stage.edges),
+                        "gleans": max(0, glean_amount),
+                        **ga_usage,
+                    },
+                )
+
+                if not _staged_chunk_has_graph_coverage(stage):
+                    raise ExtractionCoverageError("Chunk produced no extraction coverage in graph store.")
+
+                live_total_nodes = 0
+                live_total_edges = 0
+                async with graph_lock:
+                    graph_store.restore_chunk_artifacts(_staged_chunk_graph_snapshot(stage))
+                    live_total_nodes = graph_store.get_node_count()
+                    live_total_edges = graph_store.get_edge_count()
+
+                async with meta_lock:
+                    _mark_stage_success(source, stage="extraction", chunk_index=chunk_idx, chunk_id=chunk)
+                    meta["total_nodes"] = max(_coerce_non_negative_int(meta.get("total_nodes")), live_total_nodes)
+                    meta["total_edges"] = max(_coerce_non_negative_int(meta.get("total_edges")), live_total_edges)
+                    await _maybe_save_source_checkpoint(world_id, source, started_at=started_at)
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+
+                if node_embedding_tasks:
+                    await asyncio.gather(*node_embedding_tasks, return_exceptions=True)
+                await _update_live_unique_node_total()
+            except asyncio.CancelledError:
+                stage.cancelled.set()
+                if node_embedding_tasks:
+                    await asyncio.gather(*node_embedding_tasks, return_exceptions=True)
+                return
+            except Exception as exc:
+                stage.cancelled.set()
+                if node_embedding_tasks:
+                    await asyncio.gather(*node_embedding_tasks, return_exceptions=True)
+                staged_node_ids = _staged_chunk_node_ids(stage)
+                if staged_node_ids:
+                    async with vector_lock:
+                        await asyncio.to_thread(unique_node_vector_store.delete_documents, staged_node_ids)
+                    await _update_live_unique_node_total()
+
+                error_kind = _classify_exception_kind(exc)
+                err_text = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
+                safety_reason = exc.safety_reason if isinstance(exc, AgentCallError) else None
+                logger.error("Extraction failed for chunk %s (%s): %s", chunk_idx, source_id, err_text)
+                _append_log(
+                    world_id,
+                    {
+                        "event": "extraction_error",
+                        "source_id": source_id,
+                        "book_number": book_number,
+                        "chunk_index": chunk_idx,
+                        "error_type": error_kind,
+                        "error": err_text,
+                        "safety_reason": safety_reason,
+                    },
+                )
+                async with meta_lock:
                     _record_stage_failure(
                         source,
-                        stage="embedding",
+                        stage="extraction",
                         chunk_index=chunk_idx,
                         chunk_id=chunk,
                         source_id=source_id,
                         book_number=book_number,
                         error_type=error_kind,
                         error_message=err_text,
+                        clear_embedded_chunk=False,
                     )
+                    review_item = None
+                    if error_kind == "safety_block":
+                        review_item = _upsert_safety_review(
+                            world_id,
+                            source_id=source_id,
+                            book_number=book_number,
+                            chunk_index=chunk_idx,
+                            chunk_id=chunk,
+                            original_raw_text=tc.primary_text,
+                            original_prefixed_text=tc.prefixed_text,
+                            overlap_raw_text=tc.overlap_text,
+                            safety_reason=str(safety_reason or err_text),
+                        )
                     _mark_ingestion_live(meta, operation=operation_norm)
                     await _save_meta_async(world_id, meta)
                 push_sse_event(
                     world_id,
                     {
                         "event": "error",
-                        "stage": "embedding",
+                        "stage": "extraction",
                         "chunk_index": chunk_idx,
                         "book_number": book_number,
                         "source_id": source_id,
                         "error_type": error_kind,
-                        "message": f"Embedding failed for chunk {chunk_idx}: {err_text}",
+                        "safety_reason": safety_reason,
+                        "chunk_text": tc.prefixed_text if error_kind == "safety_block" else None,
+                        "review_id": review_item.get("review_id") if isinstance(review_item, dict) else None,
+                        "message": f"Extraction failed for chunk {chunk_idx}: {err_text}",
                         "safety_review_summary": get_safety_review_summary(world_id),
                         **_build_progress_event(
                             world_id,
                             meta,
                             source_id=source_id,
-                            active_agent=embedding_wait_agent,
+                            active_agent="graph_architect",
                             total_chunks=len(temporal_chunks),
                         ),
                     },
                 )
             finally:
-                if embedding_slot is not None:
-                    await _embedding_scheduler.release(
-                        embedding_slot,
+                if extraction_slot is not None:
+                    await _extraction_scheduler.release(
+                        extraction_slot,
                         aborted=my_event.is_set() or not _is_current_run(world_id, my_event),
                     )
 
-        for source in sources:
+        async def _process_source(source: dict) -> None:
             if my_event.is_set() or not _is_current_run(world_id, my_event):
-                break
+                return
 
             source_id = source["source_id"]
             book_number = int(source["book_number"])
             vault_filename = source["vault_filename"]
             source_path = world_sources_dir(world_id) / vault_filename
+            started_at = _now_iso()
 
             if not source_path.exists():
                 push_sse_event(
@@ -4237,9 +4524,10 @@ async def start_ingestion(
                         "message": f"Source file '{vault_filename}' not found.",
                     },
                 )
-                source["status"] = "error"
-                await _save_meta_async(world_id, meta)
-                continue
+                async with meta_lock:
+                    source["status"] = "error"
+                    await _save_meta_async(world_id, meta)
+                return
 
             temporal_chunks = _load_source_temporal_chunks(
                 world_id,
@@ -4249,13 +4537,15 @@ async def start_ingestion(
             )
 
             chunks_total = len(temporal_chunks)
-            _ensure_source_tracking(source)
-            source["chunk_count"] = chunks_total
-            source["status"] = "ingesting"
-            source["extracted_chunks"] = _normalize_index_list(source.get("extracted_chunks", []), max_index=chunks_total - 1)
-            source["embedded_chunks"] = _normalize_index_list(source.get("embedded_chunks", []), max_index=chunks_total - 1)
-            source["failed_chunks"] = _normalize_index_list(source.get("failed_chunks", []), max_index=chunks_total - 1)
-            await _save_meta_async(world_id, meta)
+            async with meta_lock:
+                _ensure_source_tracking(source)
+                source["chunk_count"] = chunks_total
+                source["status"] = "ingesting"
+                source["extracted_chunks"] = _normalize_index_list(source.get("extracted_chunks", []), max_index=chunks_total - 1)
+                source["embedded_chunks"] = _normalize_index_list(source.get("embedded_chunks", []), max_index=chunks_total - 1)
+                source["failed_chunks"] = _normalize_index_list(source.get("failed_chunks", []), max_index=chunks_total - 1)
+                _mark_ingestion_live(meta, operation=operation_norm)
+                await _save_meta_async(world_id, meta)
 
             checkpoint = _load_checkpoint(world_id)
             chunk_plan = _build_chunk_plan(
@@ -4270,16 +4560,58 @@ async def start_ingestion(
             )
 
             if not chunk_plan:
-                _update_source_status_from_coverage(source)
-                await _save_meta_async(world_id, meta)
-                continue
+                async with meta_lock:
+                    _update_source_status_from_coverage(source)
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+                return
 
-            tasks = [
+            chunk_embedding_tasks: list[asyncio.Task[Any]] = []
+            current_batch: list[tuple[int, TemporalChunk, ChunkMode]] = []
+            for chunk_idx, mode in chunk_plan.items():
+                current_batch.append((chunk_idx, temporal_chunks[chunk_idx], mode))
+                if len(current_batch) >= chunk_embedding_batch_size:
+                    chunk_embedding_tasks.append(
+                        _register_run_task(
+                            world_id,
+                            my_event,
+                            asyncio.create_task(
+                                _run_chunk_embedding_batch(
+                                    source_id=source_id,
+                                    book_number=book_number,
+                                    source=source,
+                                    temporal_chunks=temporal_chunks,
+                                    batch_items=list(current_batch),
+                                    started_at=started_at,
+                                )
+                            ),
+                        )
+                    )
+                    current_batch = []
+            if current_batch:
+                chunk_embedding_tasks.append(
+                    _register_run_task(
+                        world_id,
+                        my_event,
+                        asyncio.create_task(
+                            _run_chunk_embedding_batch(
+                                source_id=source_id,
+                                book_number=book_number,
+                                source=source,
+                                temporal_chunks=temporal_chunks,
+                                batch_items=list(current_batch),
+                                started_at=started_at,
+                            )
+                        ),
+                    )
+                )
+
+            extraction_tasks = [
                 _register_run_task(
                     world_id,
                     my_event,
                     asyncio.create_task(
-                        process_chunk(
+                        _process_chunk_extraction(
                             idx,
                             temporal_chunks[idx],
                             source_id,
@@ -4287,22 +4619,37 @@ async def start_ingestion(
                             temporal_chunks,
                             source,
                             mode,
+                            started_at,
                         )
                     ),
                 )
                 for idx, mode in chunk_plan.items()
+                if mode in ("full", "full_cleanup")
             ]
-            if tasks:
-                await asyncio.gather(*tasks)
+
+            if chunk_embedding_tasks or extraction_tasks:
+                await asyncio.gather(*(chunk_embedding_tasks + extraction_tasks))
 
             if not my_event.is_set() and _is_current_run(world_id, my_event):
-                _update_source_status_from_coverage(source)
-                if source.get("status") == "complete":
-                    snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
-                    if snapshot:
-                        source["ingest_snapshot"] = snapshot
-                _mark_ingestion_live(meta, operation=operation_norm)
-                await _save_meta_async(world_id, meta)
+                async with meta_lock:
+                    _update_source_status_from_coverage(source)
+                    if source.get("status") == "complete":
+                        snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
+                        if snapshot:
+                            source["ingest_snapshot"] = snapshot
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+
+        source_tasks = [
+            _register_run_task(
+                world_id,
+                my_event,
+                asyncio.create_task(_process_source(source)),
+            )
+            for source in sources
+        ]
+        if source_tasks:
+            await asyncio.gather(*source_tasks)
 
         is_current = _is_current_run(world_id, my_event)
         if not my_event.is_set() and is_current:
@@ -4341,50 +4688,12 @@ async def start_ingestion(
                     awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
                 )
                 unique_node_rebuild_ran = True
-            else:
-                async with touched_unique_node_ids_lock:
-                    unique_node_ids_for_rebuild = sorted(touched_unique_node_ids)
-                if unique_node_ids_for_rebuild:
-                    await set_world_progress_phase(
-                        "unique_node_rebuild",
-                        unique_node_rebuild_completed=0,
-                        unique_node_rebuild_total=len(unique_node_ids_for_rebuild),
-                        active_agent="node_embedding_rebuild",
-                    )
-
-                    async def _report_selected_unique_node_rebuild_progress(completed: int, total: int) -> None:
-                        await set_world_progress_phase(
-                            "unique_node_rebuild",
-                            unique_node_rebuild_completed=completed,
-                            unique_node_rebuild_total=total,
-                            emit_event=True,
-                            active_agent="node_embedding_rebuild",
-                        )
-
-                    api_key, _ = await acquire_gemini_key(
-                        source_id=None,
-                        book_number=None,
-                        chunk_index=None,
-                        active_agent="node_embedding_rebuild",
-                    )
-                    await _upsert_selected_unique_node_vectors(
-                        graph_store,
-                        unique_node_vector_store,
-                        unique_node_ids_for_rebuild,
-                        api_key,
-                        vector_lock=vector_lock,
-                        abort_check=lambda: _ensure_not_aborted(world_id, my_event),
-                        progress_callback=_report_selected_unique_node_rebuild_progress,
-                        awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
-                    )
-                    unique_node_rebuild_ran = True
             if unique_node_rebuild_ran:
                 async with vector_lock:
                     embedded_unique_node_total = await asyncio.to_thread(unique_node_vector_store.count)
                 async with meta_lock:
                     current_unique_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
-                    if current_unique_nodes > 0:
-                        embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
+                    embedded_unique_node_total = min(embedded_unique_node_total, current_unique_nodes)
                     meta["embedded_unique_nodes"] = embedded_unique_node_total
                     _mark_ingestion_live(meta, operation=operation_norm)
                     await _save_meta_async(world_id, meta)

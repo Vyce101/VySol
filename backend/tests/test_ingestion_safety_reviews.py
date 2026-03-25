@@ -288,6 +288,12 @@ class _CapturingGraphArchitect(_PassingGraphArchitect):
 
 
 class _DummyKeyManager:
+    api_keys = ["test-key"]
+    key_count = 1
+
+    def get_active_key(self):
+        return ("test-key", 0)
+
     async def await_active_key(self):
         return ("test-key", 0)
 
@@ -662,6 +668,266 @@ def test_legacy_reviews_infer_active_override_flag_from_text(monkeypatch):
 
     assert reviews[0]["has_active_override"] is True
     assert summary["active_override_reviews"] == 1
+
+
+def test_start_ingestion_starts_chunk_and_node_embeddings_before_glean_finishes(monkeypatch):
+    world_id = "world-ingest-early-embeds"
+    ctx = _prepare_world(monkeypatch, world_id)
+    sources_dir = ctx["meta_path"].parent / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    (sources_dir / "book1.txt").write_text("Candidate A meets Candidate B.", encoding="utf-8")
+    monkeypatch.setattr(ingestion_engine, "world_sources_dir", lambda _world_id: sources_dir)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "load_settings",
+        lambda: {
+            "graph_extraction_concurrency": 1,
+            "embedding_concurrency": 1,
+            "graph_extraction_cooldown_seconds": 0,
+            "embedding_cooldown_seconds": 0,
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 0,
+            "glean_amount": 1,
+        },
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "get_world_ingest_settings",
+        lambda meta=None: {
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 0,
+            "embedding_model": TEST_EMBEDDING_MODEL,
+            "glean_amount": 1,
+        },
+    )
+    monkeypatch.setattr(ingestion_engine, "get_key_manager", lambda: _DummyKeyManager())
+    monkeypatch.setattr(vector_store.VectorStore, "embed_texts", _embed_texts_with_collection_dims)
+
+    state = {
+        "chunk_embed_started": False,
+        "node_embed_started": False,
+        "glean_saw_chunk_embed": False,
+        "glean_saw_node_embed": False,
+    }
+
+    original_upsert_documents_embeddings = vector_store.VectorStore.upsert_documents_embeddings
+
+    def _tracking_upsert_documents_embeddings(self, *, document_ids, texts, metadatas, embeddings):
+        if self.collection_suffix == "unique_nodes":
+            state["node_embed_started"] = True
+        else:
+            state["chunk_embed_started"] = True
+        return original_upsert_documents_embeddings(
+            self,
+            document_ids=document_ids,
+            texts=texts,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+    monkeypatch.setattr(
+        vector_store.VectorStore,
+        "upsert_documents_embeddings",
+        _tracking_upsert_documents_embeddings,
+    )
+
+    class _OrderingGraphArchitect:
+        def __init__(self, *, world_id: str | None = None) -> None:
+            self.world_id = world_id
+
+        async def run(self, extraction_chunk_text: str):
+            return (
+                GraphArchitectOutput(
+                    nodes=[
+                        NodeOut(node_id="candidate_a", display_name="Candidate A", description="Fresh candidate A"),
+                        NodeOut(node_id="candidate_b", display_name="Candidate B", description="Fresh candidate B"),
+                    ],
+                    edges=[
+                        EdgeOut(
+                            source_node_id="candidate_a",
+                            target_node_id="candidate_b",
+                            description="Fresh candidate relation",
+                            strength=6,
+                        )
+                    ],
+                ),
+                {},
+            )
+
+        async def run_glean(self, extraction_chunk_text: str, previous_nodes, previous_edges):
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while not (state["chunk_embed_started"] and state["node_embed_started"]):
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("Chunk and node embeddings should both have started before glean completed.")
+                await asyncio.sleep(0.01)
+            state["glean_saw_chunk_embed"] = state["chunk_embed_started"]
+            state["glean_saw_node_embed"] = state["node_embed_started"]
+            return (
+                GraphArchitectOutput(
+                    nodes=[NodeOut(node_id="candidate_c", display_name="Candidate C", description="Fresh candidate C")],
+                    edges=[],
+                ),
+                {},
+            )
+
+    monkeypatch.setattr(ingestion_engine, "GraphArchitectAgent", _OrderingGraphArchitect)
+    ingestion_engine._save_meta(
+        world_id,
+        {
+            "world_id": world_id,
+            "ingestion_status": "pending",
+            "sources": [
+                {
+                    "source_id": "source-a",
+                    "display_name": "Book 1",
+                    "status": "pending",
+                    "book_number": 1,
+                    "vault_filename": "book1.txt",
+                    "failed_chunks": [],
+                    "stage_failures": [],
+                    "extracted_chunks": [],
+                    "embedded_chunks": [],
+                }
+            ],
+        },
+    )
+
+    asyncio.run(ingestion_engine.start_ingestion(world_id))
+
+    refreshed_meta = ingestion_engine._load_meta(world_id)
+    refreshed_source = refreshed_meta["sources"][0]
+    refreshed_graph = graph_store.GraphStore(world_id)
+    unique_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL, collection_suffix="unique_nodes")
+
+    assert state["glean_saw_chunk_embed"] is True
+    assert state["glean_saw_node_embed"] is True
+    assert refreshed_source["status"] == "complete"
+    assert refreshed_source["extracted_chunks"] == [0]
+    assert refreshed_source["embedded_chunks"] == [0]
+    assert refreshed_graph.get_node_count() == 3
+    assert unique_store.count() == 3
+
+
+def test_start_ingestion_discards_staged_nodes_but_keeps_chunk_embedding_when_glean_fails(monkeypatch):
+    world_id = "world-ingest-glean-fail"
+    ctx = _prepare_world(monkeypatch, world_id)
+    sources_dir = ctx["meta_path"].parent / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    (sources_dir / "book1.txt").write_text("Candidate A meets Candidate B.", encoding="utf-8")
+    monkeypatch.setattr(ingestion_engine, "world_sources_dir", lambda _world_id: sources_dir)
+    monkeypatch.setattr(
+        ingestion_engine,
+        "load_settings",
+        lambda: {
+            "graph_extraction_concurrency": 1,
+            "embedding_concurrency": 1,
+            "graph_extraction_cooldown_seconds": 0,
+            "embedding_cooldown_seconds": 0,
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 0,
+            "glean_amount": 1,
+        },
+    )
+    monkeypatch.setattr(
+        ingestion_engine,
+        "get_world_ingest_settings",
+        lambda meta=None: {
+            "chunk_size_chars": 4000,
+            "chunk_overlap_chars": 0,
+            "embedding_model": TEST_EMBEDDING_MODEL,
+            "glean_amount": 1,
+        },
+    )
+    monkeypatch.setattr(ingestion_engine, "get_key_manager", lambda: _DummyKeyManager())
+    monkeypatch.setattr(vector_store.VectorStore, "embed_texts", _embed_texts_with_collection_dims)
+
+    state = {
+        "chunk_embed_started": False,
+        "node_embed_started": False,
+    }
+
+    original_upsert_documents_embeddings = vector_store.VectorStore.upsert_documents_embeddings
+
+    def _tracking_upsert_documents_embeddings(self, *, document_ids, texts, metadatas, embeddings):
+        if self.collection_suffix == "unique_nodes":
+            state["node_embed_started"] = True
+        else:
+            state["chunk_embed_started"] = True
+        return original_upsert_documents_embeddings(
+            self,
+            document_ids=document_ids,
+            texts=texts,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+    monkeypatch.setattr(
+        vector_store.VectorStore,
+        "upsert_documents_embeddings",
+        _tracking_upsert_documents_embeddings,
+    )
+
+    class _FailingGleanGraphArchitect:
+        def __init__(self, *, world_id: str | None = None) -> None:
+            self.world_id = world_id
+
+        async def run(self, extraction_chunk_text: str):
+            return (
+                GraphArchitectOutput(
+                    nodes=[NodeOut(node_id="candidate_a", display_name="Candidate A", description="Fresh candidate A")],
+                    edges=[],
+                ),
+                {},
+            )
+
+        async def run_glean(self, extraction_chunk_text: str, previous_nodes, previous_edges):
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while not (state["chunk_embed_started"] and state["node_embed_started"]):
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("Expected chunk and node embeddings to begin before glean failure.")
+                await asyncio.sleep(0.01)
+            raise RuntimeError("glean boom")
+
+    monkeypatch.setattr(ingestion_engine, "GraphArchitectAgent", _FailingGleanGraphArchitect)
+    ingestion_engine._save_meta(
+        world_id,
+        {
+            "world_id": world_id,
+            "ingestion_status": "pending",
+            "sources": [
+                {
+                    "source_id": "source-a",
+                    "display_name": "Book 1",
+                    "status": "pending",
+                    "book_number": 1,
+                    "vault_filename": "book1.txt",
+                    "failed_chunks": [],
+                    "stage_failures": [],
+                    "extracted_chunks": [],
+                    "embedded_chunks": [],
+                }
+            ],
+        },
+    )
+
+    asyncio.run(ingestion_engine.start_ingestion(world_id))
+
+    refreshed_meta = ingestion_engine._load_meta(world_id)
+    refreshed_source = refreshed_meta["sources"][0]
+    chunk_id = f"chunk_{world_id}_source-a_0"
+    refreshed_graph = graph_store.GraphStore(world_id)
+    chunk_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL)
+    unique_store = vector_store.VectorStore(world_id, embedding_model=TEST_EMBEDDING_MODEL, collection_suffix="unique_nodes")
+    extraction_failures = [failure for failure in refreshed_source["stage_failures"] if failure["stage"] == "extraction"]
+
+    assert refreshed_meta["ingestion_status"] == "partial_failure"
+    assert refreshed_source["status"] == "partial_failure"
+    assert refreshed_source["extracted_chunks"] == []
+    assert refreshed_source["embedded_chunks"] == [0]
+    assert len(extraction_failures) == 1
+    assert refreshed_graph.get_node_count() == 0
+    assert chunk_store.get_records_by_ids([chunk_id], include_documents=True) != []
+    assert unique_store.count() == 0
 
 
 def teardown_module(module):

@@ -568,6 +568,44 @@ def test_build_chunk_plan_resumes_extracted_but_unembedded_chunks_as_embedding_o
     }
 
 
+def test_build_chunk_plan_keeps_extraction_when_chunk_is_embedded_but_not_extracted():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [],
+        "stage_failures": [],
+        "extracted_chunks": [0],
+        "embedded_chunks": [0, 1],
+    }
+
+    plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=3,
+        resume=True,
+        retry_only=False,
+        retry_stage="all",
+        checkpoint={"source_id": "source-a", "last_completed_chunk_index": 0},
+    )
+
+    assert plan == {
+        1: "full",
+        2: "full",
+    }
+
+
+def test_durable_checkpoint_index_requires_both_extraction_and_embedding():
+    source = {
+        "source_id": "source-a",
+        "chunk_count": 4,
+        "failed_chunks": [],
+        "stage_failures": [],
+        "extracted_chunks": [0, 2, 3],
+        "embedded_chunks": [0, 1, 2, 3],
+    }
+
+    assert ingestion_engine._durable_checkpoint_index_for_source(source) == 0
+
+
 def test_checkpoint_ignores_stale_failures_after_audit(monkeypatch):
     meta = {
         "world_id": "world-1",
@@ -1374,6 +1412,35 @@ def test_build_progress_event_includes_live_stage_counters_and_progress_source(m
     assert event["progress_source_id"] == "source-b"
     assert event["progress_source_display_name"] == "Book 2"
     assert event["progress_source_book_number"] == 2
+
+
+def test_build_progress_event_clamps_embedded_unique_nodes_to_committed_graph_count(monkeypatch):
+    meta = {
+        "world_id": "world-1",
+        "ingestion_status": "in_progress",
+        "ingestion_operation": "default",
+        "total_nodes": 0,
+        "embedded_unique_nodes": 3,
+        "sources": [
+            {
+                "source_id": "source-a",
+                "book_number": 1,
+                "display_name": "Book 1",
+                "chunk_count": 1,
+                "status": "ingesting",
+                "failed_chunks": [],
+                "stage_failures": [],
+                "extracted_chunks": [],
+                "embedded_chunks": [0],
+            }
+        ],
+    }
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": object()})
+
+    event = ingestion_engine._build_progress_event("world-1", meta)
+
+    assert event["stage_counters"]["current_unique_nodes"] == 0
+    assert event["stage_counters"]["embedded_unique_nodes"] == 0
 
 
 def test_get_checkpoint_info_includes_live_wait_snapshot(monkeypatch):
