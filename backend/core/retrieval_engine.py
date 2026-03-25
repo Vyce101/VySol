@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 
 from .config import load_settings
-from .graph_store import GraphStore
-from .ingestion_engine import audit_ingestion_integrity
+from .graph_store import GraphStore, get_active_ingest_graph_session
+from .ingestion_engine import get_ingestion_audit_snapshot
 from .key_manager import get_key_manager
 from .vector_store import VectorStore
 
@@ -54,12 +54,21 @@ def _normalize_context_text(value: str) -> str:
     return " ".join(part.strip() for part in str(value or "").splitlines() if part.strip())
 
 
+def _safe_vector_count(store: VectorStore, *, label: str, world_id: str) -> int:
+    try:
+        return max(0, int(store.count() or 0))
+    except Exception:
+        logger.warning("Could not count %s vectors for world %s during retrieval.", label, world_id, exc_info=True)
+        return 0
+
+
 class RetrievalEngine:
     """Performs GraphRAG retrieval: vector query → graph walk → context assembly."""
 
     def __init__(self, world_id: str):
         self.world_id = world_id
-        self.graph_store = GraphStore(world_id)
+        active_graph_session = get_active_ingest_graph_session(world_id)
+        self.graph_store = active_graph_session.committed_store if active_graph_session is not None else GraphStore(world_id)
         self.chunk_vector_store = VectorStore(world_id)
         self.unique_node_vector_store = VectorStore(world_id, collection_suffix="unique_nodes")
 
@@ -104,33 +113,59 @@ class RetrievalEngine:
         km = _get_provider_key_manager(embedding_provider)
         api_key, _ = km.wait_for_available_key()
         query_embedding = self.chunk_vector_store.embed_text(query, api_key)
-        chunk_vector_count = self.chunk_vector_store.count()
-        unique_node_vector_count = self.unique_node_vector_store.count()
-        health_summary = audit_ingestion_integrity(
+        chunk_vector_count = _safe_vector_count(self.chunk_vector_store, label="chunk", world_id=self.world_id)
+        unique_node_vector_count = _safe_vector_count(
+            self.unique_node_vector_store,
+            label="unique-node",
+            world_id=self.world_id,
+        )
+        health_summary = get_ingestion_audit_snapshot(
             self.world_id,
             synthesize_failures=False,
             persist=False,
         )
-        self._validate_retrieval_health(health_summary)
+        retrieval_health = self._validate_retrieval_health(health_summary)
+        chunk_index_usable = bool(retrieval_health.get("chunk_index_usable"))
+        chunk_index_complete = bool(retrieval_health.get("chunk_index_complete"))
+        node_index_usable = bool(retrieval_health.get("node_index_usable")) and unique_node_vector_count > 0
+        node_index_complete = bool(retrieval_health.get("node_index_complete"))
+        passive_blockers = list(retrieval_health.get("passive_blockers") or [])
 
         # Step 2: Chunk vector query for evidence/RAG excerpts.
         query_n_results = max(top_k, chunk_vector_count) if chunk_vector_count > 0 else top_k
-        vector_results = self.chunk_vector_store.query_by_embedding(
-            query_embedding,
-            n_results=query_n_results,
-        )
+        vector_results: list[dict] = []
+        if chunk_index_usable and chunk_vector_count > 0:
+            try:
+                vector_results = self.chunk_vector_store.query_by_embedding(
+                    query_embedding,
+                    n_results=query_n_results,
+                )
+            except Exception:
+                chunk_index_usable = False
+                passive_blockers.append({
+                    "code": "chunk_vector_query_failed",
+                    "message": "Could not query the chunk vector store during retrieval.",
+                })
+                logger.warning("Chunk retrieval fell back after chunk vector query failed for world %s.", self.world_id, exc_info=True)
         rag_results = vector_results[:top_k]
 
         # Step 3: Node vector query for graph entry points.
-        node_query_n_results = max(0, unique_node_vector_count)
-        node_results = (
-            self.unique_node_vector_store.query_by_embedding(
-                query_embedding,
-                n_results=node_query_n_results,
-            )
-            if node_query_n_results > 0
-            else []
-        )
+        node_query_n_results = max(0, unique_node_vector_count) if node_index_usable else 0
+        node_results: list[dict] = []
+        if node_query_n_results > 0:
+            try:
+                node_results = self.unique_node_vector_store.query_by_embedding(
+                    query_embedding,
+                    n_results=node_query_n_results,
+                )
+            except Exception:
+                node_index_usable = False
+                node_query_n_results = 0
+                passive_blockers.append({
+                    "code": "unique_node_vector_query_failed",
+                    "message": "Could not query the unique-node vector store during retrieval.",
+                })
+                logger.warning("Node-seeded retrieval fell back after unique-node query failed for world %s.", self.world_id, exc_info=True)
         entry_nodes = self._entry_nodes_from_query_results(
             node_results=node_results,
             requested=entry_k,
@@ -203,10 +238,15 @@ class RetrievalEngine:
                 "node_query_results_count": len(node_results),
                 "node_query_n_results": node_query_n_results,
                 "chunk_vector_count": chunk_vector_count,
+                "chunk_index_usable": chunk_index_usable,
+                "chunk_index_complete": chunk_index_complete,
                 "node_vector_count": unique_node_vector_count,
                 "unique_node_vector_count": unique_node_vector_count,
                 "entry_index_kind": "unique_nodes",
-                "node_seeded_retrieval_used": True,
+                "node_seeded_retrieval_used": node_query_n_results > 0,
+                "node_index_usable": node_index_usable,
+                "node_index_complete": node_index_complete,
+                "passive_blockers": passive_blockers,
                 "retrieval_blocked": False,
             },
         }
@@ -214,34 +254,38 @@ class RetrievalEngine:
     def _validate_retrieval_health(
         self,
         health_summary: dict,
-    ) -> None:
+    ) -> dict[str, object]:
         world = health_summary.get("world", {}) if isinstance(health_summary, dict) else {}
         expected_chunks = max(0, int(world.get("expected_chunks", 0) or 0))
         embedded_chunks = max(0, int(world.get("embedded_chunks", 0) or 0))
         expected_node_vectors = max(0, int(world.get("expected_node_vectors", 0) or 0))
         embedded_node_vectors = max(0, int(world.get("embedded_node_vectors", 0) or 0))
-        if expected_chunks > 0 and embedded_chunks <= 0:
-            raise RuntimeError(
-                "This world's chunk embeddings are missing. Use Re-embed All or Rechunk And Re-ingest to rebuild chunk and unique node vectors."
-            )
-        if expected_chunks > 0 and embedded_chunks < expected_chunks:
-            raise RuntimeError(
-                "This world's chunk embeddings are incomplete. Use Re-embed All or Rechunk And Re-ingest to rebuild chunk and unique node vectors."
-            )
+        chunk_index_usable = True
+        chunk_index_complete = not (expected_chunks > 0 and embedded_chunks < expected_chunks)
+        node_index_usable = True
+        node_index_complete = not (expected_node_vectors > 0 and embedded_node_vectors < expected_node_vectors)
+        passive_blockers: list[dict] = []
         blocking_issues = health_summary.get("blocking_issues", []) if isinstance(health_summary, dict) else []
         if blocking_issues:
-            first_issue = blocking_issues[0]
-            raise RuntimeError(
-                str(first_issue.get("message") or "This world's graph/vector state requires Rechunk And Re-ingest.")
-            )
-        if expected_node_vectors > 0 and embedded_node_vectors <= 0:
-            raise RuntimeError(
-                "This world's unique graph-node embeddings are missing. Run Re-embed All to rebuild chunk and unique node vectors."
-            )
-        if expected_node_vectors > 0 and embedded_node_vectors < expected_node_vectors:
-            raise RuntimeError(
-                "This world's unique graph-node embeddings are incomplete. Run Re-embed All to rebuild chunk and unique node vectors."
-            )
+            for issue in blocking_issues:
+                if not isinstance(issue, dict):
+                    passive_blockers.append({"message": str(issue)})
+                    continue
+                issue_code = str(issue.get("code") or "").strip().lower()
+                if issue_code == "unique_node_vector_store_unreadable":
+                    node_index_usable = False
+                    continue
+                if issue_code == "chunk_vector_store_unreadable":
+                    chunk_index_usable = False
+                    continue
+                passive_blockers.append(issue)
+        return {
+            "chunk_index_usable": chunk_index_usable,
+            "chunk_index_complete": chunk_index_complete,
+            "node_index_usable": node_index_usable,
+            "node_index_complete": node_index_complete,
+            "passive_blockers": passive_blockers,
+        }
 
     def _assemble_context(
         self,

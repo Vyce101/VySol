@@ -2,6 +2,8 @@ import asyncio
 from pathlib import Path
 import shutil
 
+import pytest
+
 from core import graph_store, ingestion_engine, vector_store
 from core.agents import AgentCallError, EdgeOut, GraphArchitectOutput, NodeOut
 from core.temporal_indexer import TemporalChunk
@@ -602,6 +604,78 @@ def test_blank_draft_success_uses_overlap_only_and_persists_blank_override(monke
     assert review["status"] == "resolved"
     assert ingestion_engine._get_active_override_map(world_id)[chunk_id] == ""
     assert chunk_store.get_records_by_ids([chunk_id], include_documents=True)[0]["document"] == "[B1:C0] notice, I thought. Should I get something for you?"
+
+
+def test_list_safety_reviews_marks_live_override_locked_after_entity_resolution(monkeypatch):
+    world_id = "world-safety-review-entity-lock"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="old repaired text",
+        has_active_override=True,
+    )
+    meta = ingestion_engine._load_meta(world_id)
+    meta["entity_resolution_last_completed_at"] = "2026-03-24T00:00:00+00:00"
+    ingestion_engine._save_meta(world_id, meta)
+
+    cache = ingestion_engine._load_safety_review_cache(world_id)
+    cache["reviews"][0]["last_live_applied_at"] = "2026-03-23T00:00:00+00:00"
+    ingestion_engine._save_safety_review_cache(world_id, cache)
+
+    review = next(item for item in ingestion_engine.list_safety_reviews(world_id) if item["review_id"] == chunk_id)
+
+    assert review["entity_resolution_locked"] is True
+    assert "entity-resolution run" in review["entity_resolution_lock_reason"].lower()
+
+
+def test_locked_safety_review_blocks_edit_test_and_reset(monkeypatch):
+    world_id = "world-safety-review-entity-lock-guards"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="old repaired text",
+        has_active_override=True,
+    )
+    meta = ingestion_engine._load_meta(world_id)
+    meta["entity_resolution_last_completed_at"] = "2026-03-24T00:00:00+00:00"
+    ingestion_engine._save_meta(world_id, meta)
+
+    cache = ingestion_engine._load_safety_review_cache(world_id)
+    cache["reviews"][0]["last_live_applied_at"] = "2026-03-23T00:00:00+00:00"
+    ingestion_engine._save_safety_review_cache(world_id, cache)
+
+    with pytest.raises(RuntimeError, match="entity-resolution run"):
+        asyncio.run(ingestion_engine.update_safety_review_draft(world_id, chunk_id, "new draft"))
+    with pytest.raises(RuntimeError, match="entity-resolution run"):
+        asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+    with pytest.raises(RuntimeError, match="entity-resolution run"):
+        asyncio.run(ingestion_engine.reset_safety_review(world_id, chunk_id))
+
+
+def test_safety_review_without_durable_coverage_stays_editable_after_entity_resolution(monkeypatch):
+    world_id = "world-safety-review-entity-lock-partial"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="old repaired text",
+        has_active_override=True,
+    )
+    meta = ingestion_engine._load_meta(world_id)
+    meta["entity_resolution_last_completed_at"] = "2026-03-24T00:00:00+00:00"
+    meta["sources"][0]["embedded_chunks"] = []
+    ingestion_engine._save_meta(world_id, meta)
+
+    cache = ingestion_engine._load_safety_review_cache(world_id)
+    cache["reviews"][0]["last_live_applied_at"] = "2026-03-23T00:00:00+00:00"
+    ingestion_engine._save_safety_review_cache(world_id, cache)
+
+    updated = asyncio.run(ingestion_engine.update_safety_review_draft(world_id, chunk_id, "new draft"))
+
+    assert updated["draft_raw_text"] == "new draft"
+    assert updated["entity_resolution_locked"] is False
 
 
 def test_legacy_reviews_infer_active_override_flag_from_text(monkeypatch):

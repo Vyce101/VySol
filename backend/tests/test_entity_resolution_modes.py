@@ -761,6 +761,98 @@ def test_entity_resolution_start_without_mode_defaults_to_exact_only(tmp_path, m
     assert captured["thread_started"] is True
 
 
+def test_entity_resolution_start_allows_exact_only_on_partial_world(tmp_path, monkeypatch):
+    world_id = "world-router-partial-exact-only"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(
+        entity_resolution_router,
+        "_load_meta",
+        lambda _world_id: {
+            "ingestion_status": "partial_failure",
+            "sources": [{"status": "partial_failure"}],
+        },
+    )
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(
+        entity_resolution_router,
+        "audit_ingestion_integrity",
+        lambda _world_id, **kwargs: {
+            "world": {"failed_records": 12, "current_unique_nodes": 4},
+            "blocking_issues": [
+                {"code": "chunk_vector_store_unreadable", "message": "chunk vectors are unreadable"},
+                {"code": "unique_node_vector_store_unreadable", "message": "unique node vectors are unreadable"},
+            ],
+        },
+    )
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 3})
+
+    captured: dict[str, object] = {}
+
+    def _fake_begin_entity_resolution_run(*args, **kwargs):
+        captured["begin_mode"] = args[4]
+        return {"status": "in_progress", "resolution_mode": args[4]}
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            captured["thread_args"] = kwargs.get("args")
+
+        def start(self):
+            captured["thread_started"] = True
+
+    monkeypatch.setattr(entity_resolution_router, "begin_entity_resolution_run", _fake_begin_entity_resolution_run)
+    monkeypatch.setattr(entity_resolution_router.threading, "Thread", FakeThread)
+
+    response = asyncio.run(
+        entity_resolution_router.entity_resolution_start(
+            world_id,
+            entity_resolution_router.EntityResolutionStartRequest(resolution_mode="exact_only"),
+        )
+    )
+
+    assert captured["begin_mode"] == "exact_only"
+    assert captured["thread_args"][4] == "exact_only"
+    assert response["state"]["resolution_mode"] == "exact_only"
+    assert captured["thread_started"] is True
+
+
+def test_entity_resolution_start_rejects_partial_world_for_exact_then_ai(tmp_path, monkeypatch):
+    world_id = "world-router-partial-exact-then-ai"
+    _prepare_world(tmp_path, monkeypatch, world_id)
+
+    monkeypatch.setattr(
+        entity_resolution_router,
+        "_load_meta",
+        lambda _world_id: {
+            "ingestion_status": "partial_failure",
+            "sources": [{"status": "partial_failure"}],
+        },
+    )
+    monkeypatch.setattr(entity_resolution_router, "get_resolution_status", lambda _world_id: {"status": "idle"})
+    monkeypatch.setattr(entity_resolution_router, "has_active_ingestion_run", lambda _world_id: False)
+    monkeypatch.setattr(
+        entity_resolution_router,
+        "audit_ingestion_integrity",
+        lambda _world_id, **kwargs: {
+            "world": {"failed_records": 2, "current_unique_nodes": 4},
+            "blocking_issues": [],
+        },
+    )
+    monkeypatch.setattr(entity_resolution_router, "get_safety_review_summary", lambda _world_id: {"unresolved_reviews": 0})
+
+    with pytest.raises(entity_resolution_router.HTTPException) as exc:
+        asyncio.run(
+            entity_resolution_router.entity_resolution_start(
+                world_id,
+                entity_resolution_router.EntityResolutionStartRequest(resolution_mode="exact_then_ai"),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Finish ingestion and repair source failures before resolving entities."
+
+
 def test_entity_resolution_start_preserves_explicit_mode_selection(tmp_path, monkeypatch):
     world_id = "world-router-explicit-mode"
     _prepare_world(tmp_path, monkeypatch, world_id)

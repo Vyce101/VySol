@@ -29,7 +29,14 @@ from .config import (
     world_sources_dir,
 )
 from .entity_text import build_unique_node_document
-from .graph_store import GraphStore
+from .graph_store import (
+    GraphStore,
+    build_candidate_graph_commit,
+    clear_active_ingest_graph_session,
+    create_active_ingest_graph_session,
+    get_active_ingest_graph_session,
+    mark_active_ingest_graph_abort_requested,
+)
 from .key_manager import AllKeysInCooldownError, get_key_manager, jittered_delay
 from .temporal_indexer import TemporalChunk, stamp_chunks
 from .vector_store import VectorStore, VectorStoreReadError
@@ -54,7 +61,7 @@ _active_run_tasks: dict[str, dict[str, Any]] = {}
 _active_run_tasks_lock = threading.RLock()
 
 RetryStage = Literal["extraction", "embedding", "all"]
-ChunkMode = Literal["full", "full_cleanup", "embedding_only"]
+ChunkMode = Literal["full", "full_cleanup", "embedding_only", "extraction_only", "extraction_cleanup_only"]
 IngestOperation = Literal["default", "rechunk_reingest", "reembed_all"]
 FailureScope = Literal["chunk", "node"]
 SafetyReviewStatus = Literal["blocked", "draft", "testing", "resolved"]
@@ -73,6 +80,7 @@ _WAIT_STATE_PRIORITY: dict[str, int] = {
     "waiting_for_api_key": 3,
 }
 _PROGRESS_WORLD_PHASES = {"unique_node_rebuild", "audit_finalization"}
+_ENTITY_RESOLUTION_LAST_COMPLETED_AT_KEY = "entity_resolution_last_completed_at"
 
 
 class ExtractionCoverageError(RuntimeError):
@@ -225,6 +233,23 @@ async def _await_with_abort(
         await asyncio.gather(abort_task, return_exceptions=True)
 
 
+async def _await_protected_run_task(
+    world_id: str,
+    expected_event: threading.Event,
+    awaitable: Awaitable[Any],
+) -> Any:
+    work_task = _register_run_task(
+        world_id,
+        expected_event,
+        asyncio.create_task(awaitable),
+        cancel_on_abort=False,
+    )
+    try:
+        return await asyncio.shield(work_task)
+    except asyncio.CancelledError:
+        return await work_task
+
+
 def _is_current_run(world_id: str, expected_event: threading.Event) -> bool:
     return _abort_events.get(world_id) is expected_event and _active_runs.get(world_id) is expected_event
 
@@ -247,6 +272,8 @@ def _register_run_task(
     world_id: str,
     expected_event: threading.Event,
     task: asyncio.Task[Any],
+    *,
+    cancel_on_abort: bool = True,
 ) -> asyncio.Task[Any]:
     with _active_run_tasks_lock:
         entry = _active_run_tasks.get(world_id)
@@ -254,17 +281,17 @@ def _register_run_task(
             entry = {
                 "event": expected_event,
                 "loop": task.get_loop(),
-                "tasks": set(),
+                "tasks": {},
             }
             _active_run_tasks[world_id] = entry
-        entry["tasks"].add(task)
+        entry["tasks"][task] = bool(cancel_on_abort)
 
     def _cleanup(completed_task: asyncio.Task[Any]) -> None:
         with _active_run_tasks_lock:
             entry = _active_run_tasks.get(world_id)
             if entry is None or entry.get("event") is not expected_event:
                 return
-            entry["tasks"].discard(completed_task)
+            entry["tasks"].pop(completed_task, None)
             if not entry["tasks"] and _abort_events.get(world_id) is not expected_event and _active_runs.get(world_id) is not expected_event:
                 _active_run_tasks.pop(world_id, None)
 
@@ -278,7 +305,11 @@ def _cancel_run_tasks(world_id: str) -> None:
         if entry is None:
             return
         loop = entry.get("loop")
-        tasks = list(entry.get("tasks", ()))
+        tasks = [
+            task
+            for task, cancel_on_abort in dict(entry.get("tasks", {})).items()
+            if cancel_on_abort
+        ]
 
     if loop is None:
         return
@@ -1312,12 +1343,15 @@ def list_safety_reviews(world_id: str) -> list[dict]:
     for review in _sorted_safety_reviews(list(cache.get("reviews", []))):
         source_id = str(review.get("source_id") or "")
         source = source_lookup.get(source_id, {})
+        locked, lock_reason = _review_entity_resolution_lock_state(meta, review)
         output.append(
             {
                 **review,
                 "display_name": str(source.get("display_name") or source_id or "Unknown source"),
                 "source_status": str(source.get("status") or ""),
                 "prefix_label": f"[B{int(review.get('book_number', 0) or 0)}:C{int(review.get('chunk_index', 0) or 0)}]",
+                "entity_resolution_locked": locked,
+                "entity_resolution_lock_reason": lock_reason,
             }
         )
     return output
@@ -1325,6 +1359,16 @@ def list_safety_reviews(world_id: str) -> list[dict]:
 
 def _normalize_review_text(value: Any) -> str:
     return str(value or "").replace("\r\n", "\n")
+
+
+def _parse_optional_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _review_has_active_override(review: dict) -> bool:
@@ -1363,6 +1407,51 @@ def _review_editor_raw_text(review: dict) -> str:
     if _review_has_explicit_draft(review):
         return _normalize_review_text(review.get("draft_raw_text"))
     return _review_baseline_raw_text(review)
+
+
+def _review_chunk_is_durably_live(meta: dict, review: dict) -> bool:
+    source_id = str(review.get("source_id") or "").strip()
+    try:
+        chunk_index = int(review.get("chunk_index", -1))
+    except (TypeError, ValueError):
+        return False
+    if chunk_index < 0:
+        return False
+    source = next(
+        (row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id),
+        None,
+    )
+    if not isinstance(source, dict):
+        return False
+    _ensure_source_tracking(source)
+    extracted = set(_normalize_index_list(source.get("extracted_chunks", [])))
+    embedded = set(_normalize_index_list(source.get("embedded_chunks", [])))
+    return chunk_index in extracted and chunk_index in embedded
+
+
+def _review_entity_resolution_lock_state(meta: dict, review: dict) -> tuple[bool, str | None]:
+    if not _review_has_active_override(review):
+        return False, None
+    if not _review_chunk_is_durably_live(meta, review):
+        return False, None
+
+    last_live_applied_at = _parse_optional_iso_datetime(review.get("last_live_applied_at"))
+    entity_resolution_completed_at = _parse_optional_iso_datetime(meta.get(_ENTITY_RESOLUTION_LAST_COMPLETED_AT_KEY))
+    if last_live_applied_at is None or entity_resolution_completed_at is None:
+        return False, None
+    if last_live_applied_at > entity_resolution_completed_at:
+        return False, None
+
+    return (
+        True,
+        "This repaired chunk is already part of the last entity-resolution run. Re-ingest or resume ingestion before editing it again.",
+    )
+
+
+def _ensure_safety_review_editable(meta: dict, review: dict) -> None:
+    locked, reason = _review_entity_resolution_lock_state(meta, review)
+    if locked:
+        raise RuntimeError(reason or "This safety review item is locked after entity resolution.")
 
 
 def _set_review_pending_status(review: dict) -> bool:
@@ -1809,6 +1898,7 @@ def _reset_safety_review_item(review: dict) -> None:
     review["last_test_error_kind"] = None
     review["last_test_error_message"] = None
     review["last_tested_at"] = None
+    review["last_live_applied_at"] = None
     review["has_active_override"] = False
     review["active_override_raw_text"] = ""
     _set_review_pending_status(review)
@@ -1942,6 +2032,7 @@ async def _cleanup_chunk_retry_artifacts(
     source_chunk: int,
     graph_lock: asyncio.Lock,
     vector_lock: asyncio.Lock,
+    remove_chunk_vector: bool = True,
 ) -> dict:
     async with graph_lock:
         pre_cleanup_node_ids = set(
@@ -2037,7 +2128,8 @@ async def _cleanup_chunk_retry_artifacts(
 
     removed_node_ids = sorted(pre_cleanup_node_ids - remaining_node_ids)
     async with vector_lock:
-        await asyncio.to_thread(vector_store.delete_document, chunk_id)
+        if remove_chunk_vector:
+            await asyncio.to_thread(vector_store.delete_document, chunk_id)
         if removed_node_ids:
             await asyncio.to_thread(unique_node_vector_store.delete_documents, removed_node_ids)
 
@@ -2639,7 +2731,7 @@ def _record_stage_failure(
         source["extracted_chunks"] = [i for i in source["extracted_chunks"] if i != chunk_index]
         if clear_embedded_chunk:
             source["embedded_chunks"] = [i for i in source["embedded_chunks"] if i != chunk_index]
-    else:
+    elif scope == "chunk":
         source["embedded_chunks"] = [i for i in source["embedded_chunks"] if i != chunk_index]
 
     source["status"] = "partial_failure"
@@ -2651,6 +2743,8 @@ def _clear_stage_failure(
     *,
     stage: Literal["extraction", "embedding"],
     chunk_id: str,
+    scope: FailureScope | None = None,
+    node_id: str | None = None,
 ) -> None:
     _ensure_source_tracking(source)
     source["stage_failures"] = [
@@ -2658,6 +2752,8 @@ def _clear_stage_failure(
         for rec in source.get("stage_failures", [])
         if not (
             str(rec.get("stage")) == stage
+            and (scope is None or str(rec.get("scope", "chunk")) == scope)
+            and (node_id is None or str(rec.get("node_id") or "") == str(node_id or ""))
             and (
                 str(rec.get("chunk_id")) == chunk_id
                 or str(rec.get("parent_chunk_id", "")) == chunk_id
@@ -2680,7 +2776,7 @@ def _mark_stage_success(
         _clear_stage_failure(source, stage="extraction", chunk_id=chunk_id)
     else:
         source["embedded_chunks"] = _normalize_index_list(source.get("embedded_chunks", []) + [chunk_index])
-        _clear_stage_failure(source, stage="embedding", chunk_id=chunk_id)
+        _clear_stage_failure(source, stage="embedding", chunk_id=chunk_id, scope="chunk")
 
 
 def _update_source_status_from_coverage(source: dict) -> None:
@@ -3577,6 +3673,9 @@ def _build_chunk_plan(
                 if idx in extracted_chunks:
                     plan[idx] = "embedding_only"
                     continue
+                if idx in embedded_chunks:
+                    plan[idx] = "extraction_only"
+                    continue
                 if idx >= start_from:
                     plan[idx] = "full"
         else:
@@ -3593,7 +3692,7 @@ def _build_chunk_plan(
             ):
                 skipped_review_chunk_indices.add(idx)
                 continue
-            plan[idx] = "full_cleanup"
+            plan[idx] = "extraction_cleanup_only" if idx in embedded_chunks else "full_cleanup"
 
     stage_failures = _stage_failures_for(source, retry_stage)
     extraction_failed: set[int] = set()
@@ -3617,18 +3716,67 @@ def _build_chunk_plan(
             continue
         if stage == "extraction":
             extraction_failed.add(idx)
-        elif stage == "embedding":
+        elif stage == "embedding" and str(rec.get("scope", "chunk")).lower() == "chunk":
             embedding_failed.add(idx)
 
     for idx in extraction_failed:
-        plan[idx] = "full_cleanup"
+        plan[idx] = "extraction_cleanup_only" if idx in embedded_chunks else "full_cleanup"
     for idx in embedding_failed:
-        if plan.get(idx) != "full_cleanup":
+        if plan.get(idx) not in ("full_cleanup", "extraction_cleanup_only"):
             plan[idx] = "embedding_only"
     for idx in skipped_review_chunk_indices:
         plan.pop(idx, None)
 
     return {idx: plan[idx] for idx in sorted(plan.keys())}
+
+
+def _build_node_embedding_repair_plan(
+    world_id: str,
+    source: dict,
+    *,
+    chunks_total: int,
+    retry_stage: RetryStage,
+    chunk_plan: dict[int, ChunkMode],
+) -> dict[int, list[str]]:
+    _ensure_source_tracking(source)
+    unresolved_review_chunk_ids = _unresolved_safety_review_chunk_ids(world_id)
+    extraction_planned = {
+        idx
+        for idx, mode in chunk_plan.items()
+        if mode in ("full", "full_cleanup", "extraction_only", "extraction_cleanup_only")
+    }
+    repair_plan: dict[int, list[str]] = {}
+    seen_by_chunk: dict[int, set[str]] = {}
+
+    for rec in _stage_failures_for(source, retry_stage):
+        if str(rec.get("stage", "")).lower() != "embedding":
+            continue
+        if str(rec.get("scope", "chunk")).lower() != "node":
+            continue
+        try:
+            idx = int(rec.get("chunk_index"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if idx < 0 or idx >= chunks_total or idx in extraction_planned:
+            continue
+        if _matches_unresolved_safety_review_chunk(
+            world_id,
+            source,
+            unresolved_review_chunk_ids=unresolved_review_chunk_ids,
+            chunk_id=str(rec.get("chunk_id") or ""),
+            chunk_index=idx,
+        ):
+            continue
+
+        node_id = str(rec.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        if node_id in seen_by_chunk.setdefault(idx, set()):
+            continue
+        seen_by_chunk[idx].add(node_id)
+        repair_plan.setdefault(idx, []).append(node_id)
+
+    return {idx: repair_plan[idx] for idx in sorted(repair_plan.keys())}
 
 
 def _durable_checkpoint_index_for_source(source: dict) -> int:
@@ -3709,6 +3857,8 @@ async def start_ingestion(
         meta.pop("ingestion_abort_requested_at", None)
         meta.pop("ingestion_wait", None)
         meta.pop("ingestion_blocking_issues", None)
+        if not is_reembed_all:
+            meta.pop(_ENTITY_RESOLUTION_LAST_COMPLETED_AT_KEY, None)
         _clear_progress_tracking(meta)
 
         if is_full_rebuild or is_reembed_all:
@@ -3808,7 +3958,21 @@ async def start_ingestion(
         chunk_overlap = int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150)))
         chunker = RecursiveChunker(chunk_size=chunk_size, overlap=chunk_overlap)
 
-        graph_store = GraphStore(world_id)
+        graph_store = await _await_with_abort(
+            world_id,
+            my_event,
+            asyncio.to_thread(GraphStore, world_id),
+        )
+        initial_graph_cache = await _await_with_abort(
+            world_id,
+            my_event,
+            asyncio.to_thread(graph_store.build_read_cache),
+        )
+        create_active_ingest_graph_session(
+            world_id,
+            graph_store,
+            read_cache=initial_graph_cache,
+        )
         vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
         unique_node_vector_store = VectorStore(
             world_id,
@@ -3836,6 +4000,12 @@ async def start_ingestion(
         vector_lock = _get_async_lock(world_id, _vector_locks)
         meta_lock = _get_async_lock(world_id, _meta_locks)
         chunk_embedding_batch_size = max(1, int(settings.get("chunk_embedding_batch_size", _CHUNK_VECTOR_BATCH_SIZE)))
+
+        def current_graph_store() -> GraphStore:
+            session = get_active_ingest_graph_session(world_id)
+            if session is not None:
+                return session.committed_store
+            return graph_store
 
         async def set_world_progress_phase(
             phase: IngestProgressPhase,
@@ -3977,6 +4147,27 @@ async def start_ingestion(
                 _mark_ingestion_live(meta, operation=operation_norm)
                 await _save_meta_async(world_id, meta)
 
+        async def _commit_staged_chunk_graph(stage: _StagedChunkArtifacts) -> tuple[int, int]:
+            session = get_active_ingest_graph_session(world_id)
+            if session is None:
+                raise RuntimeError("Active ingest graph session is unavailable for this world.")
+
+            snapshot = _staged_chunk_graph_snapshot(stage)
+            async with graph_lock:
+                async with session.commit_lock:
+                    candidate_store, candidate_cache = await _await_protected_run_task(
+                        world_id,
+                        my_event,
+                        asyncio.to_thread(
+                            build_candidate_graph_commit,
+                            world_id,
+                            session.committed_store,
+                            snapshot,
+                        ),
+                    )
+                    session.swap_committed(candidate_store, candidate_cache)
+                    return candidate_cache.node_count, candidate_cache.edge_count
+
         async def _run_node_embedding_batch(
             *,
             stage: _StagedChunkArtifacts,
@@ -4075,6 +4266,133 @@ async def start_ingestion(
                             meta,
                             source_id=source_id,
                             active_agent="node_embedding",
+                            total_chunks=total_chunks,
+                        ),
+                    },
+                )
+            finally:
+                if slot_index is not None:
+                    await _node_embedding_scheduler.release(
+                        slot_index,
+                        aborted=my_event.is_set() or not _is_current_run(world_id, my_event),
+                    )
+
+        async def _run_selected_node_embedding_batch(
+            *,
+            source_id: str,
+            book_number: int,
+            chunk_index: int,
+            chunk_id: str,
+            source: dict,
+            node_ids: list[str],
+            total_chunks: int,
+        ) -> None:
+            if not node_ids or my_event.is_set() or not _is_current_run(world_id, my_event):
+                return
+
+            slot_index: int | None = None
+            try:
+                slot_index = await acquire_stage_slot(
+                    _node_embedding_scheduler,
+                    wait_state="queued_for_embedding_slot",
+                    wait_stage="embedding",
+                    source_id=source_id,
+                    book_number=book_number,
+                    chunk_index=chunk_index,
+                    active_agent="node_embedding_repair",
+                )
+
+                api_key, _ = await acquire_gemini_key(
+                    source_id=source_id,
+                    book_number=book_number,
+                    chunk_index=chunk_index,
+                    active_agent="node_embedding_repair",
+                )
+
+                graph_store_snapshot = current_graph_store()
+                repairable_node_ids = [
+                    node_id
+                    for node_id in node_ids
+                    if graph_store_snapshot.get_node(str(node_id or "").strip())
+                ]
+
+                def abort_check() -> None:
+                    _ensure_not_aborted(world_id, my_event)
+
+                if repairable_node_ids:
+                    await _upsert_selected_unique_node_vectors(
+                        graph_store=graph_store_snapshot,
+                        unique_node_vector_store=unique_node_vector_store,
+                        node_ids=repairable_node_ids,
+                        api_key=api_key,
+                        vector_lock=vector_lock,
+                        abort_check=abort_check,
+                        awaitable_runner=lambda awaitable: _await_with_abort(world_id, my_event, awaitable),
+                    )
+
+                async with meta_lock:
+                    for node_id in node_ids:
+                        _clear_stage_failure(
+                            source,
+                            stage="embedding",
+                            chunk_id=chunk_id,
+                            scope="node",
+                            node_id=node_id,
+                        )
+                    _mark_ingestion_live(meta, operation=operation_norm)
+                    await _save_meta_async(world_id, meta)
+
+                await _update_live_unique_node_total()
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "agent_complete",
+                        "chunk_index": chunk_index,
+                        "book_number": book_number,
+                        "source_id": source_id,
+                        "agent": "node_embedding_repair",
+                        "node_vector_count": len(repairable_node_ids),
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            source_id=source_id,
+                            active_agent="node_embedding_repair",
+                            total_chunks=total_chunks,
+                        ),
+                    },
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                error_kind = _classify_exception_kind(exc)
+                err_text = str(exc)
+                _append_log(
+                    world_id,
+                    {
+                        "event": "node_vector_repair_error",
+                        "source_id": source_id,
+                        "book_number": book_number,
+                        "chunk_index": chunk_index,
+                        "error_type": error_kind,
+                        "error": err_text,
+                    },
+                )
+                push_sse_event(
+                    world_id,
+                    {
+                        "event": "error",
+                        "stage": "embedding",
+                        "chunk_index": chunk_index,
+                        "book_number": book_number,
+                        "source_id": source_id,
+                        "error_type": error_kind,
+                        "message": f"Node repair failed for chunk {chunk_index}: {err_text}",
+                        "safety_review_summary": get_safety_review_summary(world_id),
+                        **_build_progress_event(
+                            world_id,
+                            meta,
+                            source_id=source_id,
+                            active_agent="node_embedding_repair",
                             total_chunks=total_chunks,
                         ),
                     },
@@ -4286,9 +4604,9 @@ async def start_ingestion(
                 )
                 _ensure_not_aborted(world_id, my_event)
 
-                if mode == "full_cleanup":
+                if mode in ("full_cleanup", "extraction_cleanup_only"):
                     cleanup = await _cleanup_chunk_retry_artifacts(
-                        graph_store=graph_store,
+                        graph_store=current_graph_store(),
                         vector_store=vector_store,
                         unique_node_vector_store=unique_node_vector_store,
                         chunk_id=chunk,
@@ -4296,6 +4614,7 @@ async def start_ingestion(
                         source_chunk=chunk_idx,
                         graph_lock=graph_lock,
                         vector_lock=vector_lock,
+                        remove_chunk_vector=mode == "full_cleanup",
                     )
                     cleanup_log = {key: value for key, value in cleanup.items() if key != "removed_node_ids"}
                     if any(value for value in cleanup_log.values()):
@@ -4398,12 +4717,7 @@ async def start_ingestion(
                 if not _staged_chunk_has_graph_coverage(stage):
                     raise ExtractionCoverageError("Chunk produced no extraction coverage in graph store.")
 
-                live_total_nodes = 0
-                live_total_edges = 0
-                async with graph_lock:
-                    graph_store.restore_chunk_artifacts(_staged_chunk_graph_snapshot(stage))
-                    live_total_nodes = graph_store.get_node_count()
-                    live_total_edges = graph_store.get_edge_count()
+                live_total_nodes, live_total_edges = await _commit_staged_chunk_graph(stage)
 
                 async with meta_lock:
                     _mark_stage_success(source, stage="extraction", chunk_index=chunk_idx, chunk_id=chunk)
@@ -4412,6 +4726,11 @@ async def start_ingestion(
                     await _maybe_save_source_checkpoint(world_id, source, started_at=started_at)
                     _mark_ingestion_live(meta, operation=operation_norm)
                     await _save_meta_async(world_id, meta)
+
+                if my_event.is_set() or not _is_current_run(world_id, my_event):
+                    if node_embedding_tasks:
+                        await asyncio.gather(*node_embedding_tasks, return_exceptions=True)
+                    return
 
                 if node_embedding_tasks:
                     await asyncio.gather(*node_embedding_tasks, return_exceptions=True)
@@ -4558,8 +4877,15 @@ async def start_ingestion(
                 checkpoint=checkpoint,
                 reembed_all=is_reembed_all,
             )
+            node_repair_plan = _build_node_embedding_repair_plan(
+                world_id,
+                source,
+                chunks_total=chunks_total,
+                retry_stage=retry_stage_norm,
+                chunk_plan=chunk_plan,
+            )
 
-            if not chunk_plan:
+            if not chunk_plan and not node_repair_plan:
                 async with meta_lock:
                     _update_source_status_from_coverage(source)
                     _mark_ingestion_live(meta, operation=operation_norm)
@@ -4569,6 +4895,8 @@ async def start_ingestion(
             chunk_embedding_tasks: list[asyncio.Task[Any]] = []
             current_batch: list[tuple[int, TemporalChunk, ChunkMode]] = []
             for chunk_idx, mode in chunk_plan.items():
+                if mode in ("extraction_only", "extraction_cleanup_only"):
+                    continue
                 current_batch.append((chunk_idx, temporal_chunks[chunk_idx], mode))
                 if len(current_batch) >= chunk_embedding_batch_size:
                     chunk_embedding_tasks.append(
@@ -4624,11 +4952,30 @@ async def start_ingestion(
                     ),
                 )
                 for idx, mode in chunk_plan.items()
-                if mode in ("full", "full_cleanup")
+                if mode in ("full", "full_cleanup", "extraction_only", "extraction_cleanup_only")
             ]
 
-            if chunk_embedding_tasks or extraction_tasks:
-                await asyncio.gather(*(chunk_embedding_tasks + extraction_tasks))
+            node_repair_tasks = [
+                _register_run_task(
+                    world_id,
+                    my_event,
+                    asyncio.create_task(
+                        _run_selected_node_embedding_batch(
+                            source_id=source_id,
+                            book_number=book_number,
+                            chunk_index=chunk_idx,
+                            chunk_id=_chunk_id(world_id, source_id, chunk_idx),
+                            source=source,
+                            node_ids=node_ids,
+                            total_chunks=len(temporal_chunks),
+                        )
+                    ),
+                )
+                for chunk_idx, node_ids in node_repair_plan.items()
+            ]
+
+            if chunk_embedding_tasks or extraction_tasks or node_repair_tasks:
+                await asyncio.gather(*(chunk_embedding_tasks + extraction_tasks + node_repair_tasks))
 
             if not my_event.is_set() and _is_current_run(world_id, my_event):
                 async with meta_lock:
@@ -4655,7 +5002,7 @@ async def start_ingestion(
         if not my_event.is_set() and is_current:
             unique_node_rebuild_ran = False
             if is_reembed_all:
-                unique_node_total = graph_store.get_node_count()
+                unique_node_total = current_graph_store().get_node_count()
                 await set_world_progress_phase(
                     "unique_node_rebuild",
                     unique_node_rebuild_completed=0,
@@ -4679,7 +5026,7 @@ async def start_ingestion(
                     active_agent="node_embedding_rebuild",
                 )
                 await _rebuild_unique_node_vectors(
-                    graph_store,
+                    current_graph_store(),
                     unique_node_vector_store,
                     api_key,
                     vector_lock=vector_lock,
@@ -4823,6 +5170,7 @@ async def start_ingestion(
                 },
             )
     finally:
+        clear_active_ingest_graph_session(world_id)
         _clear_active_waits(world_id)
         _clear_run_tasks(world_id, my_event)
         _clear_run_ownership(world_id, my_event)
@@ -4841,6 +5189,7 @@ def abort_ingestion(world_id: str) -> None:
         meta.pop("ingestion_wait", None)
         _save_meta(world_id, meta)
         _clear_active_waits(world_id)
+        mark_active_ingest_graph_abort_requested(world_id)
         _cancel_run_tasks(world_id)
         push_sse_event(
             world_id,
@@ -4963,10 +5312,12 @@ async def update_safety_review_draft(world_id: str, review_id: str, draft_raw_te
 
     meta_lock = _get_async_lock(world_id, _meta_locks)
     async with meta_lock:
+        meta = _load_meta(world_id)
         cache = _load_safety_review_cache(world_id)
         review = _find_safety_review(cache, review_id)
         if review is None:
             raise FileNotFoundError("Safety review item not found.")
+        _ensure_safety_review_editable(meta, review)
 
         normalized_draft = _normalize_review_text(draft_raw_text)
         review["draft_raw_text"] = normalized_draft
@@ -4994,6 +5345,7 @@ async def reset_safety_review(world_id: str, review_id: str) -> dict:
         review = _find_safety_review(cache, review_id)
         if review is None:
             raise FileNotFoundError("Safety review item not found.")
+        _ensure_safety_review_editable(meta, review)
 
         source_id = str(review.get("source_id") or "").strip()
         source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
@@ -5327,6 +5679,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         review = _find_safety_review(cache, review_id)
         if review is None:
             raise FileNotFoundError("Safety review item not found.")
+        _ensure_safety_review_editable(meta, review)
 
         source_id = str(review.get("source_id") or "")
         source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
@@ -5551,6 +5904,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         review["last_tested_at"] = _now_iso()
         review["has_active_override"] = True
         review["active_override_raw_text"] = candidate_raw_text
+        review["last_live_applied_at"] = _now_iso()
         _set_review_pending_status(review)
         review["updated_at"] = _now_iso()
         _save_safety_review_cache(world_id, cache)

@@ -215,6 +215,9 @@ interface SafetyReviewItem {
     display_name: string;
     source_status?: string;
     prefix_label: string;
+    entity_resolution_locked?: boolean;
+    entity_resolution_lock_reason?: string | null;
+    last_live_applied_at?: string | null;
 }
 
 interface SafetyReviewResponse {
@@ -1008,13 +1011,21 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const reviewDraftValue = (review: SafetyReviewItem) => (
-        reviewDrafts[review.review_id]
+        review.entity_resolution_locked
+        ? (review.draft_raw_text
+            ?? review.active_override_raw_text
+            ?? review.original_raw_text)
+        : reviewDrafts[review.review_id]
         ?? review.draft_raw_text
         ?? review.active_override_raw_text
         ?? review.original_raw_text
     );
 
     const saveReviewDraft = async (review: SafetyReviewItem, draftRawText?: string) => {
+        if (review.entity_resolution_locked) {
+            alert(review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.");
+            return false;
+        }
         const nextDraft = draftRawText ?? reviewDraftValue(review);
         setReviewBusy(setSavingReviewIds, review.review_id, true);
         try {
@@ -1044,12 +1055,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const resetReviewDraftToOriginal = async (review: SafetyReviewItem) => {
+        if (review.entity_resolution_locked) {
+            alert(review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.");
+            return;
+        }
         const resetText = review.original_raw_text;
         setReviewDrafts((prev) => ({ ...prev, [review.review_id]: resetText }));
         await saveReviewDraft(review, resetText);
     };
 
     const resetReviewDraftToLive = async (review: SafetyReviewItem) => {
+        if (review.entity_resolution_locked) {
+            alert(review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.");
+            return;
+        }
         if (!review.has_active_override) return;
         const liveText = review.active_override_raw_text ?? "";
         setReviewDrafts((prev) => ({ ...prev, [review.review_id]: liveText }));
@@ -1057,6 +1076,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const testReviewDraft = async (review: SafetyReviewItem) => {
+        if (review.entity_resolution_locked) {
+            alert(review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.");
+            return;
+        }
         const currentDraft = reviewDraftValue(review);
         const didSave = await saveReviewDraft(review, currentDraft);
         if (!didSave) return;
@@ -1079,6 +1102,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     const resetReview = async (review: SafetyReviewItem) => {
+        if (review.entity_resolution_locked) {
+            alert(review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.");
+            return;
+        }
         const hasActiveOverride = review.has_active_override;
         const confirmMessage = hasActiveOverride
             ? "This will delete this chunk's live chunk data, embeddings, nodes, and edges, then keep the chunk in the Safety Queue so it can be retried cleanly. If entity resolution already merged this chunk into a surviving entity description, that merged description will stay and cannot be discarded here. Re-ingest if you need those entity descriptions rebuilt cleanly. Continue?"
@@ -1165,7 +1192,10 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const previousSettingsSummary = savedIngestSettings
         ? `Chunk ${savedIngestSettings.chunk_size_chars.toLocaleString()} chars | Overlap ${savedIngestSettings.chunk_overlap_chars.toLocaleString()} chars | Glean ${savedIngestSettings.glean_amount.toLocaleString()} | ${savedEmbeddingProviderLabel} | ${savedIngestSettings.embedding_model}`
         : null;
-    const canResolveEntitiesBase = !ingesting && allComplete && hasAnyIngested;
+    const blockingIssues = checkpoint?.blocking_issues ?? [];
+    const exactOnlyAllowedBlockingCodes = new Set(["chunk_vector_store_unreadable", "unique_node_vector_store_unreadable"]);
+    const hasExactOnlyBlockingIssue = blockingIssues.some((issue) => !exactOnlyAllowedBlockingCodes.has(String(issue?.code ?? "")));
+    const canResolveEntitiesBase = !ingesting && hasAnyIngested && !hasExactOnlyBlockingIssue;
     const isAborting = abortRequestPending || progress.phase === "aborting" || checkpoint?.progress_phase === "aborting";
     const sourceNameById = sources.reduce<Record<string, string>>((lookup, source) => {
         lookup[source.source_id] = source.display_name;
@@ -1205,18 +1235,24 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const hasAnySafetyQueueHistory = totalReviewCount > 0;
     const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
     const showSafetyQueueUnavailableState = safetyReviews.length === 0 && Boolean(safetyReviewLoadError);
-    const canResolveEntities = canResolveEntitiesBase && failedRecordCount === 0 && blockingIssueCount === 0 && !hasUnresolvedSafetyQueue;
+    const canResolveExactThenAi = !ingesting && allComplete && failedRecordCount === 0 && blockingIssueCount === 0 && !hasUnresolvedSafetyQueue;
+    const canResolveEntities = canResolveEntitiesBase;
     const resolveEntitiesDisabledReason = ingesting
         ? "Wait for ingestion to finish before starting entity resolution."
-        : blockingIssueCount > 0
+        : hasExactOnlyBlockingIssue
             ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running entity resolution.")
+            : !hasAnyIngested
+                ? "Ingest at least one source before running entity resolution."
+                : null;
+    const exactThenAiDisabledReason = ingesting
+        ? "Wait for ingestion to finish before starting entity resolution."
+        : blockingIssueCount > 0
+            ? (blockingIssueMessage ?? "Resolve world-level graph or vector blockers before running exact + chooser/combiner.")
             : hasUnresolvedSafetyQueue
-                ? "Resolve or reset pending safety review items before running entity resolution."
+                ? "Resolve or reset pending safety review items before running exact + chooser/combiner."
                 : !allComplete || failedRecordCount > 0
-                    ? "Finish ingestion or retry failed chunks before resolving entities."
-                    : canResolveEntities
-                        ? null
-                        : "Entity resolution is currently unavailable for this world.";
+                    ? "Finish ingestion and retry remaining failures before running exact + chooser/combiner."
+                    : null;
     const rebuildBlockedReason = unresolvedReviewCount > 0
         ? "This world has unresolved safety review items. Resolve or reset them before running Re-ingest."
         : null;
@@ -1656,9 +1692,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                 <EntityResolutionPanel
                     worldId={worldId}
                     canResolve={canResolveEntities}
+                    canRunExactThenAi={canResolveExactThenAi}
                     allComplete={allComplete}
                     isIngesting={ingesting}
                     disabledReason={resolveEntitiesDisabledReason}
+                    exactThenAiDisabledReason={exactThenAiDisabledReason}
                 />
 
                 {!showInitialIngestSetup && (
@@ -2550,6 +2588,8 @@ function SafetyReviewPanel({
                                 const statusChip = safetyReviewStatusPresentation(review);
                                 const lastOutcome = safetyReviewOutcomePresentation(review);
                                 const hasActiveOverride = review.has_active_override;
+                                const isLocked = Boolean(review.entity_resolution_locked);
+                                const lockReason = review.entity_resolution_lock_reason || "This repaired chunk is locked after entity resolution.";
                                 const isEditingAwayFromLiveOverride = hasActiveOverride && draftValue !== review.active_override_raw_text;
                                 const isSaving = Boolean(savingReviewIds[review.review_id]);
                                 const isTesting = Boolean(testingReviewIds[review.review_id]) || review.status === "testing";
@@ -2621,6 +2661,20 @@ function SafetyReviewPanel({
                                             </div>
                                         )}
 
+                                        {isLocked && (
+                                            <div style={{
+                                                padding: "10px 12px",
+                                                borderRadius: 8,
+                                                background: "var(--status-pending-bg)",
+                                                border: "1px solid var(--status-pending-bg)",
+                                                fontSize: 12,
+                                                color: "var(--status-pending-fg)",
+                                                lineHeight: 1.45,
+                                            }}>
+                                                {lockReason}
+                                            </div>
+                                        )}
+
                                         <div style={{ display: "grid", gap: 8 }}>
                                             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>
                                                 Read-only Prefix
@@ -2666,9 +2720,13 @@ function SafetyReviewPanel({
                                             <textarea
                                                 id={`safety-review-textarea-${review.review_id}`}
                                                 value={draftValue}
-                                                readOnly={isBusy}
+                                                readOnly={isBusy || isLocked}
                                                 onChange={(e) => onDraftChange(review.review_id, e.target.value)}
-                                                onBlur={() => { void onDraftBlur(review, draftValue); }}
+                                                onBlur={() => {
+                                                    if (!isLocked) {
+                                                        void onDraftBlur(review, draftValue);
+                                                    }
+                                                }}
                                                 rows={10}
                                                 style={{
                                                     width: "100%",
@@ -2683,28 +2741,28 @@ function SafetyReviewPanel({
                                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                                             <button
                                                 onClick={() => void onTest(review)}
-                                                disabled={isBusy}
+                                                disabled={isBusy || isLocked}
                                                 style={{
                                                     ...btnStyle,
                                                     background: "var(--primary)",
                                                     color: "var(--primary-contrast)",
-                                                    opacity: isBusy ? 0.6 : 1,
-                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                    opacity: isBusy || isLocked ? 0.6 : 1,
+                                                    cursor: isBusy || isLocked ? "not-allowed" : "pointer",
                                                 }}
                                             >
                                                 {isTesting ? "Testing..." : "Test"}
                                             </button>
-                                            <span title={liveResetTitle} style={{ display: "inline-flex" }}>
+                                            <span title={isLocked ? lockReason : liveResetTitle} style={{ display: "inline-flex" }}>
                                                 <button
                                                     onClick={() => void onResetToLive(review)}
-                                                    disabled={isBusy || !hasActiveOverride}
+                                                    disabled={isBusy || isLocked || !hasActiveOverride}
                                                     style={{
                                                         ...btnStyle,
                                                         background: hasActiveOverride ? "var(--background-tertiary)" : "var(--background-secondary)",
                                                         color: hasActiveOverride ? "var(--text-primary)" : "var(--text-muted)",
                                                         border: `1px solid ${hasActiveOverride ? "var(--border)" : "var(--background-tertiary)"}`,
-                                                        opacity: isBusy || !hasActiveOverride ? 0.55 : 1,
-                                                        cursor: isBusy || !hasActiveOverride ? "not-allowed" : "pointer",
+                                                        opacity: isBusy || isLocked || !hasActiveOverride ? 0.55 : 1,
+                                                        cursor: isBusy || isLocked || !hasActiveOverride ? "not-allowed" : "pointer",
                                                     }}
                                                 >
                                                     Reset to Live
@@ -2712,26 +2770,26 @@ function SafetyReviewPanel({
                                             </span>
                                             <button
                                                 onClick={() => void onResetToOriginal(review)}
-                                                disabled={isBusy}
+                                                disabled={isBusy || isLocked}
                                                 style={{
                                                     ...btnStyle,
                                                     background: "var(--background-tertiary)",
                                                     color: "var(--text-primary)",
-                                                    opacity: isBusy ? 0.6 : 1,
-                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                    opacity: isBusy || isLocked ? 0.6 : 1,
+                                                    cursor: isBusy || isLocked ? "not-allowed" : "pointer",
                                                 }}
                                             >
                                                 Reset to Original
                                             </button>
                                             <button
                                                 onClick={() => void onResetChunk(review)}
-                                                disabled={isBusy}
+                                                disabled={isBusy || isLocked}
                                                 style={{
                                                     ...btnStyle,
                                                     background: hasActiveOverride ? "var(--status-error-bg)" : "var(--border)",
                                                     color: hasActiveOverride ? "var(--status-error-fg)" : "var(--text-primary)",
-                                                    opacity: isBusy ? 0.6 : 1,
-                                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                                    opacity: isBusy || isLocked ? 0.6 : 1,
+                                                    cursor: isBusy || isLocked ? "not-allowed" : "pointer",
                                                 }}
                                             >
                                                 {isResetting ? "Resetting..." : "Reset Chunk"}

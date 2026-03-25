@@ -998,10 +998,12 @@ def _update_meta_from_state(world_id: str, state: dict[str, Any], graph_store: G
         meta["total_edges"] = graph_store.get_edge_count()
         if state.get("status") in {"complete", "completed"}:
             meta["entity_resolution_last_completed_graph_nodes"] = current_total_nodes
+            meta["entity_resolution_last_completed_at"] = state.get("updated_at")
     elif state.get("status") in {"complete", "completed"}:
         current_total_nodes = _coerce_non_negative_int(meta.get("total_nodes"))
         if current_total_nodes is not None:
             meta["entity_resolution_last_completed_graph_nodes"] = current_total_nodes
+        meta["entity_resolution_last_completed_at"] = state.get("updated_at")
     _save_meta(world_id, meta)
     baseline = _coerce_non_negative_int(meta.get("entity_resolution_last_completed_graph_nodes"))
     current_total = _coerce_non_negative_int(meta.get("total_nodes"))

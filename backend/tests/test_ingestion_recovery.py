@@ -5,6 +5,7 @@ import time
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
+from core import graph_store
 from core import ingestion_engine
 from routers import ingestion as ingestion_router
 
@@ -588,9 +589,175 @@ def test_build_chunk_plan_keeps_extraction_when_chunk_is_embedded_but_not_extrac
     )
 
     assert plan == {
-        1: "full",
+        1: "extraction_only",
         2: "full",
     }
+
+
+def test_build_chunk_plan_keeps_embedded_extraction_failures_out_of_chunk_reembedding():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [1],
+        "stage_failures": [
+            {
+                "stage": "extraction",
+                "scope": "chunk",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+            }
+        ],
+        "extracted_chunks": [0],
+        "embedded_chunks": [0, 1],
+    }
+
+    plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=3,
+        resume=True,
+        retry_only=True,
+        retry_stage="all",
+        checkpoint=None,
+    )
+
+    assert plan == {1: "extraction_cleanup_only"}
+
+
+def test_build_chunk_plan_ignores_node_scope_embedding_failures_for_chunk_reembedding():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [],
+        "stage_failures": [
+            {
+                "stage": "embedding",
+                "scope": "node",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+                "node_id": "node-1",
+            }
+        ],
+        "extracted_chunks": [0, 1],
+        "embedded_chunks": [0, 1],
+    }
+
+    plan = ingestion_engine._build_chunk_plan(
+        "world-1",
+        source,
+        chunks_total=3,
+        resume=True,
+        retry_only=True,
+        retry_stage="embedding",
+        checkpoint=None,
+    )
+
+    assert plan == {}
+
+
+def test_build_node_embedding_repair_plan_collects_node_scope_failures_only():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [],
+        "stage_failures": [
+            {
+                "stage": "embedding",
+                "scope": "node",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+                "node_id": "node-1",
+            },
+            {
+                "stage": "embedding",
+                "scope": "node",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+                "node_id": "node-2",
+            },
+            {
+                "stage": "embedding",
+                "scope": "chunk",
+                "chunk_index": 2,
+                "chunk_id": "chunk_world-1_source-a_2",
+            },
+        ],
+        "extracted_chunks": [0, 1, 2],
+        "embedded_chunks": [0, 1],
+    }
+
+    repair_plan = ingestion_engine._build_node_embedding_repair_plan(
+        "world-1",
+        source,
+        chunks_total=3,
+        retry_stage="embedding",
+        chunk_plan={2: "embedding_only"},
+    )
+
+    assert repair_plan == {1: ["node-1", "node-2"]}
+
+
+def test_record_node_embedding_failure_keeps_chunk_embedded():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [],
+        "stage_failures": [],
+        "extracted_chunks": [1],
+        "embedded_chunks": [1],
+    }
+
+    ingestion_engine._record_stage_failure(
+        source,
+        stage="embedding",
+        chunk_index=1,
+        chunk_id="chunk_world-1_source-a_1",
+        source_id="source-a",
+        book_number=1,
+        error_type="coverage_gap",
+        error_message="Node missing embedding coverage in unique node vector store.",
+        scope="node",
+        node_id="node-1",
+    )
+
+    assert source["embedded_chunks"] == [1]
+
+
+def test_mark_chunk_embedding_success_keeps_node_scope_failures():
+    source = {
+        "source_id": "source-a",
+        "failed_chunks": [1],
+        "stage_failures": [
+            {
+                "stage": "embedding",
+                "scope": "chunk",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+                "parent_chunk_id": "chunk_world-1_source-a_1",
+                "node_id": None,
+            },
+            {
+                "stage": "embedding",
+                "scope": "node",
+                "chunk_index": 1,
+                "chunk_id": "chunk_world-1_source-a_1",
+                "parent_chunk_id": "chunk_world-1_source-a_1",
+                "node_id": "node-1",
+            },
+        ],
+        "extracted_chunks": [1],
+        "embedded_chunks": [],
+    }
+
+    ingestion_engine._mark_stage_success(
+        source,
+        stage="embedding",
+        chunk_index=1,
+        chunk_id="chunk_world-1_source-a_1",
+    )
+
+    failure_keys = {
+        (row["stage"], row["chunk_index"], row.get("scope", "chunk"), row.get("node_id"))
+        for row in source["stage_failures"]
+    }
+    assert source["embedded_chunks"] == [1]
+    assert failure_keys == {("embedding", 1, "node", "node-1")}
 
 
 def test_durable_checkpoint_index_requires_both_extraction_and_embedding():
@@ -1538,16 +1705,26 @@ def test_abort_ingestion_emits_aborting_for_live_run(monkeypatch):
     monkeypatch.setattr(ingestion_engine, "_abort_events", {"world-1": live_event})
     monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": live_event})
     monkeypatch.setattr(ingestion_engine, "_wake_stage_schedulers", lambda: None)
+    active_store = graph_store.GraphStore.from_graph("world-1", ingestion_engine.nx.MultiDiGraph())
+    graph_store.create_active_ingest_graph_session(
+        "world-1",
+        active_store,
+        read_cache=active_store.build_read_cache(),
+    )
 
-    ingestion_engine.abort_ingestion("world-1")
+    try:
+        ingestion_engine.abort_ingestion("world-1")
 
-    assert live_event.is_set() is True
-    assert holder["meta"]["ingestion_abort_requested_at"]
-    assert "ingestion_wait" not in holder["meta"]
-    events = ingestion_engine.drain_sse_events("world-1")
-    assert events[-1]["event"] == "aborting"
-    assert events[-1]["progress_phase"] == "aborting"
-    assert events[-1]["wait_state"] is None
+        assert live_event.is_set() is True
+        assert holder["meta"]["ingestion_abort_requested_at"]
+        assert "ingestion_wait" not in holder["meta"]
+        assert graph_store.get_active_ingest_graph_session("world-1").abort_requested is True
+        events = ingestion_engine.drain_sse_events("world-1")
+        assert events[-1]["event"] == "aborting"
+        assert events[-1]["progress_phase"] == "aborting"
+        assert events[-1]["wait_state"] is None
+    finally:
+        graph_store.clear_active_ingest_graph_session("world-1")
 
 
 def test_sleep_with_abort_cancels_promptly():
@@ -1587,6 +1764,46 @@ def test_await_with_abort_cancels_slow_work_promptly(monkeypatch):
             await asyncio.wait_for(waiter, timeout=0.5)
 
         await asyncio.wait_for(cancelled.wait(), timeout=0.5)
+
+    asyncio.run(scenario())
+
+
+def test_cancel_run_tasks_skips_protected_tasks(monkeypatch):
+    abort_event = threading.Event()
+    monkeypatch.setattr(ingestion_engine, "_abort_events", {"world-1": abort_event})
+    monkeypatch.setattr(ingestion_engine, "_active_runs", {"world-1": abort_event})
+    ingestion_engine._active_run_tasks.clear()
+
+    async def cancelable_work():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise
+
+    async def protected_work():
+        await asyncio.sleep(0.05)
+        return "protected-complete"
+
+    async def scenario():
+        cancelable_task = ingestion_engine._register_run_task(
+            "world-1",
+            abort_event,
+            asyncio.create_task(cancelable_work()),
+        )
+        protected_task = ingestion_engine._register_run_task(
+            "world-1",
+            abort_event,
+            asyncio.create_task(protected_work()),
+            cancel_on_abort=False,
+        )
+
+        await asyncio.sleep(0)
+        ingestion_engine._cancel_run_tasks("world-1")
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cancelable_task, timeout=0.5)
+
+        assert await asyncio.wait_for(protected_task, timeout=0.5) == "protected-complete"
 
     asyncio.run(scenario())
 
@@ -1806,6 +2023,59 @@ def test_recover_stale_abort_preserves_completed_books_and_synthesizes_missing_w
     )
     assert retry_plan[1] == "embedding_only"
     assert retry_plan[2] == "full_cleanup"
+
+
+def test_cleanup_chunk_retry_artifacts_can_preserve_chunk_vector(monkeypatch):
+    delete_calls: list[str] = []
+    delete_node_calls: list[list[str]] = []
+
+    monkeypatch.setattr(ingestion_engine, "_chunk_provenance_node_ids", lambda *args, **kwargs: [])
+
+    class CleanupGraph:
+        def __init__(self):
+            self.nodes = {}
+
+        def edges(self, data=False, keys=False):
+            return []
+
+        def remove_node(self, node_id):
+            self.nodes.pop(node_id, None)
+
+        def save(self):
+            raise AssertionError("save should not be called for an empty cleanup graph")
+
+    class CleanupGraphStore:
+        def __init__(self):
+            self.graph = CleanupGraph()
+
+        def remove_chunk_artifacts(self, *, chunk_id, source_book, source_chunk):
+            return {"removed_nodes": 0, "removed_edges": 0, "removed_claims": 0}
+
+    class CleanupVectorStore:
+        def delete_document(self, chunk_id):
+            delete_calls.append(chunk_id)
+
+    class CleanupNodeVectorStore:
+        def delete_documents(self, node_ids):
+            delete_node_calls.append(list(node_ids))
+
+    cleanup = asyncio.run(
+        ingestion_engine._cleanup_chunk_retry_artifacts(
+            graph_store=CleanupGraphStore(),
+            vector_store=CleanupVectorStore(),
+            unique_node_vector_store=CleanupNodeVectorStore(),
+            chunk_id="chunk_world-1_source-a_1",
+            source_book=1,
+            source_chunk=1,
+            graph_lock=asyncio.Lock(),
+            vector_lock=asyncio.Lock(),
+            remove_chunk_vector=False,
+        )
+    )
+
+    assert cleanup["removed_node_ids"] == []
+    assert delete_calls == []
+    assert delete_node_calls == []
 
 
 def test_abort_route_rejects_missing_world(monkeypatch):

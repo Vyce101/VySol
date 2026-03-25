@@ -369,7 +369,7 @@ async def ingest_safety_review_update(world_id: str, review_id: str, req: Safety
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         message = str(exc)
-        status_code = 409 if "active ingest run" in message.lower() else 400
+        status_code = 409 if ("active ingest run" in message.lower() or "entity-resolution run" in message.lower() or "entity resolution" in message.lower()) else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
     return {
         "review": review,
@@ -390,7 +390,7 @@ async def ingest_safety_review_manual_rescue(world_id: str, req: ManualSafetyRev
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         message = str(exc)
-        status_code = 409 if "active ingest run" in message.lower() else 400
+        status_code = 409 if ("active ingest run" in message.lower() or "entity-resolution run" in message.lower() or "entity resolution" in message.lower()) else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
@@ -403,7 +403,7 @@ async def ingest_safety_review_test(world_id: str, review_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         message = str(exc)
-        status_code = 409 if "active ingest run" in message.lower() else 400
+        status_code = 409 if ("active ingest run" in message.lower() or "entity-resolution run" in message.lower() or "entity resolution" in message.lower()) else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
@@ -416,7 +416,7 @@ async def ingest_safety_review_reset(world_id: str, review_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         message = str(exc)
-        status_code = 409 if "active ingest run" in message.lower() else 400
+        status_code = 409 if ("active ingest run" in message.lower() or "entity-resolution run" in message.lower() or "entity resolution" in message.lower()) else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 

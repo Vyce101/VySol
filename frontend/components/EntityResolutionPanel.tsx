@@ -25,9 +25,11 @@ import {
 interface EntityResolutionPanelProps {
     worldId: string;
     canResolve: boolean;
+    canRunExactThenAi: boolean;
     allComplete: boolean;
     isIngesting: boolean;
     disabledReason?: string | null;
+    exactThenAiDisabledReason?: string | null;
 }
 
 interface ResolutionLogRow {
@@ -157,9 +159,11 @@ function getResolutionStatusDetail(payload: {
 export default function EntityResolutionPanel({
     worldId,
     canResolve,
+    canRunExactThenAi,
     allComplete,
     isIngesting,
     disabledReason,
+    exactThenAiDisabledReason,
 }: EntityResolutionPanelProps) {
     const [open, setOpen] = useState(false);
     const [topK, setTopK] = useState(50);
@@ -291,16 +295,24 @@ export default function EntityResolutionPanel({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [worldId]);
 
+    useEffect(() => {
+        if (!running && !canRunExactThenAi && resolutionMode === "exact_then_ai") {
+            setResolutionMode("exact_only");
+        }
+    }, [canRunExactThenAi, resolutionMode, running]);
+
     const gateMessage = running
         ? status?.phase === "aborting"
             ? "Entity resolution is stopping after the current in-flight work finishes."
             : "Entity resolution is running and can be monitored here."
         : disabledReason
             ? disabledReason
-            : isIngesting
+        : isIngesting
                 ? "Wait for ingestion to finish before starting entity resolution."
                 : canResolve
-                    ? "Ready for post-ingestion entity resolution."
+                    ? canRunExactThenAi
+                        ? "Ready for post-ingestion entity resolution."
+                        : "Exact-only entity resolution is available now. Exact + chooser/combiner unlocks after the world is fully complete."
                     : !allComplete
                         ? "Finish ingestion or retry failed chunks before resolving entities."
                         : "Entity resolution is currently unavailable for this world.";
@@ -392,6 +404,11 @@ export default function EntityResolutionPanel({
     const eventRows = [...logs].reverse();
 
     const handleStart = async () => {
+        if (resolutionMode === "exact_then_ai" && !canRunExactThenAi) {
+            setFailureMessage(exactThenAiDisabledReason ?? "Exact + chooser/combiner is still locked for this world.");
+            setStatusDetail(null);
+            return;
+        }
         setBusy(true);
         setFailureMessage(null);
         setLogs([]);
@@ -574,9 +591,22 @@ export default function EntityResolutionPanel({
                                                     style={controlInputStyle}
                                                 >
                                                     <option value="exact_only">Exact only</option>
-                                                    <option value="exact_then_ai">Exact + chooser/combiner</option>
+                                                    <option value="exact_then_ai" disabled={!canRunExactThenAi}>Exact + chooser/combiner</option>
                                                 </select>
                                             </label>
+                                            {!canRunExactThenAi && (
+                                                <div style={{
+                                                    padding: "10px 12px",
+                                                    borderRadius: 10,
+                                                    border: "1px solid var(--status-warning-soft-border)",
+                                                    background: "var(--status-warning-soft-bg)",
+                                                    color: "var(--status-warning-soft-fg)",
+                                                    fontSize: 12,
+                                                    lineHeight: 1.5,
+                                                }}>
+                                                    {exactThenAiDisabledReason ?? "Exact + chooser/combiner is still locked for this world. Exact only is still available."}
+                                                </div>
+                                            )}
                                             <label style={controlLabelStyle}>
                                                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                                                     <span style={controlTextStyle}>Top K candidates</span>

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
+from dataclasses import dataclass, field
 import json
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +18,59 @@ import networkx as nx
 from .config import world_graph_path
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ActiveIngestGraphReadCache:
+    graph_payload: dict
+    node_details: dict[str, dict]
+    search_entries: list[tuple[str, dict]]
+    node_count: int
+    edge_count: int
+
+
+@dataclass
+class ActiveIngestGraphSession:
+    world_id: str
+    committed_store: GraphStore
+    read_cache: ActiveIngestGraphReadCache
+    commit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    abort_requested: bool = False
+
+    def get_all_data(self) -> dict:
+        return self.read_cache.graph_payload
+
+    def get_node(self, node_id: str) -> dict | None:
+        node = self.read_cache.node_details.get(str(node_id))
+        return dict(node) if isinstance(node, dict) else None
+
+    def search_nodes(self, query: str) -> list[dict]:
+        q = str(query or "").strip().lower()
+        if not q:
+            return []
+        return [
+            dict(result)
+            for label, result in self.read_cache.search_entries
+            if q in label
+        ]
+
+    def get_node_count(self) -> int:
+        return int(self.read_cache.node_count)
+
+    def get_edge_count(self) -> int:
+        return int(self.read_cache.edge_count)
+
+    def swap_committed(
+        self,
+        committed_store: GraphStore,
+        read_cache: ActiveIngestGraphReadCache,
+    ) -> None:
+        self.committed_store = committed_store
+        self.read_cache = read_cache
+
+
+_active_ingest_graph_sessions: dict[str, ActiveIngestGraphSession] = {}
+_active_ingest_graph_sessions_lock = threading.RLock()
 
 
 def _now_iso() -> str:
@@ -59,6 +115,17 @@ class GraphStore:
         self.world_id = world_id
         self.path = world_graph_path(world_id)
         self.graph = self._load()
+
+    @classmethod
+    def from_graph(cls, world_id: str, graph: nx.Graph) -> GraphStore:
+        store = cls.__new__(cls)
+        store.world_id = world_id
+        store.path = world_graph_path(world_id)
+        store.graph = graph
+        return store
+
+    def clone(self) -> GraphStore:
+        return self.from_graph(self.world_id, self.graph.copy())
 
     def _load(self) -> nx.Graph:
         """Load GEXF or return empty graph."""
@@ -237,6 +304,93 @@ class GraphStore:
 
         return neighbors
 
+    def build_read_cache(self) -> ActiveIngestGraphReadCache:
+        neighbor_map = self._connected_neighbor_map()
+        display_names = {
+            str(node_id): str(attrs.get("display_name", node_id))
+            for node_id, attrs in self.graph.nodes(data=True)
+        }
+
+        graph_nodes: list[dict] = []
+        node_details: dict[str, dict] = {}
+        search_entries: list[tuple[str, dict]] = []
+
+        for nid, attrs in self.graph.nodes(data=True):
+            claims = attrs.get("claims", [])
+            if isinstance(claims, str):
+                claims = json.loads(claims)
+            source_chunks = attrs.get("source_chunks", [])
+            if isinstance(source_chunks, str):
+                source_chunks = json.loads(source_chunks)
+
+            node_id = str(nid)
+            label = display_names.get(node_id, node_id)
+            connection_count = len(neighbor_map.get(node_id, {}))
+            claim_count = len(claims)
+
+            graph_nodes.append({
+                "id": node_id,
+                "label": label,
+                "description": attrs.get("description", ""),
+                "claim_count": claim_count,
+                "connection_count": connection_count,
+                "source_chunks": source_chunks,
+                "created_at": attrs.get("created_at", ""),
+            })
+
+            neighbors = [
+                {
+                    "id": neighbor_id,
+                    "label": display_names.get(neighbor_id, neighbor_id),
+                    "description": description,
+                }
+                for neighbor_id, description in sorted(
+                    neighbor_map.get(node_id, {}).items(),
+                    key=lambda item: display_names.get(item[0], item[0]).lower(),
+                )
+            ]
+
+            node_details[node_id] = {
+                "id": node_id,
+                "display_name": label,
+                "normalized_id": attrs.get("normalized_id", ""),
+                "description": attrs.get("description", ""),
+                "claims": claims,
+                "source_chunks": source_chunks,
+                "connection_count": connection_count,
+                "neighbors": neighbors,
+                "created_at": attrs.get("created_at", ""),
+                "updated_at": attrs.get("updated_at", ""),
+            }
+            search_entries.append((
+                label.lower(),
+                {
+                    "id": node_id,
+                    "label": label,
+                    "claim_count": claim_count,
+                },
+            ))
+
+        graph_edges: list[dict] = []
+        for u, v, attrs in self._iter_edge_rows():
+            graph_edges.append({
+                "source": u,
+                "target": v,
+                "description": attrs.get("description", ""),
+                "strength": int(attrs.get("strength", 1)),
+                "source_book": attrs.get("source_book", 0),
+                "source_chunk": attrs.get("source_chunk", 0),
+                "created_at": attrs.get("created_at", ""),
+            })
+
+        return ActiveIngestGraphReadCache(
+            graph_payload={"nodes": graph_nodes, "edges": graph_edges},
+            node_details=node_details,
+            search_entries=search_entries,
+            node_count=len(graph_nodes),
+            edge_count=len(graph_edges),
+        )
+
     def get_all_data(self) -> dict:
         """Return nodes and edges in API-friendly format."""
         neighbor_map = self._connected_neighbor_map()
@@ -310,7 +464,9 @@ class GraphStore:
 
     def search_nodes(self, query: str) -> list[dict]:
         """Substring search on display_name."""
-        q = query.lower()
+        q = str(query or "").lower()
+        if not q:
+            return []
         results = []
         for nid, attrs in self.graph.nodes(data=True):
             if q in attrs.get("display_name", "").lower():
@@ -409,7 +565,7 @@ class GraphStore:
             "edges": edges,
         }
 
-    def restore_chunk_artifacts(self, snapshot: dict) -> None:
+    def restore_chunk_artifacts(self, snapshot: dict, *, save: bool = True) -> None:
         """Restore a previously captured chunk artifact snapshot."""
         nodes = list(snapshot.get("nodes") or [])
         edges = list(snapshot.get("edges") or [])
@@ -440,7 +596,8 @@ class GraphStore:
             else:
                 self.graph.add_edge(source, target, **attrs)
 
-        self._save()
+        if save:
+            self._save()
 
     def remove_chunk_artifacts(self, chunk_id: str, source_book: int, source_chunk: int) -> dict:
         """
@@ -549,3 +706,51 @@ class GraphStore:
                 if node_data:
                     results.append(node_data)
         return results[:max_nodes]
+
+
+def create_active_ingest_graph_session(
+    world_id: str,
+    committed_store: GraphStore,
+    *,
+    read_cache: ActiveIngestGraphReadCache | None = None,
+) -> ActiveIngestGraphSession:
+    session = ActiveIngestGraphSession(
+        world_id=world_id,
+        committed_store=committed_store,
+        read_cache=read_cache or committed_store.build_read_cache(),
+    )
+    with _active_ingest_graph_sessions_lock:
+        _active_ingest_graph_sessions[world_id] = session
+    return session
+
+
+def get_active_ingest_graph_session(world_id: str) -> ActiveIngestGraphSession | None:
+    with _active_ingest_graph_sessions_lock:
+        return _active_ingest_graph_sessions.get(world_id)
+
+
+def clear_active_ingest_graph_session(world_id: str) -> None:
+    with _active_ingest_graph_sessions_lock:
+        _active_ingest_graph_sessions.pop(world_id, None)
+
+
+def mark_active_ingest_graph_abort_requested(world_id: str) -> None:
+    session = get_active_ingest_graph_session(world_id)
+    if session is not None:
+        session.abort_requested = True
+
+
+def has_active_ingest_graph_session(world_id: str) -> bool:
+    return get_active_ingest_graph_session(world_id) is not None
+
+
+def build_candidate_graph_commit(
+    world_id: str,
+    committed_store: GraphStore,
+    snapshot: dict,
+) -> tuple[GraphStore, ActiveIngestGraphReadCache]:
+    candidate_store = committed_store.clone()
+    candidate_store.restore_chunk_artifacts(snapshot, save=False)
+    candidate_cache = candidate_store.build_read_cache()
+    candidate_store.save()
+    return candidate_store, candidate_cache
