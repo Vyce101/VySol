@@ -3,7 +3,7 @@
  * Prepends NEXT_PUBLIC_API_URL. No component hardcodes localhost:8000.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export class ApiError extends Error {
     status: number;
@@ -73,6 +73,8 @@ interface ApiStreamGetOptions {
     isTerminal?: (data: Record<string, unknown>) => boolean;
 }
 
+type BackendReachability = "reachable" | "unreachable" | "unknown";
+
 export function entityResolutionPaths(worldId: string) {
     const base = `/worlds/${worldId}/entity-resolution`;
     return {
@@ -84,13 +86,33 @@ export function entityResolutionPaths(worldId: string) {
     };
 }
 
-function normalizeFetchError(err: unknown): Error {
+async function probeBackendReachability(): Promise<BackendReachability> {
+    try {
+        const response = await fetch(`${API_BASE}/health`);
+        return response.ok ? "reachable" : "unknown";
+    } catch {
+        return "unreachable";
+    }
+}
+
+function buildBlockedResponseMessage(path: string): string {
+    return `The browser could not read the API response from ${API_BASE}${path}. Check backend startup errors or CORS.`;
+}
+
+async function normalizeFetchError(err: unknown, path: string): Promise<Error> {
     if (err instanceof Error) {
         const message = err.message || "Unexpected error";
         if (
             err.name === "TypeError" &&
             (/fetch/i.test(message) || /networkerror/i.test(message) || /resource/i.test(message))
         ) {
+            if (typeof navigator !== "undefined" && navigator.onLine === false) {
+                return new Error("Your browser appears to be offline. Reconnect and try again.");
+            }
+            const reachability = await probeBackendReachability();
+            if (reachability === "reachable") {
+                return new Error(buildBlockedResponseMessage(path));
+            }
             return new Error(`Could not reach the backend at ${API_BASE}. Make sure the API server is running.`);
         }
         return err;
@@ -113,7 +135,7 @@ export async function apiFetch<T = unknown>(
             },
         });
     } catch (err) {
-        throw normalizeFetchError(err);
+        throw await normalizeFetchError(err, path);
     }
 
     if (!res.ok) {
@@ -133,7 +155,7 @@ export async function apiUpload<T = unknown>(
     try {
         res = await fetch(url, { method: "POST", body: formData });
     } catch (err) {
-        throw normalizeFetchError(err);
+        throw await normalizeFetchError(err, path);
     }
 
     if (!res.ok) {
@@ -259,7 +281,7 @@ export async function apiStreamPost(
         if ((err instanceof Error && err.name === "AbortError") || options.signal?.aborted) {
             return;
         }
-        onError?.(normalizeFetchError(err));
+        onError?.(await normalizeFetchError(err, path));
     }
 }
 

@@ -21,6 +21,7 @@ app = FastAPI(title="VySol", version="1.0.0")
 default_cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://[::1]:3000",
 ]
 cors_origins = parse_csv_env(
     os.environ.get("CORS_ORIGINS"),

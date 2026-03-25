@@ -56,11 +56,11 @@ call :finish_step_timer
 call :start_step_timer
 echo [6/6] Launching VySol...
 echo.
-echo       Backend:  http://localhost:8000
-echo       Frontend: http://localhost:3000
+echo       Backend:  http://127.0.0.1:8000
+echo       Frontend: http://127.0.0.1:3000
 echo.
-echo       Press Ctrl+C to stop both servers.
-echo       If ports 8000 or 3000 are already in use, stop those processes first.
+echo       Status: automatic process cleanup is disabled for safety.
+echo       Close any old VySol windows manually before relaunching if needed.
 echo ============================================
 echo.
 if defined VYSOL_SKIP_LAUNCH (
@@ -69,15 +69,24 @@ if defined VYSOL_SKIP_LAUNCH (
     exit /b 0
 )
 
-start "VySol Backend" cmd /k "cd backend && venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
-
+echo       Status: checking backend port 8000...
+call :ensure_port_available 8000 backend
+if errorlevel 1 goto :fail
+echo       Status: backend port 8000 is available.
+echo       Status: checking frontend port 3000...
+call :ensure_port_available 3000 frontend
+if errorlevel 1 goto :fail
+echo       Status: frontend port 3000 is available.
+echo       Status: starting backend window...
+call :launch_backend_window
+if errorlevel 1 goto :fail
 timeout /t 3 /nobreak >nul
-start "" "http://localhost:3000"
+start "" "http://127.0.0.1:3000"
 call :finish_step_timer
 
+echo       Status: starting frontend in this window...
 cd frontend
 call "%NPM_EXE%" run dev
-pause
 exit /b 0
 
 :ensure_python
@@ -458,6 +467,57 @@ exit /b 0
 where winget >nul 2>nul
 if errorlevel 1 (
     echo ERROR: winget was not found. Install the missing prerequisite manually and re-run VySol.bat.
+    exit /b 1
+)
+exit /b 0
+
+:stop_existing_vysol_windows
+call :stop_window_title "VySol Backend"
+call :stop_window_title "VySol Frontend"
+exit /b 0
+
+:stop_window_title
+taskkill /FI "IMAGENAME eq cmd.exe" /FI "WINDOWTITLE eq %~1*" /T /F >nul 2>nul
+exit /b 0
+
+:ensure_port_available
+set "PORT_PIDS="
+call :get_listening_port_pids %~1 PORT_PIDS
+if defined PORT_PIDS (
+    echo ERROR: The %~2 server port %~1 is already in use by another process. PIDs: !PORT_PIDS!
+    echo        VySol.bat will not auto-close anything anymore to avoid touching unrelated apps.
+    echo        Close the process using port %~1 or change that app's port, then run VySol.bat again.
+    exit /b 1
+)
+exit /b 0
+
+:get_listening_port_pids
+setlocal enabledelayedexpansion
+set "PORT_PIDS="
+set "PORT_SCAN_FILE=%TEMP%\vysol-port-%~1-%RANDOM%%RANDOM%.tmp"
+netstat -ano | findstr "LISTENING" | findstr /C:":%~1" > "%PORT_SCAN_FILE%"
+if exist "%PORT_SCAN_FILE%" (
+    for /f "usebackq tokens=5" %%P in ("%PORT_SCAN_FILE%") do (
+        set "PORT_PID=%%P"
+        if "!PORT_PID!"=="" (
+            rem Ignore blank netstat rows.
+        ) else (
+            echo !PORT_PIDS! | findstr /C:" !PORT_PID! " >nul
+            if errorlevel 1 set "PORT_PIDS=!PORT_PIDS! !PORT_PID!"
+        )
+    )
+    del "%PORT_SCAN_FILE%" >nul 2>nul
+)
+if defined PORT_PIDS (
+    set "PORT_PIDS=!PORT_PIDS:~1!"
+)
+endlocal & set "%~2=%PORT_PIDS%"
+exit /b 0
+
+:launch_backend_window
+start "VySol Backend" /min cmd /k "cd /d ""%~dp0backend"" && venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+if errorlevel 1 (
+    echo ERROR: Failed to launch the backend window.
     exit /b 1
 )
 exit /b 0

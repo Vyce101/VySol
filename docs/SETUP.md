@@ -2,7 +2,7 @@
 
 ## Start in 60 Seconds
 
-1. Run [VySol.bat](../VySol.bat). It will launch backend/frontend and open a browser tab automatically.
+1. Run [VySol.bat](../VySol.bat). It will launch the backend, start the frontend in the current terminal window, and open a browser tab automatically.
 2. On the home page, click the top-right settings icon.
 3. Open `Key Library` and add the provider credentials you plan to use:
    - Gemini API keys for Gemini-backed chat/extraction/entity-resolution/embeddings
@@ -65,6 +65,13 @@ What `VySol.bat` expects:
 
 If Python and Node are already installed, the launcher will reuse them instead of reinstalling them.
 
+Launcher behavior:
+
+- VySol opens the app at `http://127.0.0.1:3000`
+- The frontend talks to the backend at `http://127.0.0.1:8000` by default
+- Before launching, `VySol.bat` checks whether ports `8000` and `3000` are already in use
+- For safety, it no longer auto-closes unrelated processes on those ports; if either port is busy, the launcher stops and tells you which PID to close manually
+
 ## Manual Setup
 
 If you do not want to use the batch file, you can run the app manually.
@@ -95,8 +102,14 @@ npm install
 npm run dev
 ```
 
-By default the frontend talks to `http://localhost:8000`.
+By default the frontend talks to `http://127.0.0.1:8000`.
 The repo now includes `frontend/.env.local.example` with that default value for clean local setup.
+
+Local development notes:
+
+- The backend's default CORS allowlist includes `http://localhost:3000`, `http://127.0.0.1:3000`, and `http://[::1]:3000`
+- If you already have a custom frontend `.env.local`, make sure `NEXT_PUBLIC_API_URL` matches the backend you actually want to use
+- If port `3000` or `8000` is already occupied, stop the old process manually before rerunning `VySol.bat`
 
 ## First Run Behavior
 
