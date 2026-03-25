@@ -49,12 +49,19 @@ interface ContextGraphSnapshot {
 interface ChatDetailResponse {
     messages?: any[];
     version?: number;
+    has_more?: boolean;
+    cursor?: number | null;
+    total_messages?: number;
+    title?: string;
 }
 
 interface ChatThreadState {
     messages: Message[];
     version: number | null;
     streaming: boolean;
+    hasMoreHistory: boolean;
+    nextCursor: number | null;
+    loadingOlder: boolean;
     loadRequestId: number;
     streamRequestId: number;
 }
@@ -340,7 +347,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                     <div
                         style={{
                             position: "relative",
-                            padding: "16px 40px",
+                            padding: "16px 40px 30px",
                             borderRadius: "var(--radius)",
                             background: msg.role === "user" ? "var(--primary)" : "var(--card)",
                             border: msg.role === "model" ? "1px solid var(--border)" : "none",
@@ -391,64 +398,6 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                         }}
                         ref={(element) => onMessageBubbleRef(index, element)}
                     >
-                        {(isHovered || isMenuOpen) && (
-                            <div
-                                style={{
-                                    position: "absolute",
-                                    top: 12,
-                                    [msg.role === "user" ? "right" : "left"]: 12,
-                                    zIndex: isMenuOpen ? 50 : 10,
-                                }}
-                            >
-                                <button
-                                    onClick={() => onToggleMenu(index)}
-                                    style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        color: msg.role === "user" ? "rgba(255,255,255,0.7)" : "var(--text-muted)",
-                                        cursor: "pointer",
-                                        padding: 4,
-                                        borderRadius: 4,
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                    }}
-                                    title="Message options"
-                                >
-                                    <MoreVertical size={16} />
-                                </button>
-
-                                {isMenuOpen && (
-                                    <div
-                                        style={{
-                                            position: "absolute",
-                                            top: 24,
-                                            [msg.role === "user" ? "right" : "left"]: 0,
-                                            background: "var(--card)",
-                                            border: "1px solid var(--border)",
-                                            borderRadius: 6,
-                                            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-                                            zIndex: 50,
-                                            padding: 4,
-                                            minWidth: 120,
-                                            display: "flex",
-                                            flexDirection: "column",
-                                            gap: 2,
-                                            color: "var(--text-primary)",
-                                        }}
-                                    >
-                                        <ActionMenuItem icon={<Edit2 size={13} />} label="Edit" onClick={() => onStartEditing(index, msg.content)} />
-                                        <ActionMenuItem icon={<RefreshCw size={13} />} label={msg.status === "incomplete" ? "Continue" : "Regenerate"} onClick={() => onRegenerate(index)} />
-                                        {msg.contextPayload && (
-                                            <ActionMenuItem icon={<Info size={13} />} label="Context" onClick={() => onOpenContext(msg.contextPayload, msg.contextMeta)} />
-                                        )}
-                                        <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
-                                        <ActionMenuItem icon={<Trash2 size={13} />} label="Delete" onClick={() => onDelete(index)} danger />
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
                         <div
                             style={{ overflowWrap: "break-word" }}
                             className={`markdown-content ${msg.role === "user" ? "markdown-content-user" : "markdown-content-model"}`}
@@ -505,29 +454,66 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
                             <span style={{ display: "inline-block", width: 6, height: 16, background: "var(--primary)", marginLeft: 2, animation: "pulse-glow 1s infinite" }} />
                         )}
 
-                        {msg.nodesUsed && msg.nodesUsed.length > 0 && (
-                            <details style={{ marginTop: 8, fontSize: 12, color: "var(--text-subtle)" }}>
-                                <summary style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                                    <Info size={12} /> {msg.nodesUsed.length} nodes used
-                                </summary>
-                                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                    {msg.nodesUsed.map((n, j) => (
-                                        <span
-                                            key={j}
+                        {(isHovered || isMenuOpen) && (
+                            <>
+                                {(isHovered || isMenuOpen) && (
+                                    <div
+                                        style={{
+                                            position: "absolute",
+                                            right: 12,
+                                            bottom: 8,
+                                            zIndex: isMenuOpen ? 50 : 10,
+                                        }}
+                                    >
+                                        <button
+                                            onClick={() => onToggleMenu(index)}
                                             style={{
-                                                padding: "2px 8px",
-                                                borderRadius: 9999,
-                                                background: "var(--background)",
-                                                border: "1px solid var(--border)",
-                                                fontSize: 11,
-                                                color: "var(--text-primary)",
+                                                background: "transparent",
+                                                border: "none",
+                                                color: msg.role === "user" ? "rgba(255,255,255,0.7)" : "var(--text-muted)",
+                                                cursor: "pointer",
+                                                padding: 4,
+                                                borderRadius: 4,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
                                             }}
+                                            title="Message options"
                                         >
-                                            {n.display_name}
-                                        </span>
-                                    ))}
-                                </div>
-                            </details>
+                                            <MoreVertical size={16} />
+                                        </button>
+
+                                        {isMenuOpen && (
+                                            <div
+                                                style={{
+                                                    position: "absolute",
+                                                    right: 0,
+                                                    bottom: 24,
+                                                    background: "var(--card)",
+                                                    border: "1px solid var(--border)",
+                                                    borderRadius: 6,
+                                                    boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+                                                    zIndex: 50,
+                                                    padding: 4,
+                                                    minWidth: 120,
+                                                    display: "flex",
+                                                    flexDirection: "column",
+                                                    gap: 2,
+                                                    color: "var(--text-primary)",
+                                                }}
+                                            >
+                                                <ActionMenuItem icon={<Edit2 size={13} />} label="Edit" onClick={() => onStartEditing(index, msg.content)} />
+                                                <ActionMenuItem icon={<RefreshCw size={13} />} label={msg.status === "incomplete" ? "Continue" : "Regenerate"} onClick={() => onRegenerate(index)} />
+                                                {msg.contextPayload && (
+                                                    <ActionMenuItem icon={<Info size={13} />} label="Context" onClick={() => onOpenContext(msg.contextPayload, msg.contextMeta)} />
+                                                )}
+                                                <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+                                                <ActionMenuItem icon={<Trash2 size={13} />} label="Delete" onClick={() => onDelete(index)} danger />
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
                 )}
@@ -956,6 +942,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         messages: [],
         version: null,
         streaming: false,
+        hasMoreHistory: false,
+        nextCursor: null,
+        loadingOlder: false,
         loadRequestId: 0,
         streamRequestId: 0,
     });
@@ -986,6 +975,29 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         contextPayload: m.contextPayload || m.context_payload,
         contextMeta: m.contextMeta || m.context_meta,
     });
+
+    const applyPagedChatState = (chatId: string, data: ChatDetailResponse, messagesToApply: Message[]) => {
+        setThreadState(chatId, (current) => ({
+            ...current,
+            messages: messagesToApply,
+            version: data.version ?? current.version,
+            hasMoreHistory: Boolean(data.has_more),
+            nextCursor: typeof data.cursor === "number" ? data.cursor : null,
+            loadingOlder: false,
+        }));
+
+        if (typeof data.version === "number" || typeof data.title === "string") {
+            setThreads((prev) => prev.map((thread) => (
+                thread.id === chatId
+                    ? {
+                        ...thread,
+                        title: typeof data.title === "string" ? data.title : thread.title,
+                        version: data.version ?? thread.version,
+                    }
+                    : thread
+            )));
+        }
+    };
 
     const setThreadState = (chatId: string, updater: (current: ChatThreadState) => ChatThreadState) => {
         setChatStates((prev) => {
@@ -1118,7 +1130,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
     async function checkIngestionStatus() {
         try {
-            const data = await apiFetch<{ ingestion_status: string }>(`/worlds/${worldId}`);
+            const data = await apiFetch<{ ingestion_status: string }>(`/worlds/${worldId}/header`);
             setIncomplete(data.ingestion_status !== "complete");
         } catch { /* ignore */ }
     };
@@ -1135,7 +1147,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
     async function loadThreads() {
         try {
-            const data = await apiFetch<ChatThread[]>(`/worlds/${worldId}/chats`);
+            const data = await apiFetch<ChatThread[]>(`/worlds/${worldId}/chats/summaries`);
             const deduped: ChatThread[] = [];
             const seen = new Set<string>();
             for (const thread of data) {
@@ -1160,7 +1172,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             loadRequestId: requestId,
         }));
         try {
-            const data = await apiFetch<ChatDetailResponse>(`/worlds/${worldId}/chats/${chatId}`);
+            const data = await apiFetch<ChatDetailResponse>(`/worlds/${worldId}/chats/${chatId}/messages?limit=20`);
             const mapped = (data.messages || []).map((message, index) => mapMessage(message, `loaded-${chatId}-${index}`));
             setThreadState(chatId, (current) => {
                 if (current.loadRequestId !== requestId || current.streaming) {
@@ -1170,12 +1182,19 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     ...current,
                     messages: mapped,
                     version: data.version ?? 0,
+                    hasMoreHistory: Boolean(data.has_more),
+                    nextCursor: typeof data.cursor === "number" ? data.cursor : null,
+                    loadingOlder: false,
                 };
             });
-            if (typeof data.version === "number") {
+            if (typeof data.version === "number" || typeof data.title === "string") {
                 setThreads((prev) => prev.map((thread) => (
                     thread.id === chatId
-                        ? { ...thread, version: data.version ?? thread.version }
+                        ? {
+                            ...thread,
+                            title: typeof data.title === "string" ? data.title : thread.title,
+                            version: data.version ?? thread.version,
+                        }
                         : thread
                 )));
             }
@@ -1222,12 +1241,66 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                 messages: [],
                 version: data.version ?? null,
                 streaming: false,
+                hasMoreHistory: false,
+                nextCursor: null,
+                loadingOlder: false,
             }));
             setActiveChatId(data.id);
             void loadThreads();
             return data.id;
         } catch { /* ignore */ }
         return null;
+    };
+
+    const loadOlderMessages = async () => {
+        if (!activeChatId) return;
+        const currentState = chatStatesRef.current[activeChatId] ?? createEmptyThreadState();
+        if (currentState.loadingOlder || currentState.streaming || !currentState.hasMoreHistory || currentState.nextCursor === null) {
+            return;
+        }
+
+        const container = scrollContainerRef.current;
+        const previousHeight = container?.scrollHeight ?? 0;
+        const previousTop = container?.scrollTop ?? 0;
+        const chatId = activeChatId;
+
+        setThreadState(chatId, (current) => ({ ...current, loadingOlder: true }));
+        isAutoScrollEnabled.current = false;
+
+        try {
+            const data = await apiFetch<ChatDetailResponse>(
+                `/worlds/${worldId}/chats/${chatId}/messages?limit=20&cursor=${currentState.nextCursor}`
+            );
+            const mapped = (data.messages || []).map((message, index) => mapMessage(message, `older-${chatId}-${index}`));
+            setThreadState(chatId, (current) => ({
+                ...current,
+                messages: [...mapped, ...current.messages],
+                version: data.version ?? current.version,
+                hasMoreHistory: Boolean(data.has_more),
+                nextCursor: typeof data.cursor === "number" ? data.cursor : null,
+                loadingOlder: false,
+            }));
+
+            if (typeof data.version === "number" || typeof data.title === "string") {
+                setThreads((prev) => prev.map((thread) => (
+                    thread.id === chatId
+                        ? {
+                            ...thread,
+                            title: typeof data.title === "string" ? data.title : thread.title,
+                            version: data.version ?? thread.version,
+                        }
+                        : thread
+                )));
+            }
+
+            requestAnimationFrame(() => {
+                const nextContainer = scrollContainerRef.current;
+                if (!nextContainer) return;
+                nextContainer.scrollTop = (nextContainer.scrollHeight - previousHeight) + previousTop;
+            });
+        } catch {
+            setThreadState(chatId, (current) => ({ ...current, loadingOlder: false }));
+        }
     };
 
     const deleteChat = async (chatId: string) => {
@@ -1312,50 +1385,10 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         }, 500);
     };
 
-    const saveChatHistory = async (chatId: string, newMessages: Message[]) => {
-        const baseVersion = chatStatesRef.current[chatId]?.version ?? 0;
-        try {
-            const data = await apiFetch<{ version?: number; messages?: any[] }>(`/worlds/${worldId}/chats/${chatId}/history`, {
-                method: "PUT",
-                body: JSON.stringify({
-                    messages: newMessages.map((message) => ({
-                        role: message.role,
-                        content: message.content,
-                        thought_text: message.thoughtText,
-                        gemini_parts: message.geminiParts,
-                        message_id: message.messageId,
-                        status: message.status || "complete",
-                        nodes_used: message.nodesUsed,
-                        context_payload: message.contextPayload,
-                        context_meta: message.contextMeta,
-                    })),
-                    base_version: baseVersion,
-                })
-            });
-            setThreadState(chatId, (current) => ({
-                ...current,
-                version: data.version ?? current.version,
-                messages: data.messages ? data.messages.map((message, index) => mapMessage(message, newMessages[index]?.localKey)) : newMessages,
-                streaming: false,
-            }));
-            if (typeof data.version === "number") {
-                setThreads((prev) => prev.map((thread) => (
-                    thread.id === chatId
-                        ? { ...thread, version: data.version ?? thread.version }
-                        : thread
-                )));
-            }
-            return true;
-        } catch (err) {
-            if (err instanceof ApiError && err.status === 409) {
-                await loadChatDetails(chatId);
-                alert("This chat changed in another tab. Loaded the latest saved messages instead.");
-                return false;
-            }
-            alert("Failed to update chat history on server.");
-            return false;
-        }
-    }
+    const handleMutationConflict = async (chatId: string, errorMessage: string) => {
+        await loadChatDetails(chatId);
+        alert(errorMessage);
+    };
 
     const handleSend = async (draft: string, customHistory?: Message[]) => {
         const textToSend = draft.trim();
@@ -1364,8 +1397,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         let currentChatId = activeChatId;
 
         if (!currentChatId) {
-            const title = textToSend.slice(0, 30) + (textToSend.length > 30 ? "..." : "");
-            currentChatId = await createNewChat(title);
+            currentChatId = await createNewChat();
             if (!currentChatId) {
                 alert("Failed to create chat");
                 return false;
@@ -1385,6 +1417,9 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             ...current,
             messages: [...newHistory, optimisticReply],
             streaming: true,
+            nextCursor: current.hasMoreHistory && current.nextCursor !== null
+                ? current.nextCursor + 2
+                : current.nextCursor,
             streamRequestId,
         }));
 
@@ -1525,14 +1560,28 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const deleteMessage = async (index: number) => {
         if (!confirm("Are you sure you want to delete this message?")) return;
         if (!activeChatId) return;
-        const newMessages = [...messages];
-        newMessages.splice(index, 1);
-        setThreadState(activeChatId, (current) => ({
-            ...current,
-            messages: newMessages,
-        }));
+        const targetMessage = messages[index];
+        if (!targetMessage?.messageId) return;
         setMenuOpenIndex(null);
-        await saveChatHistory(activeChatId, newMessages);
+        try {
+            const data = await apiFetch<ChatDetailResponse>(
+                `/worlds/${worldId}/chats/${activeChatId}/messages/${targetMessage.messageId}/delete`,
+                {
+                    method: "POST",
+                    body: JSON.stringify({
+                        base_version: chatStatesRef.current[activeChatId]?.version ?? 0,
+                    }),
+                }
+            );
+            const mapped = (data.messages || []).map((message, messageIndex) => mapMessage(message, `deleted-${activeChatId}-${messageIndex}`));
+            applyPagedChatState(activeChatId, data, mapped);
+        } catch (err) {
+            if (err instanceof ApiError && err.status === 409) {
+                await handleMutationConflict(activeChatId, "This chat changed in another tab. Loaded the latest saved messages instead.");
+                return;
+            }
+            alert("Failed to delete the message.");
+        }
     };
 
     const startEditing = (index: number, content: string) => {
@@ -1546,52 +1595,62 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
     const saveEdit = async (index: number) => {
         if (!activeChatId) return;
-        const newMessages = [...messages];
-        newMessages[index].content = editContent;
-        if (newMessages[index].role === "model") {
-            newMessages[index].thoughtText = "";
-            newMessages[index].geminiParts = [];
-        }
-        setThreadState(activeChatId, (current) => ({
-            ...current,
-            messages: newMessages,
-        }));
+        const targetMessage = messages[index];
+        if (!targetMessage?.messageId) return;
         setEditingIndex(null);
-        await saveChatHistory(activeChatId, newMessages);
+        try {
+            const data = await apiFetch<ChatDetailResponse>(
+                `/worlds/${worldId}/chats/${activeChatId}/messages/${targetMessage.messageId}`,
+                {
+                    method: "PATCH",
+                    body: JSON.stringify({
+                        content: editContent,
+                        base_version: chatStatesRef.current[activeChatId]?.version ?? 0,
+                    }),
+                }
+            );
+            const mapped = (data.messages || []).map((message, messageIndex) => mapMessage(message, `edited-${activeChatId}-${messageIndex}`));
+            applyPagedChatState(activeChatId, data, mapped);
+        } catch (err) {
+            if (err instanceof ApiError && err.status === 409) {
+                await handleMutationConflict(activeChatId, "This chat changed in another tab. Loaded the latest saved messages instead.");
+                return;
+            }
+            alert("Failed to save the edit.");
+        }
     };
 
     const regenerateMessage = async (index: number) => {
-        const msg = messages[index];
-        let newMessages: Message[] = [];
-        let promptToResend = "";
-        
-        if (msg.role === "model") {
-            if (index > 0 && messages[index-1].role === "user") {
-                newMessages = messages.slice(0, index - 1);
-                promptToResend = messages[index-1].content;
-            } else {
-                alert("Cannot regenerate model message without a preceding user message.");
-                return;
-            }
-        } else {
-            newMessages = messages.slice(0, index);
-            promptToResend = msg.content;
-        }
-        
-        if (activeChatId) {
-            setThreadState(activeChatId, (current) => ({
-                ...current,
-                messages: newMessages,
-            }));
-        }
+        if (!activeChatId) return;
+        const targetMessage = messages[index];
+        if (!targetMessage?.messageId) return;
         setMenuOpenIndex(null);
-        if (activeChatId) {
-            const saved = await saveChatHistory(activeChatId, newMessages);
-            if (!saved) {
+        try {
+            const data = await apiFetch<ChatDetailResponse & { resend_message?: string }>(
+                `/worlds/${worldId}/chats/${activeChatId}/messages/${targetMessage.messageId}/regenerate`,
+                {
+                    method: "POST",
+                    body: JSON.stringify({
+                        base_version: chatStatesRef.current[activeChatId]?.version ?? 0,
+                    }),
+                }
+            );
+            const mapped = (data.messages || []).map((message, messageIndex) => mapMessage(message, `regenerated-${activeChatId}-${messageIndex}`));
+            applyPagedChatState(activeChatId, data, mapped);
+            if (data.resend_message) {
+                await handleSend(data.resend_message, mapped);
+            }
+        } catch (err) {
+            if (err instanceof ApiError && err.status === 409) {
+                await handleMutationConflict(activeChatId, "This chat changed in another tab. Loaded the latest saved messages instead.");
                 return;
             }
+            if (err instanceof ApiError && err.status === 400) {
+                alert(err.message);
+                return;
+            }
+            alert("Failed to regenerate the message.");
         }
-        await handleSend(promptToResend, newMessages);
     };
 
     const saveChatPrompt = async () => {
@@ -1765,6 +1824,32 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     onScroll={handleScroll}
                     style={{ flex: 1, overflowY: "auto", padding: "20px 0" }}
                 >
+                    {activeChatId && activeThreadState.hasMoreHistory && (
+                        <div style={{ display: "flex", justifyContent: "center", padding: "0 20px 16px" }}>
+                            <button
+                                onClick={() => { void loadOlderMessages(); }}
+                                disabled={activeThreadState.loadingOlder}
+                                style={{
+                                    border: "1px solid var(--border)",
+                                    background: "var(--card)",
+                                    color: "var(--text-primary)",
+                                    borderRadius: 9999,
+                                    padding: "8px 14px",
+                                    fontSize: 12,
+                                    fontWeight: 700,
+                                    letterSpacing: "0.02em",
+                                    cursor: activeThreadState.loadingOlder ? "not-allowed" : "pointer",
+                                    opacity: activeThreadState.loadingOlder ? 0.7 : 1,
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                }}
+                            >
+                                {activeThreadState.loadingOlder ? <Loader2 size={14} className="animate-spin" /> : null}
+                                Show More Messages
+                            </button>
+                        </div>
+                    )}
                     <ChatMessageList
                         messages={messages}
                         hoveredMsgIndex={hoveredMsgIndex}

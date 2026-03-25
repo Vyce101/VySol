@@ -103,6 +103,14 @@ def _serialize_world_card(meta: dict) -> dict:
     }
 
 
+def _serialize_world_header(meta: dict) -> dict:
+    return {
+        "world_id": meta.get("world_id"),
+        "world_name": meta.get("world_name"),
+        "ingestion_status": meta.get("ingestion_status"),
+    }
+
+
 def _is_duplicate_in_progress(meta: dict) -> bool:
     return bool(meta.get("is_temporary_duplicate")) and str(meta.get("duplication_status") or "") == "in_progress"
 
@@ -270,6 +278,12 @@ async def get_world(world_id: str):
             }
     meta["safety_review_summary"] = get_safety_review_summary(world_id)
     return _with_effective_ingest_settings(meta)
+
+
+@router.get("/{world_id}/header")
+async def get_world_header(world_id: str):
+    meta = _load_meta(world_id)
+    return _serialize_world_header(meta)
 
 
 @router.patch("/{world_id}")

@@ -214,3 +214,65 @@ def test_stream_disconnect_marks_model_turn_incomplete(monkeypatch):
     assert saved is not None
     assert saved["messages"][-1]["status"] == "incomplete"
     assert saved["messages"][-1]["content"] == "partial"
+
+
+def test_get_chat_messages_returns_latest_page(monkeypatch):
+    world_id = f"world-{uuid.uuid4()}"
+    store = _make_store(monkeypatch, world_id)
+    created = store.create_chat("Durable")
+    stored = store.save_chat(
+        created["id"],
+        {
+            **created,
+            "messages": [
+                {
+                    "message_id": f"m-{index}",
+                    "role": "user" if index % 2 == 0 else "model",
+                    "content": f"message {index}",
+                    "status": "complete",
+                }
+                for index in range(25)
+            ],
+        },
+        expected_version=created["version"],
+    )
+
+    page = asyncio.run(chat_router.get_chat_messages(world_id, created["id"]))
+
+    assert page["version"] == stored["version"]
+    assert len(page["messages"]) == 20
+    assert page["messages"][0]["message_id"] == "m-5"
+    assert page["cursor"] == 20
+
+
+def test_regenerate_from_model_message_truncates_and_returns_prompt(monkeypatch):
+    world_id = f"world-{uuid.uuid4()}"
+    store = _make_store(monkeypatch, world_id)
+    created = store.create_chat("Durable")
+    saved = store.save_chat(
+        created["id"],
+        {
+            **created,
+            "messages": [
+                {"message_id": "u-1", "role": "user", "content": "hello", "status": "complete"},
+                {"message_id": "m-1", "role": "model", "content": "hi", "status": "complete"},
+                {"message_id": "u-2", "role": "user", "content": "again", "status": "complete"},
+                {"message_id": "m-2", "role": "model", "content": "reply", "status": "complete"},
+            ],
+        },
+        expected_version=created["version"],
+    )
+
+    payload = asyncio.run(
+        chat_router.regenerate_from_message(
+            world_id,
+            created["id"],
+            "m-2",
+            chat_router.VersionedMutationRequest(base_version=saved["version"]),
+        )
+    )
+
+    truncated = store.get_chat(created["id"])
+    assert payload["resend_message"] == "again"
+    assert truncated is not None
+    assert [message["message_id"] for message in truncated["messages"]] == ["u-1", "m-1"]

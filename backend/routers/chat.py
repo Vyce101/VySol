@@ -1,32 +1,46 @@
-"""Chat endpoint — SSE streaming and History CRUD."""
+"""Chat endpoints: SSE streaming, paged history, and targeted mutations."""
 
 from __future__ import annotations
 
 import json
 import uuid
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from core.config import world_meta_path
 from core.chat_engine import stream_chat
-from core.chat_store import ChatStore, ChatVersionConflictError
+from core.chat_store import CHAT_PAGE_SIZE, ChatStore, ChatVersionConflictError
+from core.config import world_meta_path
 
 router = APIRouter()
+
 
 class ChatRequest(BaseModel):
     message: str
     settings_override: dict | None = None
 
+
 class CreateChatRequest(BaseModel):
     title: str = "New Chat"
+
 
 class RenameChatRequest(BaseModel):
     title: str
     base_version: int
 
+
 class UpdateChatHistoryRequest(BaseModel):
     messages: list[dict]
+    base_version: int
+
+
+class UpdateMessageRequest(BaseModel):
+    content: str
+    base_version: int
+
+
+class VersionedMutationRequest(BaseModel):
     base_version: int
 
 
@@ -57,6 +71,20 @@ def _build_generation_history(messages: list[dict]) -> list[dict]:
 
 def _serialize_sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _page_payload(store: ChatStore, chat_id: str) -> dict:
+    page = store.get_chat_page(chat_id, page_size=CHAT_PAGE_SIZE)
+    if not page:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return page
+
+
+def _find_message_index(messages: list[dict], message_id: str) -> int:
+    for index, message in enumerate(messages):
+        if str(message.get("message_id") or "") == message_id:
+            return index
+    return -1
 
 
 def _update_message_state(
@@ -116,8 +144,18 @@ async def list_chats(world_id: str):
     try:
         store = ChatStore(world_id)
         return store.list_chats()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/{world_id}/chats/summaries")
+async def list_chat_summaries(world_id: str):
+    try:
+        store = ChatStore(world_id)
+        return store.list_chats()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.post("/{world_id}/chats")
 async def create_chat(world_id: str, req: CreateChatRequest | None = None):
@@ -125,8 +163,9 @@ async def create_chat(world_id: str, req: CreateChatRequest | None = None):
         title = req.title if req else "New Chat"
         store = ChatStore(world_id)
         return store.create_chat(title=title)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.get("/{world_id}/chats/{chat_id}")
 async def get_chat(world_id: str, chat_id: str):
@@ -135,6 +174,16 @@ async def get_chat(world_id: str, chat_id: str):
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return chat
+
+
+@router.get("/{world_id}/chats/{chat_id}/messages")
+async def get_chat_messages(world_id: str, chat_id: str, cursor: int | None = None, limit: int = CHAT_PAGE_SIZE):
+    store = ChatStore(world_id)
+    page = store.get_chat_page(chat_id, cursor=cursor, page_size=limit)
+    if not page:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return page
+
 
 @router.patch("/{world_id}/chats/{chat_id}")
 async def rename_chat(world_id: str, chat_id: str, req: RenameChatRequest):
@@ -153,7 +202,9 @@ async def rename_chat(world_id: str, chat_id: str, req: RenameChatRequest):
         "created_at": renamed["created_at"],
         "updated_at": renamed["updated_at"],
         "version": renamed["version"],
+        "has_manual_title": renamed.get("has_manual_title", True),
     }
+
 
 @router.delete("/{world_id}/chats/{chat_id}")
 async def delete_chat(world_id: str, chat_id: str):
@@ -161,6 +212,7 @@ async def delete_chat(world_id: str, chat_id: str):
     if not store.delete_chat(chat_id):
         raise HTTPException(status_code=404, detail="Chat not found")
     return {"success": True}
+
 
 @router.put("/{world_id}/chats/{chat_id}/history")
 async def update_chat_history(world_id: str, chat_id: str, req: UpdateChatHistoryRequest):
@@ -178,6 +230,116 @@ async def update_chat_history(world_id: str, chat_id: str, req: UpdateChatHistor
         "version": saved["version"],
         "messages": saved["messages"],
     }
+
+
+@router.patch("/{world_id}/chats/{chat_id}/messages/{message_id}")
+async def update_chat_message(world_id: str, chat_id: str, message_id: str, req: UpdateMessageRequest):
+    store = ChatStore(world_id)
+    chat = store.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    messages = list(chat.get("messages", []))
+    index = _find_message_index(messages, message_id)
+    if index < 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    updated = dict(messages[index])
+    updated["content"] = req.content
+    if updated.get("role") == "model":
+        updated["thought_text"] = ""
+        updated["gemini_parts"] = []
+        updated["nodes_used"] = []
+        updated["context_payload"] = {}
+        updated["context_meta"] = {}
+    messages[index] = updated
+    chat["messages"] = messages
+
+    try:
+        store.save_chat(chat_id, chat, expected_version=req.base_version)
+    except ChatVersionConflictError:
+        raise HTTPException(status_code=409, detail="This chat changed in another tab. Reloaded the latest saved messages.")
+    return _page_payload(store, chat_id)
+
+
+@router.post("/{world_id}/chats/{chat_id}/messages/{message_id}/delete")
+async def delete_chat_message(world_id: str, chat_id: str, message_id: str, req: VersionedMutationRequest):
+    store = ChatStore(world_id)
+    chat = store.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    messages = list(chat.get("messages", []))
+    index = _find_message_index(messages, message_id)
+    if index < 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    messages.pop(index)
+    chat["messages"] = messages
+    try:
+        store.save_chat(chat_id, chat, expected_version=req.base_version)
+    except ChatVersionConflictError:
+        raise HTTPException(status_code=409, detail="This chat changed in another tab. Reloaded the latest saved messages.")
+    return _page_payload(store, chat_id)
+
+
+@router.post("/{world_id}/chats/{chat_id}/messages/{message_id}/truncate")
+async def truncate_chat_from_message(world_id: str, chat_id: str, message_id: str, req: VersionedMutationRequest):
+    store = ChatStore(world_id)
+    chat = store.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    messages = list(chat.get("messages", []))
+    index = _find_message_index(messages, message_id)
+    if index < 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    chat["messages"] = messages[:index]
+    try:
+        store.save_chat(chat_id, chat, expected_version=req.base_version)
+    except ChatVersionConflictError:
+        raise HTTPException(status_code=409, detail="This chat changed in another tab. Reloaded the latest saved messages.")
+    return _page_payload(store, chat_id)
+
+
+@router.post("/{world_id}/chats/{chat_id}/messages/{message_id}/regenerate")
+async def regenerate_from_message(world_id: str, chat_id: str, message_id: str, req: VersionedMutationRequest):
+    store = ChatStore(world_id)
+    chat = store.get_chat(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    messages = list(chat.get("messages", []))
+    index = _find_message_index(messages, message_id)
+    if index < 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    target = messages[index]
+    prompt_to_resend = str(target.get("content") or "")
+    truncate_index = index
+
+    if target.get("role") == "model":
+        previous_user_index = -1
+        for candidate in range(index - 1, -1, -1):
+            if messages[candidate].get("role") == "user":
+                previous_user_index = candidate
+                break
+        if previous_user_index < 0:
+            raise HTTPException(status_code=400, detail="Could not find the user message to regenerate from.")
+        prompt_to_resend = str(messages[previous_user_index].get("content") or "")
+        truncate_index = previous_user_index
+
+    chat["messages"] = messages[:truncate_index]
+    try:
+        store.save_chat(chat_id, chat, expected_version=req.base_version)
+    except ChatVersionConflictError:
+        raise HTTPException(status_code=409, detail="This chat changed in another tab. Reloaded the latest saved messages.")
+
+    page = _page_payload(store, chat_id)
+    page["resend_message"] = prompt_to_resend
+    return page
+
 
 @router.post("/{world_id}/chats/{chat_id}/message")
 async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
@@ -347,7 +509,7 @@ async def stream_chat_message(world_id: str, chat_id: str, req: ChatRequest):
         },
     )
 
-# Fallback for old UI calling /{world_id}/chat without a chat_id
+
 @router.post("/{world_id}/chat")
 async def chat_legacy(world_id: str, req: ChatRequest):
     path = world_meta_path(world_id)

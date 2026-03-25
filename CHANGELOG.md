@@ -4,6 +4,18 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+### Changed
+
+- Changed chat loading to use lightweight world-header and chat-summary endpoints, open threads with the newest 20 messages first, and page older history behind a `Show More Messages` action instead of loading full threads up front.
+- Changed chat storage to keep per-chat metadata and paged message files with lazy migration from legacy single-file chats, while preserving file-based chat storage inside each world.
+- Changed chat message actions so the `...` menu now sits at the bottom-right of both user and AI bubbles, with `N Nodes Used` aligned immediately to its left on AI replies.
+- Changed Key Library entries so saved provider labels remain the source of truth and existing credentials can be renamed inline without reverting to default generated names.
+
+### Fixed
+
+- Fixed pooled-provider retry behavior so Gemini and OpenAI-compatible calls now try every currently available non-cooldown key for a request before failing after transient rate-limit or cooldown-classified errors.
+- Fixed chat edit, delete, and regenerate flows to use targeted backend mutations so unloaded older history pages are not lost when working inside long threads.
+
 ## [0.3.0] - 2026-03-25
 
 ### Changed

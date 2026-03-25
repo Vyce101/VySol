@@ -176,6 +176,20 @@ def test_list_sources_skips_audit_during_active_ingest(monkeypatch):
     assert payload == meta["sources"]
 
 
+def test_get_world_header_uses_persisted_meta_only(monkeypatch):
+    persisted_meta = {
+        "world_id": "world-1",
+        "world_name": "Alpha",
+        "ingestion_status": "partial_failure",
+    }
+
+    monkeypatch.setattr(worlds_router, "_load_meta", lambda world_id: dict(persisted_meta))
+
+    payload = asyncio.run(worlds_router.get_world_header("world-1"))
+
+    assert payload == persisted_meta
+
+
 def test_checkpoint_info_uses_live_audit_snapshot_during_active_ingest(monkeypatch):
     meta = {
         "world_id": "world-1",

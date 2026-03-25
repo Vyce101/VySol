@@ -37,7 +37,7 @@ export default function WorldLayout({
 
     const loadWorld = useCallback(async () => {
         try {
-            const data = await apiFetch<WorldMeta>(`/worlds/${worldId}`);
+            const data = await apiFetch<WorldMeta>(`/worlds/${worldId}/header`);
             setWorld(data);
             setEditName(data.world_name);
         } catch { /* ignore */ }
