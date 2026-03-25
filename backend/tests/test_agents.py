@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
+
 from core import agents
 
 
@@ -128,3 +130,132 @@ def test_call_agent_groq_preserves_manual_reasoning_for_unknown_models(monkeypat
     )
 
     assert captured["payload"]["reasoning_effort"] == "medium"
+
+
+def test_call_agent_groq_rate_limit_default_strategy_surfaces_first_rate_limit(monkeypatch):
+    call_count = {"value": 0}
+
+    async def fake_completion(provider: str, payload: dict, **kwargs):
+        call_count["value"] += 1
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key: "SYSTEM")
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion", fake_completion)
+
+    try:
+        asyncio.run(
+            agents._call_agent(
+                prompt_key="graph_architect_prompt",
+                user_content="chunk text",
+                model_name="openai/gpt-oss-20b",
+                temperature=0.1,
+            )
+        )
+    except agents.AgentCallError as exc:
+        assert exc.kind == "rate_limit"
+        assert "429" in str(exc)
+    else:
+        raise AssertionError("Expected AgentCallError for Groq 429.")
+
+    assert call_count["value"] == 1
+
+
+def test_call_agent_groq_falls_back_from_json_schema_to_json_object_on_400(monkeypatch):
+    seen_response_formats: list[str] = []
+
+    async def fake_completion(provider: str, payload: dict, **kwargs):
+        response_format = payload.get("response_format") or {}
+        seen_response_formats.append(str(response_format.get("type") or ""))
+        if response_format.get("type") == "json_schema":
+            request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "json_schema response_format is unsupported for this model"}},
+            )
+            raise httpx.HTTPStatusError("400 Bad Request", request=request, response=response)
+        return {
+            "choices": [{"message": {"content": '{"nodes": [], "edges": []}'}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+        }
+
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key: "SYSTEM")
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion", fake_completion)
+
+    parsed, usage = asyncio.run(
+        agents._call_agent(
+            prompt_key="graph_architect_prompt",
+            user_content="chunk text",
+            model_name="moonshotai/kimi-k2-instruct-0905",
+            temperature=0.1,
+        )
+    )
+
+    assert parsed == {"nodes": [], "edges": []}
+    assert usage == {"input_tokens": 4, "output_tokens": 2}
+    assert seen_response_formats == ["json_schema", "json_object"]
+
+
+def test_call_agent_fail_fast_groq_falls_back_from_json_schema_to_json_object_on_400(monkeypatch):
+    seen_response_formats: list[str] = []
+
+    async def fake_completion(provider: str, payload: dict, *, api_key: str, base_url=None, timeout: float = 120.0):
+        response_format = payload.get("response_format") or {}
+        seen_response_formats.append(str(response_format.get("type") or ""))
+        if response_format.get("type") == "json_schema":
+            request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+            response = httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "json_schema response_format is unsupported for this model"}},
+            )
+            raise httpx.HTTPStatusError("400 Bad Request", request=request, response=response)
+        return {
+            "choices": [{"message": {"content": '{"nodes": [], "edges": []}'}}],
+            "usage": {"prompt_tokens": 6, "completion_tokens": 3},
+        }
+
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key: "SYSTEM")
+    monkeypatch.setattr(agents, "get_provider_pool", lambda provider: [{"api_key": "key-1"}])
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion_for_api_key", fake_completion)
+
+    parsed, usage = asyncio.run(
+        agents._call_agent(
+            prompt_key="graph_architect_prompt",
+            user_content="chunk text",
+            model_name="moonshotai/kimi-k2-instruct-0905",
+            temperature=0.1,
+            transient_key_strategy="fail_fast_no_cooldown",
+        )
+    )
+
+    assert parsed == {"nodes": [], "edges": []}
+    assert usage == {"input_tokens": 6, "output_tokens": 3}
+    assert seen_response_formats == ["json_schema", "json_object"]

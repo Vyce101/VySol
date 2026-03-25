@@ -125,3 +125,15 @@ def test_get_request_key_raises_when_every_key_was_already_tried():
 
     with pytest.raises(key_manager.RequestKeyPoolExhaustedError):
         manager.get_request_key({0, 1})
+
+
+def test_wait_for_request_key_raises_when_remaining_untried_keys_are_cooling_down(monkeypatch):
+    manager = key_manager.KeyManager(api_keys=["k1", "k2"], mode="FAIL_OVER")
+    now = {"value": 100.0}
+
+    monkeypatch.setattr(key_manager.time, "time", lambda: now["value"])
+
+    manager.report_error(1, "429")
+
+    with pytest.raises(key_manager.AllKeysInCooldownError):
+        manager.wait_for_request_key({0})
