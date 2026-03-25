@@ -15,6 +15,7 @@ All notable user-visible changes to this project will be documented in this file
 
 - Fixed pooled-provider retry behavior so Gemini and OpenAI-compatible calls now try every currently available non-cooldown key for a request before failing after transient rate-limit or cooldown-classified errors.
 - Fixed chat edit, delete, and regenerate flows to use targeted backend mutations so unloaded older history pages are not lost when working inside long threads.
+- Fixed ingest source decoding so Windows-authored text files with non-UTF-8 encodings can still be chunked and recovered instead of failing when the app rereads source text.
 
 ## [0.3.0] - 2026-03-25
 

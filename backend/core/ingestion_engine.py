@@ -2841,6 +2841,22 @@ def _compute_file_sha256(path) -> str:
     return digest.hexdigest()
 
 
+def _read_source_text(source_path: Path) -> str:
+    raw = source_path.read_bytes()
+    last_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            if encoding != "utf-8-sig":
+                logger.warning("Decoded source file %s using fallback encoding %s", source_path.name, encoding)
+            return text
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return ""
+
+
 def _build_source_ingest_snapshot(
     world_id: str,
     source: dict,
@@ -2881,7 +2897,7 @@ def _load_source_temporal_chunks(
     book_number = int(source.get("book_number") or 0)
     vault_filename = str(source.get("vault_filename") or "")
     source_path = world_sources_dir(world_id) / vault_filename
-    text = source_path.read_text(encoding="utf-8")
+    text = _read_source_text(source_path)
     raw_chunks = chunker.chunk(text)
     temporal_chunks = stamp_chunks(
         chunks=[

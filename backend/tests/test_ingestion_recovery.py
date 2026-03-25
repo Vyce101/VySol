@@ -7,6 +7,7 @@ from fastapi import BackgroundTasks, HTTPException
 
 from core import graph_store
 from core import ingestion_engine
+from core.chunker import RecursiveChunker
 from routers import ingestion as ingestion_router
 
 
@@ -2095,6 +2096,63 @@ def test_abort_route_rejects_missing_world(monkeypatch):
 
     assert exc.value.status_code == 404
     assert called["abort"] is False
+
+
+@pytest.mark.skip(reason="Uses tmp_path and hits the repo's shared pytest temp cleanup issue on Windows.")
+def test_load_source_temporal_chunks_accepts_windows_encoded_text(tmp_path, monkeypatch):
+    world_id = "world-encoding"
+    sources_dir = tmp_path / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    source_path = sources_dir / "book1.txt"
+    source_path.write_bytes("Price is £5".encode("cp1252"))
+
+    monkeypatch.setattr(ingestion_engine, "world_sources_dir", lambda _world_id: sources_dir)
+
+    chunks = ingestion_engine._load_source_temporal_chunks(
+        world_id,
+        {
+            "source_id": "source-a",
+            "book_number": 1,
+            "vault_filename": "book1.txt",
+        },
+        RecursiveChunker(chunk_size=100, overlap=0),
+        apply_active_overrides=False,
+    )
+
+    assert len(chunks) == 1
+    assert "£5" in chunks[0].raw_text
+
+
+def test_load_source_temporal_chunks_accepts_windows_encoded_text_without_fs_temp(monkeypatch):
+    world_id = "world-encoding"
+    raw_bytes = b"Price is \xa35"
+
+    class FakeSourcePath:
+        name = "book1.txt"
+
+        def read_bytes(self):
+            return raw_bytes
+
+    class FakeSourcesDir:
+        def __truediv__(self, other):
+            assert other == "book1.txt"
+            return FakeSourcePath()
+
+    monkeypatch.setattr(ingestion_engine, "world_sources_dir", lambda _world_id: FakeSourcesDir())
+
+    chunks = ingestion_engine._load_source_temporal_chunks(
+        world_id,
+        {
+            "source_id": "source-a",
+            "book_number": 1,
+            "vault_filename": "book1.txt",
+        },
+        RecursiveChunker(chunk_size=100, overlap=0),
+        apply_active_overrides=False,
+    )
+
+    assert len(chunks) == 1
+    assert "£5" in chunks[0].raw_text
 
 
 def test_start_ingestion_preflight_failure_clears_claimed_run(monkeypatch):
