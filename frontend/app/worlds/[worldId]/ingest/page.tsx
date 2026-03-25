@@ -246,6 +246,27 @@ interface ResetSafetyReviewResponse {
     };
 }
 
+interface BulkSafetyReviewRetryStatus {
+    world_id: string;
+    run_id: string | null;
+    status: "idle" | "queued" | "running" | "completed" | "error";
+    is_active: boolean;
+    total_reviews: number;
+    processed_reviews: number;
+    passed_reviews: number;
+    failed_reviews: number;
+    skipped_reviews: number;
+    batch_size: number;
+    delay_seconds: number;
+    current_review_id?: string | null;
+    current_review_label?: string | null;
+    started_at?: string | null;
+    updated_at?: string | null;
+    finished_at?: string | null;
+    next_batch_at?: string | null;
+    message?: string | null;
+}
+
 type RightPanelView = "progress" | "safety_queue";
 
 interface RuntimeSnapshot {
@@ -374,6 +395,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const [safetyReviews, setSafetyReviews] = useState<SafetyReviewItem[]>([]);
     const [safetyReviewSummary, setSafetyReviewSummary] = useState<SafetyReviewSummary | null>(null);
     const [safetyReviewLoadError, setSafetyReviewLoadError] = useState<string | null>(null);
+    const [safetyReviewBulkRetry, setSafetyReviewBulkRetry] = useState<BulkSafetyReviewRetryStatus | null>(null);
+    const [bulkSafetyRetryBatchSize, setBulkSafetyRetryBatchSize] = useState(1);
+    const [bulkSafetyRetryDelaySeconds, setBulkSafetyRetryDelaySeconds] = useState(0);
     const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
     const [savingReviewIds, setSavingReviewIds] = useState<Record<string, boolean>>({});
     const [testingReviewIds, setTestingReviewIds] = useState<Record<string, boolean>>({});
@@ -550,11 +574,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     };
 
     async function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
-        const [world, checkpoint] = await Promise.all([
-            apiFetch<WorldResponse>(`/worlds/${worldId}`),
-            apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
-        ]);
-        return { world, checkpoint };
+        return apiFetch<RuntimeSnapshot>(`/worlds/${worldId}/ingest/runtime-summary`);
     }
 
     async function loadRuntimeSnapshot(reconnectStream = false): Promise<RuntimeSnapshotLoadResult> {
@@ -612,8 +632,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     async function loadWorld(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
-            const data = await apiFetch<WorldResponse>(`/worlds/${worldId}`);
-            applyWorldData(data);
+            const snapshot = await apiFetch<RuntimeSnapshot>(`/worlds/${worldId}/ingest/runtime-summary`);
+            applyRuntimeSnapshot(snapshot);
+            const data = snapshot.world;
             if ((data.ingestion_status === "in_progress" && data.active_ingestion_run === true) || isTerminalIngestionStatus(data.ingestion_status ?? null)) {
                 setOptimisticIngestRun(false);
             }
@@ -638,8 +659,9 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
 
     async function loadCheckpoint(options?: { throwOnError?: boolean; markStaleOnError?: boolean }) {
         try {
-            const data = await apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`);
-            applyCheckpointData(data);
+            const snapshot = await apiFetch<RuntimeSnapshot>(`/worlds/${worldId}/ingest/runtime-summary`);
+            applyRuntimeSnapshot(snapshot);
+            const data = snapshot.checkpoint;
             if (data.progress_phase === "aborting" || data.active_ingestion_run === false) {
                 setAbortRequestPending(false);
             }
@@ -677,17 +699,16 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     async function refreshIngestActionState() {
         const requestId = ++runtimeSnapshotRequestIdRef.current;
         try {
-            const [worldData, sourcesData, checkpointData, ingestConfigData] = await Promise.all([
-                apiFetch<WorldResponse>(`/worlds/${worldId}`),
+            const [runtimeSnapshot, sourcesData, ingestConfigData] = await Promise.all([
+                fetchRuntimeSnapshot(),
                 apiFetch<Source[]>(`/worlds/${worldId}/sources`),
-                apiFetch<Checkpoint>(`/worlds/${worldId}/ingest/checkpoint`),
                 apiFetch<WorldIngestConfigResponse>(`/worlds/${worldId}/ingest/config`),
             ]);
             if (requestId !== runtimeSnapshotRequestIdRef.current) {
                 return;
             }
-            applyRuntimeSnapshot({ world: worldData, checkpoint: checkpointData }, {
-                reconnectStream: deriveBackendLiveIngestRun(worldData, checkpointData),
+            applyRuntimeSnapshot(runtimeSnapshot, {
+                reconnectStream: deriveBackendLiveIngestRun(runtimeSnapshot.world, runtimeSnapshot.checkpoint),
                 requestId,
             });
             markRuntimeSnapshotSuccess();
@@ -714,6 +735,20 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
             }
         }
         return null;
+    }
+
+    async function loadSafetyReviewBulkRetryStatus() {
+        try {
+            const data = await apiFetch<BulkSafetyReviewRetryStatus>(`/worlds/${worldId}/ingest/safety-reviews/retry-all`);
+            setSafetyReviewBulkRetry(data);
+            if (data.is_active) {
+                setBulkSafetyRetryBatchSize(Math.max(1, Number(data.batch_size ?? 1)));
+                setBulkSafetyRetryDelaySeconds(Math.max(0, Number(data.delay_seconds ?? 0)));
+            }
+            return data;
+        } catch {
+            return null;
+        }
     }
 
     const handleUpload = async (files: FileList | File[]) => {
@@ -812,16 +847,30 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     // These loaders are scoped to the current world id and intentionally rerun only on world changes.
     useEffect(() => {
         const initializePage = async () => {
-            await Promise.all([
-                loadRuntimeSnapshot(true),
+            await loadRuntimeSnapshot(true);
+            void Promise.all([
                 loadSources(),
                 loadSafetyReviews({ markStaleOnError: true }),
+                loadSafetyReviewBulkRetryStatus(),
                 loadIngestConfig(),
             ]);
         };
         void initializePage();
     }, [worldId]);
     /* eslint-enable react-hooks/exhaustive-deps */
+    useEffect(() => {
+        if (!safetyReviewBulkRetry?.is_active) return;
+        const intervalId = window.setInterval(() => {
+            void Promise.all([
+                loadSafetyReviewBulkRetryStatus(),
+                loadSafetyReviews({ markStaleOnError: true }),
+                loadSources(),
+                loadCheckpoint(),
+            ]);
+        }, 1500);
+        return () => window.clearInterval(intervalId);
+    }, [safetyReviewBulkRetry?.is_active, safetyReviewBulkRetry?.run_id, worldId]);
+
     useEffect(() => {
         if (!pendingFocusReviewId) return;
         if (!safetyReviews.some((review) => review.review_id === pendingFocusReviewId)) return;
@@ -1020,6 +1069,62 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         ?? review.active_override_raw_text
         ?? review.original_raw_text
     );
+
+    const startBulkSafetyQueueRetry = async () => {
+        const bulkBlockedByIngest = optimisticIngestRun
+            || deriveBackendLiveIngestRun(
+                {
+                    ingestion_status: worldIngestionStatus ?? undefined,
+                    active_ingestion_run: worldActiveIngestionRun,
+                },
+                checkpoint,
+            )
+            || progress.phase === "aborting";
+        if (bulkBlockedByIngest) {
+            alert("Wait for the active ingest run to finish before retrying Safety Queue items.");
+            return;
+        }
+        if (safetyReviewBulkRetry?.is_active) {
+            alert("A Safety Queue bulk retry run is already in progress for this world.");
+            return;
+        }
+        const eligibleReviews = safetyReviews.filter((review) => (
+            review.status !== "resolved" && review.last_test_outcome !== "passed"
+        ));
+        if (eligibleReviews.length === 0) {
+            alert("No unresolved Safety Queue items still need retrying.");
+            return;
+        }
+
+        const safeBatchSize = Math.max(1, Math.floor(Number.isFinite(bulkSafetyRetryBatchSize) ? bulkSafetyRetryBatchSize : 1));
+        const safeDelaySeconds = Math.max(0, Number.isFinite(bulkSafetyRetryDelaySeconds) ? bulkSafetyRetryDelaySeconds : 0);
+        const draftOverrides = eligibleReviews.reduce<Record<string, string>>((lookup, review) => {
+            if (!review.entity_resolution_locked) {
+                lookup[review.review_id] = reviewDraftValue(review);
+            }
+            return lookup;
+        }, {});
+
+        try {
+            const data = await apiFetch<BulkSafetyReviewRetryStatus>(`/worlds/${worldId}/ingest/safety-reviews/retry-all`, {
+                method: "POST",
+                body: JSON.stringify({
+                    review_ids: eligibleReviews.map((review) => review.review_id),
+                    batch_size: safeBatchSize,
+                    delay_seconds: safeDelaySeconds,
+                    draft_overrides: draftOverrides,
+                }),
+            });
+            setSafetyReviewBulkRetry(data);
+            await Promise.all([
+                loadSafetyReviews({ markStaleOnError: true }),
+                loadSources(),
+                loadCheckpoint(),
+            ]);
+        } catch (err: unknown) {
+            alert((err as Error).message);
+        }
+    };
 
     const saveReviewDraft = async (review: SafetyReviewItem, draftRawText?: string) => {
         if (review.entity_resolution_locked) {
@@ -1232,6 +1337,11 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
     const totalReviewCount = safetyReviewSummary?.total_reviews ?? safetyReviews.length;
     const unresolvedReviewCount = safetyReviewSummary?.unresolved_reviews
         ?? safetyReviews.filter((review) => review.status !== "resolved").length;
+    const bulkRetryEligibleReviews = safetyReviews.filter((review) => (
+        review.status !== "resolved" && review.last_test_outcome !== "passed"
+    ));
+    const bulkRetryLockedCount = bulkRetryEligibleReviews.filter((review) => review.entity_resolution_locked).length;
+    const bulkRetryRunnableCount = Math.max(0, bulkRetryEligibleReviews.length - bulkRetryLockedCount);
     const hasAnySafetyQueueHistory = totalReviewCount > 0;
     const hasUnresolvedSafetyQueue = unresolvedReviewCount > 0;
     const showSafetyQueueUnavailableState = safetyReviews.length === 0 && Boolean(safetyReviewLoadError);
@@ -1843,20 +1953,126 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
                         )}
 
                         {safetyReviews.length > 0 ? (
-                            <SafetyReviewPanel
-                                groupedReviews={groupedSafetyReviews}
-                                summary={safetyReviewSummary}
-                                drafts={reviewDrafts}
-                                savingReviewIds={savingReviewIds}
-                                testingReviewIds={testingReviewIds}
-                                resettingReviewIds={resettingReviewIds}
-                                onDraftChange={(reviewId, value) => setReviewDrafts((prev) => ({ ...prev, [reviewId]: value }))}
-                                onDraftBlur={saveReviewDraft}
-                                onResetToOriginal={resetReviewDraftToOriginal}
-                                onResetToLive={resetReviewDraftToLive}
-                                onTest={testReviewDraft}
-                                onResetChunk={resetReview}
-                            />
+                            <>
+                                <div style={{
+                                    marginBottom: 16,
+                                    padding: "14px 16px",
+                                    borderRadius: 12,
+                                    border: "1px solid var(--border)",
+                                    background: "var(--background)",
+                                    display: "grid",
+                                    gap: 12,
+                                }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text-primary)" }}>Retry All Safety Queue</div>
+                                            <div style={{ fontSize: 12, color: "var(--text-subtle)", marginTop: 4, lineHeight: 1.45 }}>
+                                                Only unresolved items that have not fully passed yet are included. {bulkRetryRunnableCount} can run now{bulkRetryLockedCount > 0 ? `, ${bulkRetryLockedCount} locked item${bulkRetryLockedCount === 1 ? "" : "s"} will be skipped.` : "."}
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={() => void startBulkSafetyQueueRetry()}
+                                            disabled={Boolean(safetyReviewBulkRetry?.is_active) || ingesting || bulkRetryEligibleReviews.length === 0}
+                                            style={{
+                                                ...btnStyle,
+                                                background: "var(--primary)",
+                                                color: "var(--primary-contrast)",
+                                                opacity: Boolean(safetyReviewBulkRetry?.is_active) || ingesting || bulkRetryEligibleReviews.length === 0 ? 0.6 : 1,
+                                                cursor: Boolean(safetyReviewBulkRetry?.is_active) || ingesting || bulkRetryEligibleReviews.length === 0 ? "not-allowed" : "pointer",
+                                            }}
+                                        >
+                                            {safetyReviewBulkRetry?.is_active ? "Retry Run In Progress..." : "Retry All Safety Queue"}
+                                        </button>
+                                    </div>
+
+                                    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Batch Size</span>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                step={1}
+                                                value={bulkSafetyRetryBatchSize}
+                                                disabled={Boolean(safetyReviewBulkRetry?.is_active)}
+                                                onChange={(event) => setBulkSafetyRetryBatchSize(Math.max(1, Math.floor(Number(event.target.value) || 1)))}
+                                                style={{
+                                                    width: 120,
+                                                    padding: "8px 10px",
+                                                    borderRadius: 8,
+                                                    border: "1px solid var(--border)",
+                                                    background: "var(--background-secondary)",
+                                                    color: "var(--text-primary)",
+                                                }}
+                                            />
+                                        </label>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.6 }}>Delay (Seconds)</span>
+                                            <input
+                                                type="number"
+                                                min={0}
+                                                step={0.5}
+                                                value={bulkSafetyRetryDelaySeconds}
+                                                disabled={Boolean(safetyReviewBulkRetry?.is_active)}
+                                                onChange={(event) => setBulkSafetyRetryDelaySeconds(Math.max(0, Number(event.target.value) || 0))}
+                                                style={{
+                                                    width: 140,
+                                                    padding: "8px 10px",
+                                                    borderRadius: 8,
+                                                    border: "1px solid var(--border)",
+                                                    background: "var(--background-secondary)",
+                                                    color: "var(--text-primary)",
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+
+                                    {safetyReviewBulkRetry && safetyReviewBulkRetry.status !== "idle" && (
+                                        <div style={{
+                                            padding: "10px 12px",
+                                            borderRadius: 10,
+                                            border: "1px solid var(--border)",
+                                            background: "var(--background-secondary)",
+                                            display: "grid",
+                                            gap: 6,
+                                        }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)" }}>
+                                                {safetyReviewBulkRetry.is_active
+                                                    ? `Running ${safetyReviewBulkRetry.processed_reviews}/${safetyReviewBulkRetry.total_reviews}`
+                                                    : safetyReviewBulkRetry.status === "completed"
+                                                        ? "Bulk retry completed."
+                                                        : "Bulk retry stopped."}
+                                            </div>
+                                            <div style={{ fontSize: 12, color: "var(--text-subtle)", lineHeight: 1.45 }}>
+                                                Passed {safetyReviewBulkRetry.passed_reviews}, failed {safetyReviewBulkRetry.failed_reviews}, skipped {safetyReviewBulkRetry.skipped_reviews}.
+                                                {safetyReviewBulkRetry.current_review_label ? ` Current: ${safetyReviewBulkRetry.current_review_label}.` : ""}
+                                                {safetyReviewBulkRetry.next_batch_at
+                                                    ? ` Next batch after ${new Date(safetyReviewBulkRetry.next_batch_at).toLocaleTimeString()}.`
+                                                    : ""}
+                                            </div>
+                                            {safetyReviewBulkRetry.message && (
+                                                <div style={{ fontSize: 12, color: "var(--text-subtle)", lineHeight: 1.45 }}>
+                                                    {safetyReviewBulkRetry.message}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <SafetyReviewPanel
+                                    groupedReviews={groupedSafetyReviews}
+                                    summary={safetyReviewSummary}
+                                    drafts={reviewDrafts}
+                                    savingReviewIds={savingReviewIds}
+                                    testingReviewIds={testingReviewIds}
+                                    resettingReviewIds={resettingReviewIds}
+                                    onDraftChange={(reviewId, value) => setReviewDrafts((prev) => ({ ...prev, [reviewId]: value }))}
+                                    onDraftBlur={saveReviewDraft}
+                                    onResetToOriginal={resetReviewDraftToOriginal}
+                                    onResetToLive={resetReviewDraftToLive}
+                                    onTest={testReviewDraft}
+                                    onResetChunk={resetReview}
+                                />
+                            </>
                         ) : showSafetyQueueUnavailableState ? (
                             <div style={{
                                 border: "1px solid var(--status-warning-soft-border)",

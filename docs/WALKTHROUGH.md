@@ -306,6 +306,7 @@ Basic flow:
 
 Reading the ingest progress header:
 
+- The ingest page now boots from a lightweight runtime summary, so the world status, counters, and resume state can appear before heavier audit data finishes loading
 - The main ingest header now stays stable at the world level instead of flipping between extraction and embedding worker events
 - `Chunks Extracted` means chunks whose graph extraction has been durably written
 - `Chunks Embedded` means chunks whose chunk vectors have been durably written
@@ -356,6 +357,8 @@ If extraction hits a safety block:
 - `Reset Chunk` removes that chunk's live chunk vector, chunk-scoped graph artifacts, and other chunk-level ingest state instead of pretending the problem is gone
 - If the world already completed entity resolution, `Reset Chunk` warns when merged entity descriptions may still include information that came from that chunk
 - In that case, the queue item cannot directly discard those already-merged entity descriptions; use `Re-ingest` if you need those merged descriptions rebuilt cleanly too
+- A top-level `Retry All Safety Queue` action can batch unresolved items that have not fully passed yet, using the current draft text for editable items
+- Its batch size and delay settings apply only to that bulk retry run, and locked items are reported and skipped instead of being silently rewritten
 
 Entity-resolution controls:
 
@@ -413,6 +416,7 @@ Important behavior:
 - `Retry` actions only repair failures inside the currently locked ingest; they do not apply new chunk settings
 - `Add failed chunks to Safety Queue` is a manual fallback for stubborn extraction failures that still need repair work after `Resume` and `Retry All Failures`
 - That action is only for the current world and current failed chunks; it moves those failed chunks into the Safety Queue for editing and does not teach future ingests to always treat them as safety-blocked
+- `Retry All Safety Queue` is separate from `Retry All Failures`: it reruns unresolved queue items that still need repair work, and it is blocked while a live ingest run is active
 
 ## Chat
 

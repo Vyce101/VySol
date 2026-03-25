@@ -213,6 +213,7 @@ VySol now shows ingestion progress as a stable world-level summary instead of le
 
 Important behavior:
 
+- The ingest page now loads its initial world status, counters, and resume availability from a lightweight runtime-summary payload instead of waiting on the heavier full audit reads first
 - `Chunks Extracted` tracks chunks whose graph extraction has been durably written
 - `Chunks Embedded` tracks chunks whose chunk-vector embedding has been durably written
 - `Unique Graph Nodes` tracks the current unique nodes in the saved graph
@@ -247,6 +248,7 @@ Important behavior:
 - `Reset Chunk` now replaces the old misleading discard behavior; it deletes the live ingest artifacts for that chunk and keeps the queue item restartable instead of hiding it from the queue
 - `Reset Chunk` removes chunk-level graph/vector state for that chunk, but it does not retroactively unwrite already-merged entity descriptions from a completed entity-resolution run
 - When that merged-entity case applies, VySol warns you and points you to `Re-ingest` if you need those merged descriptions rebuilt cleanly too
+- A top-level `Retry All Safety Queue` action can run unresolved queue items in batches, with optional delay between batches, while keeping locked items out of the runnable set
 - Retry and resume actions skip unresolved Safety Queue chunks so they do not silently fall back to original source text
 - The recommended recovery order is `Resume` first, then `Retry All Failures`, then `Add failed chunks to Safety Queue`, and finally fixing the remaining Safety Queue items
 - If the only remaining failed chunks already belong to the Safety Queue, the main ingest page stops showing `Resume` and `Retry All Failures` and points you back to the queue instead

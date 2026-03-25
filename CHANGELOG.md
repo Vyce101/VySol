@@ -10,6 +10,8 @@ All notable user-visible changes to this project will be documented in this file
 - Changed chat storage to keep per-chat metadata and paged message files with lazy migration from legacy single-file chats, while preserving file-based chat storage inside each world.
 - Changed chat message actions so the `...` menu now sits at the bottom-right of both user and AI bubbles, with `N Nodes Used` aligned immediately to its left on AI replies.
 - Changed Key Library entries so saved provider labels remain the source of truth and existing credentials can be renamed inline without reverting to default generated names.
+- Changed the Safety Queue to add a top-level bulk retry action with batch-size and delay controls, and to retry only unresolved items that have not fully passed yet.
+- Changed the ingest page to mount from a lightweight runtime-summary endpoint so world status, counters, and resume state appear without waiting for overlapping full audit endpoints to finish.
 
 ### Fixed
 

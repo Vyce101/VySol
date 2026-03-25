@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 
-from core import graph_store, ingestion_engine, vector_store
+from core import agents, graph_store, ingestion_engine, vector_store
 from core.agents import AgentCallError, EdgeOut, GraphArchitectOutput, NodeOut
 from core.temporal_indexer import TemporalChunk
 
@@ -604,6 +604,136 @@ def test_blank_draft_success_uses_overlap_only_and_persists_blank_override(monke
     assert review["status"] == "resolved"
     assert ingestion_engine._get_active_override_map(world_id)[chunk_id] == ""
     assert chunk_store.get_records_by_ids([chunk_id], include_documents=True)[0]["document"] == "[B1:C0] notice, I thought. Should I get something for you?"
+
+
+def test_safety_review_rate_limit_tries_each_key_once_and_stops(monkeypatch):
+    world_id = "world-safety-review-rate-limit-multi"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="new repair draft",
+    )
+    _seed_live_chunk_artifacts(world_id, chunk_id, "old repaired text")
+    attempted_keys: list[str] = []
+
+    monkeypatch.setattr(ingestion_engine, "_load_source_temporal_chunks", lambda *args, **kwargs: [_make_temporal_chunk(world_id, "source-a", "unsafe original text")])
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key, world_id=None: "SYSTEM")
+    monkeypatch.setattr(
+        agents,
+        "get_provider_pool",
+        lambda provider: [
+            {"api_key": "key-1"},
+            {"api_key": "key-2"},
+        ],
+    )
+
+    async def fake_completion(provider: str, payload: dict, *, api_key: str, base_url=None, timeout: float = 120.0):
+        attempted_keys.append(api_key)
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion_for_api_key", fake_completion)
+
+    result = asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    assert attempted_keys == ["key-1", "key-2"]
+    assert review["test_in_progress"] is False
+    assert review["last_test_outcome"] == "transient_failure"
+    assert review["last_test_error_message"] == "429 Too Many Requests"
+    assert review["status"] == "draft"
+
+
+def test_single_key_rate_limit_does_not_leave_safety_review_testing(monkeypatch):
+    world_id = "world-safety-review-rate-limit-single"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="new repair draft",
+    )
+    _seed_live_chunk_artifacts(world_id, chunk_id, "old repaired text")
+    attempted_keys: list[str] = []
+
+    monkeypatch.setattr(ingestion_engine, "_load_source_temporal_chunks", lambda *args, **kwargs: [_make_temporal_chunk(world_id, "source-a", "unsafe original text")])
+    monkeypatch.setattr(
+        agents,
+        "load_settings",
+        lambda: {
+            "default_model_flash_provider": "openai_compatible",
+            "default_model_flash_openai_compatible_provider": "groq",
+            "default_model_flash_groq_reasoning_effort": "",
+        },
+    )
+    monkeypatch.setattr(agents, "load_prompt", lambda key, world_id=None: "SYSTEM")
+    monkeypatch.setattr(agents, "get_provider_pool", lambda provider: [{"api_key": "only-key"}])
+
+    async def fake_completion(provider: str, payload: dict, *, api_key: str, base_url=None, timeout: float = 120.0):
+        attempted_keys.append(api_key)
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(agents, "async_create_openai_compatible_chat_completion_for_api_key", fake_completion)
+
+    result = asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    assert attempted_keys == ["only-key"]
+    assert review["test_in_progress"] is False
+    assert review["last_test_outcome"] == "transient_failure"
+    assert review["status"] == "draft"
+
+
+def test_unexpected_safety_review_error_clears_testing_state(monkeypatch):
+    world_id = "world-safety-review-unexpected-failure"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="new repair draft",
+    )
+    _seed_live_chunk_artifacts(world_id, chunk_id, "old repaired text")
+
+    monkeypatch.setattr(ingestion_engine, "_review_editor_raw_text", lambda review: (_ for _ in ()).throw(RuntimeError("draft load exploded")))
+
+    result = asyncio.run(ingestion_engine.test_safety_review(world_id, chunk_id))
+
+    review = result["review"]
+    assert review["test_in_progress"] is False
+    assert review["last_test_outcome"] == "other_failure"
+    assert "draft load exploded" in review["last_test_error_message"]
+    assert review["status"] == "draft"
+
+
+def test_list_safety_reviews_auto_heals_orphaned_testing_state(monkeypatch):
+    world_id = "world-safety-review-orphaned-testing"
+    _prepare_world(monkeypatch, world_id)
+    chunk_id = _seed_review_state(
+        world_id,
+        active_override_raw_text="old repaired text",
+        draft_raw_text="old repaired text",
+        has_active_override=True,
+    )
+    cache = ingestion_engine._load_safety_review_cache(world_id)
+    cache["reviews"][0]["test_in_progress"] = True
+    cache["reviews"][0]["status"] = "testing"
+    ingestion_engine._save_safety_review_cache(world_id, cache)
+
+    reviews = ingestion_engine.list_safety_reviews(world_id)
+
+    review = next(item for item in reviews if item["review_id"] == chunk_id)
+    assert review["test_in_progress"] is False
+    assert review["last_test_outcome"] == "other_failure"
+    assert review["last_test_error_message"] == "Previous test did not finish cleanly. Retry the draft to test it again."
+    assert review["status"] == "draft"
 
 
 def test_list_safety_reviews_marks_live_override_locked_after_entity_resolution(monkeypatch):

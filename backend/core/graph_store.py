@@ -7,17 +7,22 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import logging
+import math
 import os
 import threading
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
 import networkx as nx
 
 from .config import world_graph_path
 
 logger = logging.getLogger(__name__)
+
+GRAPH_RING_BASE_SIZE = 10
+GRAPH_RING_SIZE_STEP = 8
+GRAPH_RING_RADIUS_STEP = 170.0
+GRAPH_COMPONENT_BASE_RADIUS = 520.0
+GRAPH_COMPONENT_RADIUS_STEP = 950.0
 
 
 @dataclass
@@ -273,6 +278,90 @@ class GraphStore:
         for u, v, attrs in self.graph.edges(data=True):
             yield u, v, attrs
 
+    def _node_connection_counts(self, neighbor_map: dict[str, dict[str, str]]) -> dict[str, int]:
+        return {
+            str(node_id): len(neighbor_map.get(str(node_id), {}))
+            for node_id in self.graph.nodes()
+        }
+
+    def _undirected_component_graph(self) -> nx.Graph:
+        graph = nx.Graph()
+        graph.add_nodes_from(str(node_id) for node_id in self.graph.nodes())
+        for raw_source, raw_target, _attrs in self._iter_edge_rows():
+            source = str(raw_source)
+            target = str(raw_target)
+            if source == target:
+                graph.add_node(source)
+                continue
+            graph.add_edge(source, target)
+        return graph
+
+    def _connectivity_seed_positions(self, neighbor_map: dict[str, dict[str, str]]) -> dict[str, dict[str, float]]:
+        if self.graph.number_of_nodes() == 0:
+            return {}
+
+        connection_counts = self._node_connection_counts(neighbor_map)
+        display_names = {
+            str(node_id): str(attrs.get("display_name", node_id))
+            for node_id, attrs in self.graph.nodes(data=True)
+        }
+        component_graph = self._undirected_component_graph()
+        components = list(nx.connected_components(component_graph))
+        components.sort(
+            key=lambda node_ids: (
+                -sum(connection_counts.get(str(node_id), 0) for node_id in node_ids),
+                -len(node_ids),
+                sorted(str(node_id) for node_id in node_ids)[0] if node_ids else "",
+            )
+        )
+
+        positions: dict[str, dict[str, float]] = {}
+        golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+
+        for component_index, component_nodes in enumerate(components):
+            ordered_ids = sorted(
+                (str(node_id) for node_id in component_nodes),
+                key=lambda node_id: (
+                    -connection_counts.get(node_id, 0),
+                    display_names.get(node_id, node_id).lower(),
+                ),
+            )
+            if not ordered_ids:
+                continue
+
+            component_distance = 0.0 if component_index == 0 else (
+                GRAPH_COMPONENT_BASE_RADIUS + math.sqrt(component_index) * GRAPH_COMPONENT_RADIUS_STEP
+            )
+            component_angle = component_index * golden_angle
+            component_center_x = math.cos(component_angle) * component_distance
+            component_center_y = math.sin(component_angle) * component_distance
+
+            start_index = 0
+            ring_index = 0
+            while start_index < len(ordered_ids):
+                ring_size = GRAPH_RING_BASE_SIZE + ring_index * GRAPH_RING_SIZE_STEP
+                ring_nodes = ordered_ids[start_index:start_index + ring_size]
+                radius = 0.0 if ring_index == 0 else ring_index * GRAPH_RING_RADIUS_STEP
+                rotation = component_angle / 2.0 + ring_index * 0.35
+
+                for node_offset, node_id in enumerate(ring_nodes):
+                    if radius <= 0.0:
+                        x = component_center_x
+                        y = component_center_y
+                    else:
+                        angle = rotation + (2.0 * math.pi * node_offset / max(1, len(ring_nodes)))
+                        x = component_center_x + math.cos(angle) * radius
+                        y = component_center_y + math.sin(angle) * radius
+                    positions[node_id] = {
+                        "x": round(float(x), 3),
+                        "y": round(float(y), 3),
+                    }
+
+                start_index += len(ring_nodes)
+                ring_index += 1
+
+        return positions
+
     def _connected_neighbor_map(self) -> dict[str, dict[str, str]]:
         """
         Build a bidirectional neighbor map from real graph edges.
@@ -306,6 +395,7 @@ class GraphStore:
 
     def build_read_cache(self) -> ActiveIngestGraphReadCache:
         neighbor_map = self._connected_neighbor_map()
+        positions = self._connectivity_seed_positions(neighbor_map)
         display_names = {
             str(node_id): str(attrs.get("display_name", node_id))
             for node_id, attrs in self.graph.nodes(data=True)
@@ -327,6 +417,7 @@ class GraphStore:
             label = display_names.get(node_id, node_id)
             connection_count = len(neighbor_map.get(node_id, {}))
             claim_count = len(claims)
+            position = positions.get(node_id, {"x": 0.0, "y": 0.0})
 
             graph_nodes.append({
                 "id": node_id,
@@ -336,6 +427,8 @@ class GraphStore:
                 "connection_count": connection_count,
                 "source_chunks": source_chunks,
                 "created_at": attrs.get("created_at", ""),
+                "x": position["x"],
+                "y": position["y"],
             })
 
             neighbors = [
@@ -394,6 +487,7 @@ class GraphStore:
     def get_all_data(self) -> dict:
         """Return nodes and edges in API-friendly format."""
         neighbor_map = self._connected_neighbor_map()
+        positions = self._connectivity_seed_positions(neighbor_map)
         nodes = []
         for nid, attrs in self.graph.nodes(data=True):
             claims = attrs.get("claims", [])
@@ -402,6 +496,7 @@ class GraphStore:
             source_chunks = attrs.get("source_chunks", [])
             if isinstance(source_chunks, str):
                 source_chunks = json.loads(source_chunks)
+            position = positions.get(str(nid), {"x": 0.0, "y": 0.0})
             nodes.append({
                 "id": nid,
                 "label": attrs.get("display_name", nid),
@@ -410,6 +505,8 @@ class GraphStore:
                 "connection_count": len(neighbor_map.get(str(nid), {})),
                 "source_chunks": source_chunks,
                 "created_at": attrs.get("created_at", ""),
+                "x": position["x"],
+                "y": position["y"],
             })
         edges = []
         for u, v, attrs in self._iter_edge_rows():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -59,6 +60,8 @@ _active_waits: dict[str, dict[str, dict[str, Any]]] = {}
 _active_waits_lock = threading.RLock()
 _active_run_tasks: dict[str, dict[str, Any]] = {}
 _active_run_tasks_lock = threading.RLock()
+_safety_review_bulk_retry_runs: dict[str, dict[str, Any]] = {}
+_safety_review_bulk_retry_lock = threading.RLock()
 
 RetryStage = Literal["extraction", "embedding", "all"]
 ChunkMode = Literal["full", "full_cleanup", "embedding_only", "extraction_only", "extraction_cleanup_only"]
@@ -81,6 +84,8 @@ _WAIT_STATE_PRIORITY: dict[str, int] = {
 }
 _PROGRESS_WORLD_PHASES = {"unique_node_rebuild", "audit_finalization"}
 _ENTITY_RESOLUTION_LAST_COMPLETED_AT_KEY = "entity_resolution_last_completed_at"
+_SAFETY_REVIEW_FAIL_FAST_TRANSIENT_KEY_STRATEGY = "fail_fast_no_cooldown"
+_STALE_SAFETY_REVIEW_TEST_MESSAGE = "Previous test did not finish cleanly. Retry the draft to test it again."
 
 
 class ExtractionCoverageError(RuntimeError):
@@ -1300,7 +1305,16 @@ def get_safety_review_summary(world_id: str) -> dict:
     cache = _load_safety_review_cache(world_id)
     changed = False
     for review in cache.get("reviews", []):
-        if isinstance(review, dict) and _set_review_pending_status(review):
+        if not isinstance(review, dict):
+            continue
+        if _recover_orphaned_safety_review_test(review):
+            changed = True
+        try:
+            if _set_review_pending_status(review):
+                changed = True
+        except Exception:
+            review["status"] = _fallback_review_status_after_failure(review)
+            review["updated_at"] = _now_iso()
             changed = True
     if changed:
         _save_safety_review_cache(world_id, cache)
@@ -1335,7 +1349,16 @@ def list_safety_reviews(world_id: str) -> list[dict]:
     cache = _load_safety_review_cache(world_id)
     changed = False
     for review in cache.get("reviews", []):
-        if isinstance(review, dict) and _set_review_pending_status(review):
+        if not isinstance(review, dict):
+            continue
+        if _recover_orphaned_safety_review_test(review):
+            changed = True
+        try:
+            if _set_review_pending_status(review):
+                changed = True
+        except Exception:
+            review["status"] = _fallback_review_status_after_failure(review)
+            review["updated_at"] = _now_iso()
             changed = True
     if changed:
         _save_safety_review_cache(world_id, cache)
@@ -1491,11 +1514,14 @@ def _set_review_pending_status(review: dict) -> bool:
         review["test_in_progress"] = test_in_progress
         changed = True
 
+    latest_outcome = str(review.get("last_test_outcome") or "").strip().lower()
+    latest_failure = latest_outcome not in {"", "not_tested", "passed"}
+
     next_status: SafetyReviewStatus
     if test_in_progress:
         next_status = "testing"
     elif has_active_override and draft_raw_text == active_override_raw_text:
-        next_status = "resolved"
+        next_status = "draft" if latest_failure else "resolved"
     elif draft_raw_text != _review_baseline_raw_text(review):
         next_status = "draft"
     else:
@@ -1508,11 +1534,440 @@ def _set_review_pending_status(review: dict) -> bool:
     return changed
 
 
+def _recover_orphaned_safety_review_test(review: dict) -> bool:
+    if not bool(review.get("test_in_progress")):
+        return False
+    recovered_error_kind = str(review.get("last_test_error_kind") or "").strip().lower() or "provider_error"
+    review["test_in_progress"] = False
+    review["last_test_error_kind"] = recovered_error_kind
+    review["last_test_outcome"] = _review_outcome_for_error_kind(recovered_error_kind)
+    review["last_test_error_message"] = _STALE_SAFETY_REVIEW_TEST_MESSAGE
+    review["last_tested_at"] = _now_iso()
+    review["updated_at"] = _now_iso()
+    return True
+
+
+def _fallback_review_status_after_failure(review: dict) -> SafetyReviewStatus:
+    if bool(review.get("test_in_progress")):
+        return "testing"
+
+    active_override_raw_text = _normalize_review_text(review.get("active_override_raw_text"))
+    has_active_override = _review_has_active_override(review)
+    draft_raw_text = _normalize_review_text(review.get("draft_raw_text"))
+    baseline_raw_text = active_override_raw_text if has_active_override else _normalize_review_text(review.get("original_raw_text"))
+    latest_outcome = str(review.get("last_test_outcome") or "").strip().lower()
+    latest_failure = latest_outcome not in {"", "not_tested", "passed"}
+
+    if has_active_override and draft_raw_text == active_override_raw_text:
+        return "draft" if latest_failure else "resolved"
+    if draft_raw_text != baseline_raw_text:
+        return "draft"
+    return "blocked"
+
+
 def _get_safety_review_item(world_id: str, review_id: str) -> dict | None:
     for review in list_safety_reviews(world_id):
         if str(review.get("review_id") or "") == str(review_id or ""):
             return review
     return None
+
+
+def _default_safety_review_bulk_retry_status(world_id: str) -> dict:
+    return {
+        "world_id": world_id,
+        "run_id": None,
+        "status": "idle",
+        "is_active": False,
+        "total_reviews": 0,
+        "processed_reviews": 0,
+        "passed_reviews": 0,
+        "failed_reviews": 0,
+        "skipped_reviews": 0,
+        "batch_size": 1,
+        "delay_seconds": 0.0,
+        "current_review_id": None,
+        "current_review_label": None,
+        "started_at": None,
+        "updated_at": None,
+        "finished_at": None,
+        "next_batch_at": None,
+        "message": None,
+    }
+
+
+def _public_safety_review_bulk_retry_status(status: dict | None, *, world_id: str) -> dict:
+    payload = dict(status) if isinstance(status, dict) else _default_safety_review_bulk_retry_status(world_id)
+    payload.pop("_task", None)
+    return payload
+
+
+def _get_live_safety_review_bulk_retry_run(world_id: str) -> dict | None:
+    with _safety_review_bulk_retry_lock:
+        current = _safety_review_bulk_retry_runs.get(world_id)
+        if not isinstance(current, dict):
+            return None
+        task = current.get("_task")
+        if isinstance(task, asyncio.Task) and task.done():
+            current = dict(current)
+            current.pop("_task", None)
+            current["is_active"] = False
+            if current.get("status") in {"queued", "running"}:
+                current["status"] = "error"
+                current["message"] = current.get("message") or "Safety Queue bulk retry stopped unexpectedly."
+                current["finished_at"] = _now_iso()
+            _safety_review_bulk_retry_runs[world_id] = current
+        return _safety_review_bulk_retry_runs.get(world_id)
+
+
+def get_safety_review_bulk_retry_status(world_id: str) -> dict:
+    return _public_safety_review_bulk_retry_status(_get_live_safety_review_bulk_retry_run(world_id), world_id=world_id)
+
+
+def _set_safety_review_bulk_retry_status(world_id: str, run_id: str, **changes: Any) -> dict | None:
+    with _safety_review_bulk_retry_lock:
+        current = _safety_review_bulk_retry_runs.get(world_id)
+        if not isinstance(current, dict) or str(current.get("run_id") or "") != run_id:
+            return None
+        updated = dict(current)
+        updated.update(changes)
+        updated["updated_at"] = _now_iso()
+        _safety_review_bulk_retry_runs[world_id] = updated
+        return updated
+
+
+def _finalize_safety_review_bulk_retry_task(world_id: str, run_id: str, task: asyncio.Task[Any]) -> None:
+    with _safety_review_bulk_retry_lock:
+        current = _safety_review_bulk_retry_runs.get(world_id)
+        if not isinstance(current, dict) or str(current.get("run_id") or "") != run_id:
+            return
+        updated = dict(current)
+        updated.pop("_task", None)
+        if task.cancelled():
+            updated["is_active"] = False
+            updated["status"] = "error"
+            updated["finished_at"] = _now_iso()
+            updated["message"] = updated.get("message") or "Safety Queue bulk retry was cancelled."
+        else:
+            exc = task.exception()
+            if exc is not None:
+                updated["is_active"] = False
+                updated["status"] = "error"
+                updated["finished_at"] = _now_iso()
+                updated["message"] = str(exc) or "Safety Queue bulk retry failed."
+        _safety_review_bulk_retry_runs[world_id] = updated
+
+
+def _eligible_bulk_safety_review_items(world_id: str, *, review_ids: list[str] | None = None) -> list[dict]:
+    requested_ids = {
+        str(review_id or "").strip()
+        for review_id in (review_ids or [])
+        if str(review_id or "").strip()
+    }
+    eligible: list[dict] = []
+    for review in list_safety_reviews(world_id):
+        review_id = str(review.get("review_id") or "").strip()
+        if requested_ids and review_id not in requested_ids:
+            continue
+        if str(review.get("status") or "").lower() == "resolved":
+            continue
+        if str(review.get("last_test_outcome") or "").lower() == "passed":
+            continue
+        eligible.append(review)
+    return eligible
+
+
+async def _run_bulk_safety_review_retry(
+    *,
+    world_id: str,
+    run_id: str,
+    ordered_review_ids: list[str],
+    batch_size: int,
+    delay_seconds: float,
+) -> None:
+    total_reviews = len(ordered_review_ids)
+    processed_reviews = 0
+    passed_reviews = 0
+    failed_reviews = 0
+    skipped_reviews = 0
+    processed_in_batch = 0
+
+    _set_safety_review_bulk_retry_status(
+        world_id,
+        run_id,
+        status="running",
+        is_active=True,
+        message=None,
+        next_batch_at=None,
+    )
+
+    for review_id in ordered_review_ids:
+        review = _get_safety_review_item(world_id, review_id)
+        review_label = None
+        if isinstance(review, dict):
+            review_label = f"{review.get('prefix_label') or review_id} - {review.get('display_name') or 'Review'}"
+        _set_safety_review_bulk_retry_status(
+            world_id,
+            run_id,
+            current_review_id=review_id,
+            current_review_label=review_label,
+        )
+
+        if review is None:
+            skipped_reviews += 1
+            processed_reviews += 1
+            _set_safety_review_bulk_retry_status(
+                world_id,
+                run_id,
+                processed_reviews=processed_reviews,
+                passed_reviews=passed_reviews,
+                failed_reviews=failed_reviews,
+                skipped_reviews=skipped_reviews,
+                current_review_id=None,
+                current_review_label=None,
+                message="Skipped a review item that no longer exists.",
+            )
+            processed_in_batch += 1
+        elif str(review.get("status") or "").lower() == "resolved" or str(review.get("last_test_outcome") or "").lower() == "passed":
+            skipped_reviews += 1
+            processed_reviews += 1
+            _set_safety_review_bulk_retry_status(
+                world_id,
+                run_id,
+                processed_reviews=processed_reviews,
+                passed_reviews=passed_reviews,
+                failed_reviews=failed_reviews,
+                skipped_reviews=skipped_reviews,
+                current_review_id=None,
+                current_review_label=None,
+                message="Skipped a review item that already passed fully.",
+            )
+            processed_in_batch += 1
+        elif bool(review.get("entity_resolution_locked")):
+            skipped_reviews += 1
+            processed_reviews += 1
+            _set_safety_review_bulk_retry_status(
+                world_id,
+                run_id,
+                processed_reviews=processed_reviews,
+                passed_reviews=passed_reviews,
+                failed_reviews=failed_reviews,
+                skipped_reviews=skipped_reviews,
+                current_review_id=None,
+                current_review_label=None,
+                message=str(review.get("entity_resolution_lock_reason") or "Skipped a review item locked after entity resolution."),
+            )
+            processed_in_batch += 1
+        else:
+            try:
+                result = await test_safety_review(world_id, review_id)
+            except FileNotFoundError:
+                skipped_reviews += 1
+                processed_reviews += 1
+                _set_safety_review_bulk_retry_status(
+                    world_id,
+                    run_id,
+                    processed_reviews=processed_reviews,
+                    passed_reviews=passed_reviews,
+                    failed_reviews=failed_reviews,
+                    skipped_reviews=skipped_reviews,
+                    current_review_id=None,
+                    current_review_label=None,
+                    message="Skipped a review item that disappeared during bulk retry.",
+                )
+                processed_in_batch += 1
+            except RuntimeError as exc:
+                message = str(exc)
+                lowered = message.lower()
+                if "active ingest run" in lowered:
+                    _set_safety_review_bulk_retry_status(
+                        world_id,
+                        run_id,
+                        status="error",
+                        is_active=False,
+                        finished_at=_now_iso(),
+                        current_review_id=None,
+                        current_review_label=None,
+                        message=message,
+                        processed_reviews=processed_reviews,
+                        passed_reviews=passed_reviews,
+                        failed_reviews=failed_reviews,
+                        skipped_reviews=skipped_reviews,
+                        next_batch_at=None,
+                    )
+                    return
+                if "locked after entity resolution" in lowered or "entity resolution" in lowered:
+                    skipped_reviews += 1
+                else:
+                    failed_reviews += 1
+                processed_reviews += 1
+                _set_safety_review_bulk_retry_status(
+                    world_id,
+                    run_id,
+                    processed_reviews=processed_reviews,
+                    passed_reviews=passed_reviews,
+                    failed_reviews=failed_reviews,
+                    skipped_reviews=skipped_reviews,
+                    current_review_id=None,
+                    current_review_label=None,
+                    message=message,
+                )
+                processed_in_batch += 1
+            except Exception as exc:
+                failed_reviews += 1
+                processed_reviews += 1
+                _set_safety_review_bulk_retry_status(
+                    world_id,
+                    run_id,
+                    processed_reviews=processed_reviews,
+                    passed_reviews=passed_reviews,
+                    failed_reviews=failed_reviews,
+                    skipped_reviews=skipped_reviews,
+                    current_review_id=None,
+                    current_review_label=None,
+                    message=str(exc) or "Bulk retry failed for one review item.",
+                )
+                processed_in_batch += 1
+            else:
+                result_review = result.get("review", {}) if isinstance(result, dict) else {}
+                if str(result_review.get("status") or "").lower() == "resolved" or str(result_review.get("last_test_outcome") or "").lower() == "passed":
+                    passed_reviews += 1
+                else:
+                    failed_reviews += 1
+                processed_reviews += 1
+                _set_safety_review_bulk_retry_status(
+                    world_id,
+                    run_id,
+                    processed_reviews=processed_reviews,
+                    passed_reviews=passed_reviews,
+                    failed_reviews=failed_reviews,
+                    skipped_reviews=skipped_reviews,
+                    current_review_id=None,
+                    current_review_label=None,
+                    message=None,
+                )
+                processed_in_batch += 1
+
+        if processed_reviews < total_reviews and processed_in_batch >= max(1, int(batch_size)) and delay_seconds > 0:
+            next_batch_at = datetime.fromtimestamp(time.time() + delay_seconds, tz=timezone.utc).isoformat()
+            _set_safety_review_bulk_retry_status(
+                world_id,
+                run_id,
+                next_batch_at=next_batch_at,
+                message=f"Waiting {delay_seconds:g}s before the next Safety Queue batch.",
+            )
+            await asyncio.sleep(delay_seconds)
+            _set_safety_review_bulk_retry_status(
+                world_id,
+                run_id,
+                next_batch_at=None,
+                message=None,
+            )
+            processed_in_batch = 0
+        elif processed_in_batch >= max(1, int(batch_size)):
+            processed_in_batch = 0
+
+    _set_safety_review_bulk_retry_status(
+        world_id,
+        run_id,
+        status="completed",
+        is_active=False,
+        finished_at=_now_iso(),
+        current_review_id=None,
+        current_review_label=None,
+        next_batch_at=None,
+        message=None,
+        processed_reviews=processed_reviews,
+        passed_reviews=passed_reviews,
+        failed_reviews=failed_reviews,
+        skipped_reviews=skipped_reviews,
+    )
+
+
+async def start_bulk_safety_review_retry(
+    world_id: str,
+    *,
+    review_ids: list[str] | None = None,
+    batch_size: int = 1,
+    delay_seconds: float = 0.0,
+    draft_overrides: dict[str, str] | None = None,
+) -> dict:
+    if has_active_ingestion_run(world_id):
+        raise RuntimeError("Wait for the active ingest run to finish before retrying Safety Queue items.")
+
+    safe_batch_size = max(1, int(batch_size))
+    safe_delay_seconds = max(0.0, float(delay_seconds))
+    existing = _get_live_safety_review_bulk_retry_run(world_id)
+    if isinstance(existing, dict) and bool(existing.get("is_active")):
+        raise RuntimeError("A Safety Queue bulk retry run is already in progress for this world.")
+
+    eligible_reviews = _eligible_bulk_safety_review_items(world_id, review_ids=review_ids)
+    if not eligible_reviews:
+        raise RuntimeError("No unresolved Safety Queue items still need retrying.")
+
+    if isinstance(draft_overrides, dict) and draft_overrides:
+        meta_lock = _get_async_lock(world_id, _meta_locks)
+        async with meta_lock:
+            meta = _load_meta(world_id)
+            cache = _load_safety_review_cache(world_id)
+            changed = False
+            for review in cache.get("reviews", []):
+                if not isinstance(review, dict):
+                    continue
+                review_id = str(review.get("review_id") or "").strip()
+                if review_id not in draft_overrides:
+                    continue
+                try:
+                    _ensure_safety_review_editable(meta, review)
+                except RuntimeError:
+                    continue
+                normalized_draft = _normalize_review_text(draft_overrides.get(review_id))
+                if review.get("draft_raw_text") != normalized_draft:
+                    review["draft_raw_text"] = normalized_draft
+                    review["updated_at"] = _now_iso()
+                    changed = True
+                if _set_review_pending_status(review):
+                    changed = True
+            if changed:
+                _save_safety_review_cache(world_id, cache)
+
+    ordered_review_ids = [str(review.get("review_id") or "") for review in eligible_reviews if str(review.get("review_id") or "")]
+    run_id = str(uuid4())
+    started_at = _now_iso()
+    initial_status = {
+        "world_id": world_id,
+        "run_id": run_id,
+        "status": "queued",
+        "is_active": True,
+        "total_reviews": len(ordered_review_ids),
+        "processed_reviews": 0,
+        "passed_reviews": 0,
+        "failed_reviews": 0,
+        "skipped_reviews": 0,
+        "batch_size": safe_batch_size,
+        "delay_seconds": safe_delay_seconds,
+        "current_review_id": None,
+        "current_review_label": None,
+        "started_at": started_at,
+        "updated_at": started_at,
+        "finished_at": None,
+        "next_batch_at": None,
+        "message": None,
+    }
+    worker = asyncio.create_task(
+        _run_bulk_safety_review_retry(
+            world_id=world_id,
+            run_id=run_id,
+            ordered_review_ids=ordered_review_ids,
+            batch_size=safe_batch_size,
+            delay_seconds=safe_delay_seconds,
+        ),
+        name=f"safety-review-bulk-{world_id}",
+    )
+    initial_status["_task"] = worker
+    with _safety_review_bulk_retry_lock:
+        _safety_review_bulk_retry_runs[world_id] = initial_status
+    worker.add_done_callback(lambda task, world_id=world_id, run_id=run_id: _finalize_safety_review_bulk_retry_task(world_id, run_id, task))
+    return get_safety_review_bulk_retry_status(world_id)
 
 
 def _append_log(world_id: str, entry: dict) -> None:
@@ -1675,6 +2130,20 @@ def _review_outcome_for_error_kind(error_kind: str) -> SafetyReviewOutcome:
     return "other_failure"
 
 
+def _supports_transient_key_strategy(method: Callable[..., Any]) -> bool:
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "transient_key_strategy" in parameters
+
+
+async def _run_safety_review_graph_architect(method: Callable[..., Awaitable[Any]], *args: Any) -> Any:
+    if _supports_transient_key_strategy(method):
+        return await method(*args, transient_key_strategy=_SAFETY_REVIEW_FAIL_FAST_TRANSIENT_KEY_STRATEGY)
+    return await method(*args)
+
+
 def _find_safety_review(cache: dict, review_id: str) -> dict | None:
     normalized_review_id = str(review_id or "")
     for review in cache.get("reviews", []):
@@ -1688,7 +2157,16 @@ def _unresolved_safety_review_chunk_ids(world_id: str) -> set[str]:
     cache = _load_safety_review_cache(world_id)
     changed = False
     for review in cache.get("reviews", []):
-        if isinstance(review, dict) and _set_review_pending_status(review):
+        if not isinstance(review, dict):
+            continue
+        if _recover_orphaned_safety_review_test(review):
+            changed = True
+        try:
+            if _set_review_pending_status(review):
+                changed = True
+        except Exception:
+            review["status"] = _fallback_review_status_after_failure(review)
+            review["updated_at"] = _now_iso()
             changed = True
     if changed:
         _save_safety_review_cache(world_id, cache)
@@ -1890,6 +2368,19 @@ def _delete_safety_review(world_id: str, review_id: str) -> bool:
     if changed:
         _save_safety_review_cache(world_id, cache)
     return changed
+
+
+def _recover_orphaned_safety_review_test(review: dict) -> bool:
+    if not bool(review.get("test_in_progress")):
+        return False
+    recovered_error_kind = str(review.get("last_test_error_kind") or "").strip().lower() or "provider_error"
+    review["test_in_progress"] = False
+    review["last_test_error_kind"] = recovered_error_kind
+    review["last_test_outcome"] = _review_outcome_for_error_kind(recovered_error_kind)
+    review["last_test_error_message"] = _STALE_SAFETY_REVIEW_TEST_MESSAGE
+    review["last_tested_at"] = _now_iso()
+    review["updated_at"] = _now_iso()
+    return True
 
 
 def _reset_safety_review_item(review: dict) -> None:
@@ -3616,6 +4107,22 @@ def audit_ingestion_integrity(
         "orphan_graph_nodes": orphan_graph_nodes,
     }
     meta["ingestion_audit"] = summary
+    try:
+        meta["reembed_eligibility_snapshot"] = get_reembed_eligibility(
+            world_id,
+            meta=meta,
+            audit_summary=summary,
+        )
+    except Exception:
+        meta["reembed_eligibility_snapshot"] = {
+            "can_reembed_all": False,
+            "reason_code": "eligibility_unavailable",
+            "message": "Could not verify whether Re-embed All is safe for this world.",
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
 
     if persist:
         _save_meta(world_id, meta)
@@ -5322,6 +5829,162 @@ def get_checkpoint_info(world_id: str) -> dict:
         }
 
 
+def _cached_runtime_audit_summary(meta: dict) -> dict:
+    cached_audit = meta.get("ingestion_audit")
+    if isinstance(cached_audit, dict) and isinstance(cached_audit.get("world"), dict):
+        return {
+            "world": dict(cached_audit.get("world") or {}),
+            "sources": list(cached_audit.get("sources") or []),
+            "failures": list(cached_audit.get("failures") or []),
+            "blocking_issues": list(cached_audit.get("blocking_issues") or []),
+            "orphan_graph_nodes": list(cached_audit.get("orphan_graph_nodes") or []),
+        }
+    return {
+        "world": dict(_live_stage_counters(meta)),
+        "sources": [],
+        "failures": _live_failure_rows(meta),
+        "blocking_issues": list(meta.get("ingestion_blocking_issues") or []),
+        "orphan_graph_nodes": [],
+    }
+
+
+def _cached_runtime_reembed_eligibility(meta: dict, *, active_run: bool, safety_review_summary: dict | None = None) -> dict:
+    if meta.get("ingestion_status") == "in_progress" or active_run:
+        return {
+            "can_reembed_all": False,
+            "reason_code": "ingestion_in_progress",
+            "message": "Wait for the active ingest run to finish before checking Re-embed All eligibility.",
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
+    unresolved_reviews = int((safety_review_summary or {}).get("unresolved_reviews", 0) or 0)
+    if unresolved_reviews > 0:
+        return {
+            "can_reembed_all": False,
+            "reason_code": "safety_review_pending",
+            "message": "This world has unresolved safety review items. Resolve or reset them before running Re-embed All.",
+            "ignored_pending_sources_count": 0,
+            "requires_full_rebuild": False,
+            "eligible_source_ids": [],
+            "eligible_sources_count": 0,
+        }
+
+    cached = meta.get("reembed_eligibility_snapshot")
+    if isinstance(cached, dict):
+        return dict(cached)
+
+    return {
+        "can_reembed_all": False,
+        "reason_code": "eligibility_refresh_required",
+        "message": "Re-embed eligibility has not been refreshed yet for this world.",
+        "ignored_pending_sources_count": 0,
+        "requires_full_rebuild": False,
+        "eligible_source_ids": [],
+        "eligible_sources_count": 0,
+    }
+
+
+def get_ingest_runtime_summary(world_id: str) -> dict:
+    """
+    Return a lightweight, mostly persisted ingest summary for fast page loads.
+
+    This intentionally avoids recomputing a fresh audit on every request.
+    """
+    meta = recover_stale_ingestion(world_id)
+    checkpoint = _load_checkpoint(world_id)
+    active_run = has_active_ingestion_run(world_id)
+    sources = list(meta.get("sources", []))
+    source_by_id = {
+        str(source.get("source_id") or ""): source
+        for source in sources
+        if isinstance(source, dict)
+    }
+    active_audit = _build_live_audit_summary(meta) if (
+        meta.get("ingestion_status") == "in_progress" and active_run
+    ) else _cached_runtime_audit_summary(meta)
+    world_counters = dict(active_audit.get("world") or _live_stage_counters(meta))
+    blocking_issues = list(active_audit.get("blocking_issues") or meta.get("ingestion_blocking_issues") or [])
+    failures = list(active_audit.get("failures") or _live_failure_rows(meta))
+    safety_review_summary = get_safety_review_summary(world_id)
+    actionable_resume_sources = get_actionable_resume_sources(world_id, sources=sources)
+
+    checkpoint_source = source_by_id.get(str(checkpoint.get("source_id") or "")) if checkpoint else None
+    progress_source = checkpoint_source or _progress_source(meta)
+    progress_source_id = progress_source.get("source_id") if progress_source else None
+    progress_total_chunks = (
+        int(progress_source.get("chunk_count") or (checkpoint.get("chunks_total", 0) if checkpoint else 0) or 0)
+        if progress_source
+        else int(checkpoint.get("chunks_total", 0) if checkpoint else 0)
+    )
+    progress_payload = _build_progress_event(
+        world_id,
+        meta,
+        source_id=progress_source_id,
+        total_chunks=progress_total_chunks,
+        aborting=bool(meta.get("ingestion_abort_requested_at")),
+    )
+
+    runtime_checkpoint: dict[str, Any]
+    if not actionable_resume_sources:
+        runtime_checkpoint = {
+            "can_resume": False,
+            "chunk_index": 0,
+            "chunks_total": 0,
+            "reason": None,
+            "stage_counters": world_counters,
+            "failures": failures,
+            "blocking_issues": blocking_issues,
+            "safety_review_summary": safety_review_summary,
+            **progress_payload,
+        }
+    else:
+        source = checkpoint_source if checkpoint_source in actionable_resume_sources else actionable_resume_sources[0]
+        failed_chunks = _normalize_index_list(source.get("failed_chunks", []))
+        chunks_total = int(source.get("chunk_count") or (checkpoint.get("chunks_total", 0) if checkpoint else 0))
+        checkpoint_completed = (int(checkpoint.get("last_completed_chunk_index", -1)) + 1) if checkpoint else 0
+        if chunks_total > 0:
+            checkpoint_completed = max(0, min(checkpoint_completed, chunks_total))
+        else:
+            checkpoint_completed = max(0, checkpoint_completed)
+        source_completed = max(0, chunks_total - len(failed_chunks)) if chunks_total else checkpoint_completed
+        completed_chunks = max(checkpoint_completed, source_completed)
+        reason = "failed_chunks" if failed_chunks else "pending_work"
+
+        runtime_checkpoint = {
+            "can_resume": True,
+            "chunk_index": completed_chunks,
+            "chunks_total": chunks_total,
+            "source_id": source.get("source_id"),
+            "reason": reason,
+            "stage_counters": world_counters,
+            "failures": failures,
+            "blocking_issues": blocking_issues,
+            "safety_review_summary": safety_review_summary,
+            **progress_payload,
+        }
+        if active_run and runtime_checkpoint.get("total_chunks_current_phase", 0) > 0:
+            runtime_checkpoint["chunk_index"] = runtime_checkpoint.get("completed_chunks_current_phase", 0)
+            runtime_checkpoint["chunks_total"] = runtime_checkpoint.get("total_chunks_current_phase", 0)
+
+    return {
+        "world": {
+            "world_name": meta.get("world_name") or "World",
+            "ingestion_status": meta.get("ingestion_status"),
+            "active_ingestion_run": active_run,
+            "reembed_eligibility": _cached_runtime_reembed_eligibility(
+                meta,
+                active_run=active_run,
+                safety_review_summary=safety_review_summary,
+            ),
+            "safety_review_summary": safety_review_summary,
+        },
+        "checkpoint": runtime_checkpoint,
+    }
+
+
 async def update_safety_review_draft(world_id: str, review_id: str, draft_raw_text: str) -> dict:
     if has_active_ingestion_run(world_id):
         raise RuntimeError("Wait for the active ingest run to finish before editing safety review items.")
@@ -5640,6 +6303,7 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
     live_snapshot: dict | None = None
 
     async def mark_review_failure(error_kind: str, error_message: str) -> dict:
+        review_snapshot: dict | None = None
         async with meta_lock:
             cache = _load_safety_review_cache(world_id)
             review = _find_safety_review(cache, review_id)
@@ -5650,13 +6314,31 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
             review["last_test_error_kind"] = error_kind
             review["last_test_error_message"] = error_message
             review["last_tested_at"] = _now_iso()
-            _set_review_pending_status(review)
+            try:
+                _set_review_pending_status(review)
+            except Exception:
+                review["status"] = _fallback_review_status_after_failure(review)
             review["updated_at"] = _now_iso()
             _save_safety_review_cache(world_id, cache)
+            review_snapshot = dict(review)
 
-        item = _get_safety_review_item(world_id, review_id)
-        if item is None:
+        if review_snapshot is None:
             raise FileNotFoundError("Safety review item not found.")
+        meta = _load_meta(world_id)
+        source_id = str(review_snapshot.get("source_id") or "")
+        source = next(
+            (row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id),
+            {},
+        )
+        locked, lock_reason = _review_entity_resolution_lock_state(meta, review_snapshot)
+        item = {
+            **review_snapshot,
+            "display_name": str(source.get("display_name") or source_id or "Unknown source"),
+            "source_status": str(source.get("status") or ""),
+            "prefix_label": f"[B{int(review_snapshot.get('book_number', 0) or 0)}:C{int(review_snapshot.get('chunk_index', 0) or 0)}]",
+            "entity_resolution_locked": locked,
+            "entity_resolution_lock_reason": lock_reason,
+        }
         return {
             "review": item,
             "safety_review_summary": get_safety_review_summary(world_id),
@@ -5708,239 +6390,254 @@ async def test_safety_review(world_id: str, review_id: str) -> dict:
         review["test_attempt_count"] = int(review.get("test_attempt_count", 0) or 0) + 1
         review["updated_at"] = _now_iso()
         _save_safety_review_cache(world_id, cache)
-
-    candidate_raw_text = _review_editor_raw_text(review)
-
-    chunker = RecursiveChunker(
-        chunk_size=int(world_ingest_settings.get("chunk_size_chars", settings.get("chunk_size_chars", 4000))),
-        overlap=int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150))),
-    )
-
     try:
-        temporal_chunks = _load_source_temporal_chunks(world_id, source, chunker)
-    except Exception as exc:
-        return await mark_review_failure("provider_error", f"Could not load the saved source for this review item: {exc}")
+        candidate_raw_text = _review_editor_raw_text(review)
 
-    raw_chunk_index = review.get("chunk_index", -1)
-    chunk_index = int(raw_chunk_index if raw_chunk_index is not None else -1)
-    raw_book_number = review.get("book_number", 0)
-    book_number = int(raw_book_number if raw_book_number is not None else 0)
-    chunk_id = str(review.get("chunk_id") or "")
-    if chunk_index < 0 or chunk_index >= len(temporal_chunks):
-        return await mark_review_failure(
-            "provider_error",
-            "This review item no longer matches the current locked chunk map for the saved source. Run a full re-ingest if the source changed.",
+        chunker = RecursiveChunker(
+            chunk_size=int(world_ingest_settings.get("chunk_size_chars", settings.get("chunk_size_chars", 4000))),
+            overlap=int(world_ingest_settings.get("chunk_overlap_chars", settings.get("chunk_overlap_chars", 150))),
         )
 
-    base_chunk = temporal_chunks[chunk_index]
-    test_chunk = _replace_temporal_chunk_body(base_chunk, candidate_raw_text)
+        try:
+            temporal_chunks = _load_source_temporal_chunks(world_id, source, chunker)
+        except Exception as exc:
+            return await mark_review_failure("provider_error", f"Could not load the saved source for this review item: {exc}")
 
-    graph_store = GraphStore(world_id)
-    vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
-    unique_node_vector_store = VectorStore(
-        world_id,
-        embedding_model=world_ingest_settings["embedding_model"],
-        collection_suffix="unique_nodes",
-    )
-    ga = GraphArchitectAgent(world_id=world_id)
+        raw_chunk_index = review.get("chunk_index", -1)
+        chunk_index = int(raw_chunk_index if raw_chunk_index is not None else -1)
+        raw_book_number = review.get("book_number", 0)
+        book_number = int(raw_book_number if raw_book_number is not None else 0)
+        chunk_id = str(review.get("chunk_id") or "")
+        if chunk_index < 0 or chunk_index >= len(temporal_chunks):
+            return await mark_review_failure(
+                "provider_error",
+                "This review item no longer matches the current locked chunk map for the saved source. Run a full re-ingest if the source changed.",
+            )
 
-    if _review_has_active_override(review):
-        live_snapshot = await _snapshot_chunk_live_artifacts(
-            graph_store=graph_store,
-            vector_store=vector_store,
-            unique_node_vector_store=unique_node_vector_store,
-            chunk_id=chunk_id,
-            source_book=book_number,
-            source_chunk=chunk_index,
-            graph_lock=graph_lock,
-            vector_lock=vector_lock,
+        base_chunk = temporal_chunks[chunk_index]
+        test_chunk = _replace_temporal_chunk_body(base_chunk, candidate_raw_text)
+
+        graph_store = GraphStore(world_id)
+        vector_store = VectorStore(world_id, embedding_model=world_ingest_settings["embedding_model"])
+        unique_node_vector_store = VectorStore(
+            world_id,
+            embedding_model=world_ingest_settings["embedding_model"],
+            collection_suffix="unique_nodes",
         )
+        ga = GraphArchitectAgent(world_id=world_id)
 
-    try:
-        cleanup_before_test = await _cleanup_chunk_retry_artifacts(
-            graph_store=graph_store,
-            vector_store=vector_store,
-            unique_node_vector_store=unique_node_vector_store,
-            chunk_id=chunk_id,
-            source_book=book_number,
-            source_chunk=chunk_index,
-            graph_lock=graph_lock,
-            vector_lock=vector_lock,
-        )
-    except Exception as exc:
-        if live_snapshot is not None:
-            await restore_live_snapshot()
-        error_kind = _classify_exception_kind(exc)
-        return await mark_review_failure(error_kind, f"Could not prepare the chunk for retest: {exc}")
-    cleanup_log = {key: value for key, value in cleanup_before_test.items() if key != "removed_node_ids"}
-    if any(value for value in cleanup_log.values()):
+        if _review_has_active_override(review):
+            live_snapshot = await _snapshot_chunk_live_artifacts(
+                graph_store=graph_store,
+                vector_store=vector_store,
+                unique_node_vector_store=unique_node_vector_store,
+                chunk_id=chunk_id,
+                source_book=book_number,
+                source_chunk=chunk_index,
+                graph_lock=graph_lock,
+                vector_lock=vector_lock,
+            )
+
+        try:
+            cleanup_before_test = await _cleanup_chunk_retry_artifacts(
+                graph_store=graph_store,
+                vector_store=vector_store,
+                unique_node_vector_store=unique_node_vector_store,
+                chunk_id=chunk_id,
+                source_book=book_number,
+                source_chunk=chunk_index,
+                graph_lock=graph_lock,
+                vector_lock=vector_lock,
+            )
+        except Exception as exc:
+            if live_snapshot is not None:
+                await restore_live_snapshot()
+            error_kind = _classify_exception_kind(exc)
+            return await mark_review_failure(error_kind, f"Could not prepare the chunk for retest: {exc}")
+        cleanup_log = {key: value for key, value in cleanup_before_test.items() if key != "removed_node_ids"}
+        if any(value for value in cleanup_log.values()):
+            _append_log(
+                world_id,
+                {
+                    "event": "safety_review_cleanup",
+                    "review_id": review_id,
+                    "source_id": source_id,
+                    "book_number": book_number,
+                    "chunk_index": chunk_index,
+                    **cleanup_log,
+                },
+            )
+
+        extraction_slot: int | None = None
+        final_nodes: list[Any] = []
+        final_edges: list[Any] = []
+        node_records_for_embedding: list[dict] = []
+        dummy_abort_event = threading.Event()
+        try:
+            extraction_slot = await _extraction_scheduler.acquire(dummy_abort_event)
+            extraction_payload = _build_graph_extraction_payload_for_chunk(test_chunk)
+            ga_output, _ = await _run_safety_review_graph_architect(ga.run, extraction_payload)
+            final_nodes = list(ga_output.nodes)
+            final_edges = list(ga_output.edges)
+
+            glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
+            for _ in range(max(0, glean_amount)):
+                glean_out, _ = await _run_safety_review_graph_architect(
+                    ga.run_glean,
+                    extraction_payload,
+                    final_nodes,
+                    final_edges,
+                )
+                final_nodes.extend(glean_out.nodes)
+                final_edges.extend(glean_out.edges)
+        except Exception as exc:
+            error_kind = _classify_exception_kind(exc)
+            error_message = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
+            if live_snapshot is not None:
+                await restore_live_snapshot()
+            return await mark_review_failure(error_kind, error_message)
+        finally:
+            if extraction_slot is not None:
+                await _extraction_scheduler.release(extraction_slot, aborted=False)
+
+        async with graph_lock:
+            node_records_for_embedding = _persist_chunk_graph_artifacts(
+                graph_store,
+                nodes=final_nodes,
+                edges=final_edges,
+                chunk_id=chunk_id,
+                book_number=book_number,
+                chunk_index=chunk_index,
+            )
+
+        if not _chunk_has_graph_coverage(graph_store, chunk_id):
+            await _cleanup_chunk_retry_artifacts(
+                graph_store=graph_store,
+                vector_store=vector_store,
+                unique_node_vector_store=unique_node_vector_store,
+                chunk_id=chunk_id,
+                source_book=book_number,
+                source_chunk=chunk_index,
+                graph_lock=graph_lock,
+                vector_lock=vector_lock,
+            )
+            if live_snapshot is not None:
+                await restore_live_snapshot()
+            return await mark_review_failure(
+                "no_extraction_coverage",
+                "Chunk produced no extraction coverage in graph store.",
+            )
+
+        embedding_slot: int | None = None
+        try:
+            embedding_slot = await _embedding_scheduler.acquire(dummy_abort_event)
+            km = get_key_manager()
+            api_key, _ = await km.await_active_key()
+            chunk_embeddings = await asyncio.to_thread(
+                vector_store.embed_texts,
+                [test_chunk.prefixed_text],
+                api_key=api_key,
+            )
+            chunk_embedding = chunk_embeddings[0]
+
+            async with vector_lock:
+                await asyncio.to_thread(
+                    vector_store.upsert_document_embedding,
+                    document_id=chunk_id,
+                    text=test_chunk.prefixed_text,
+                    metadata={
+                        "world_id": world_id,
+                        "source_id": source_id,
+                        "book_number": book_number,
+                        "chunk_index": chunk_index,
+                        "char_start": test_chunk.char_start,
+                        "char_end": test_chunk.char_end,
+                        "display_label": test_chunk.display_label,
+                    },
+                    embedding=chunk_embedding,
+                )
+            await _upsert_unique_node_vectors(
+                unique_node_vector_store=unique_node_vector_store,
+                node_records=node_records_for_embedding,
+                api_key=api_key,
+                vector_lock=vector_lock,
+            )
+        except Exception as exc:
+            await _cleanup_chunk_retry_artifacts(
+                graph_store=graph_store,
+                vector_store=vector_store,
+                unique_node_vector_store=unique_node_vector_store,
+                chunk_id=chunk_id,
+                source_book=book_number,
+                source_chunk=chunk_index,
+                graph_lock=graph_lock,
+                vector_lock=vector_lock,
+            )
+            error_kind = _classify_exception_kind(exc)
+            if live_snapshot is not None:
+                await restore_live_snapshot()
+            return await mark_review_failure(error_kind, str(exc))
+        finally:
+            if embedding_slot is not None:
+                await _embedding_scheduler.release(embedding_slot, aborted=False)
+
+        async with meta_lock:
+            meta = _load_meta(world_id)
+            source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
+            if source is None:
+                raise RuntimeError("The source for this safety review item no longer exists.")
+            _mark_stage_success(source, stage="extraction", chunk_index=chunk_index, chunk_id=chunk_id)
+            _mark_stage_success(source, stage="embedding", chunk_index=chunk_index, chunk_id=chunk_id)
+            _update_source_status_from_coverage(source)
+            if source.get("status") == "complete":
+                snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
+                if snapshot:
+                    source["ingest_snapshot"] = snapshot
+            _save_meta(world_id, meta)
+
+            cache = _load_safety_review_cache(world_id)
+            review = _find_safety_review(cache, review_id)
+            if review is None:
+                raise FileNotFoundError("Safety review item not found.")
+            review["test_in_progress"] = False
+            review["draft_raw_text"] = candidate_raw_text
+            review["last_test_outcome"] = "passed"
+            review["last_test_error_kind"] = None
+            review["last_test_error_message"] = None
+            review["last_tested_at"] = _now_iso()
+            review["has_active_override"] = True
+            review["active_override_raw_text"] = candidate_raw_text
+            review["last_live_applied_at"] = _now_iso()
+            _set_review_pending_status(review)
+            review["updated_at"] = _now_iso()
+            _save_safety_review_cache(world_id, cache)
+
         _append_log(
             world_id,
             {
-                "event": "safety_review_cleanup",
+                "event": "safety_review_passed",
                 "review_id": review_id,
                 "source_id": source_id,
                 "book_number": book_number,
                 "chunk_index": chunk_index,
-                **cleanup_log,
             },
         )
 
-    extraction_slot: int | None = None
-    final_nodes: list[Any] = []
-    final_edges: list[Any] = []
-    node_records_for_embedding: list[dict] = []
-    dummy_abort_event = threading.Event()
-    try:
-        extraction_slot = await _extraction_scheduler.acquire(dummy_abort_event)
-        extraction_payload = _build_graph_extraction_payload_for_chunk(test_chunk)
-        ga_output, _ = await ga.run(extraction_payload)
-        final_nodes = list(ga_output.nodes)
-        final_edges = list(ga_output.edges)
-
-        glean_amount = int(world_ingest_settings.get("glean_amount", settings.get("glean_amount", 1)))
-        for _ in range(max(0, glean_amount)):
-            glean_out, _ = await ga.run_glean(extraction_payload, final_nodes, final_edges)
-            final_nodes.extend(glean_out.nodes)
-            final_edges.extend(glean_out.edges)
-    except Exception as exc:
-        error_kind = _classify_exception_kind(exc)
-        error_message = str(exc.safety_reason or exc) if isinstance(exc, AgentCallError) and exc.kind == "safety_block" else str(exc)
-        if live_snapshot is not None:
-            await restore_live_snapshot()
-        return await mark_review_failure(error_kind, error_message)
-    finally:
-        if extraction_slot is not None:
-            await _extraction_scheduler.release(extraction_slot, aborted=False)
-
-    async with graph_lock:
-        node_records_for_embedding = _persist_chunk_graph_artifacts(
-            graph_store,
-            nodes=final_nodes,
-            edges=final_edges,
-            chunk_id=chunk_id,
-            book_number=book_number,
-            chunk_index=chunk_index,
-        )
-
-    if not _chunk_has_graph_coverage(graph_store, chunk_id):
-        await _cleanup_chunk_retry_artifacts(
-            graph_store=graph_store,
-            vector_store=vector_store,
-            unique_node_vector_store=unique_node_vector_store,
-            chunk_id=chunk_id,
-            source_book=book_number,
-            source_chunk=chunk_index,
-            graph_lock=graph_lock,
-            vector_lock=vector_lock,
-        )
-        if live_snapshot is not None:
-            await restore_live_snapshot()
-        return await mark_review_failure(
-            "no_extraction_coverage",
-            "Chunk produced no extraction coverage in graph store.",
-        )
-
-    embedding_slot: int | None = None
-    try:
-        embedding_slot = await _embedding_scheduler.acquire(dummy_abort_event)
-        km = get_key_manager()
-        api_key, _ = await km.await_active_key()
-        chunk_embeddings = await asyncio.to_thread(
-            vector_store.embed_texts,
-            [test_chunk.prefixed_text],
-            api_key=api_key,
-        )
-        chunk_embedding = chunk_embeddings[0]
-
-        async with vector_lock:
-            await asyncio.to_thread(
-                vector_store.upsert_document_embedding,
-                document_id=chunk_id,
-                text=test_chunk.prefixed_text,
-                metadata={
-                    "world_id": world_id,
-                    "source_id": source_id,
-                    "book_number": book_number,
-                    "chunk_index": chunk_index,
-                    "char_start": test_chunk.char_start,
-                    "char_end": test_chunk.char_end,
-                    "display_label": test_chunk.display_label,
-                },
-                embedding=chunk_embedding,
-            )
-        await _upsert_unique_node_vectors(
-            unique_node_vector_store=unique_node_vector_store,
-            node_records=node_records_for_embedding,
-            api_key=api_key,
-            vector_lock=vector_lock,
-        )
-    except Exception as exc:
-        await _cleanup_chunk_retry_artifacts(
-            graph_store=graph_store,
-            vector_store=vector_store,
-            unique_node_vector_store=unique_node_vector_store,
-            chunk_id=chunk_id,
-            source_book=book_number,
-            source_chunk=chunk_index,
-            graph_lock=graph_lock,
-            vector_lock=vector_lock,
-        )
-        error_kind = _classify_exception_kind(exc)
-        if live_snapshot is not None:
-            await restore_live_snapshot()
-        return await mark_review_failure(error_kind, str(exc))
-    finally:
-        if embedding_slot is not None:
-            await _embedding_scheduler.release(embedding_slot, aborted=False)
-
-    async with meta_lock:
-        meta = _load_meta(world_id)
-        source = next((row for row in meta.get("sources", []) if str(row.get("source_id") or "") == source_id), None)
-        if source is None:
-            raise RuntimeError("The source for this safety review item no longer exists.")
-        _mark_stage_success(source, stage="extraction", chunk_index=chunk_index, chunk_id=chunk_id)
-        _mark_stage_success(source, stage="embedding", chunk_index=chunk_index, chunk_id=chunk_id)
-        _update_source_status_from_coverage(source)
-        if source.get("status") == "complete":
-            snapshot = _build_source_ingest_snapshot(world_id, source, world_ingest_settings)
-            if snapshot:
-                source["ingest_snapshot"] = snapshot
-        _save_meta(world_id, meta)
-
-        cache = _load_safety_review_cache(world_id)
-        review = _find_safety_review(cache, review_id)
-        if review is None:
+        item = _get_safety_review_item(world_id, review_id)
+        if item is None:
             raise FileNotFoundError("Safety review item not found.")
-        review["test_in_progress"] = False
-        review["draft_raw_text"] = candidate_raw_text
-        review["last_test_outcome"] = "passed"
-        review["last_test_error_kind"] = None
-        review["last_test_error_message"] = None
-        review["last_tested_at"] = _now_iso()
-        review["has_active_override"] = True
-        review["active_override_raw_text"] = candidate_raw_text
-        review["last_live_applied_at"] = _now_iso()
-        _set_review_pending_status(review)
-        review["updated_at"] = _now_iso()
-        _save_safety_review_cache(world_id, cache)
-
-    _append_log(
-        world_id,
-        {
-            "event": "safety_review_passed",
-            "review_id": review_id,
-            "source_id": source_id,
-            "book_number": book_number,
-            "chunk_index": chunk_index,
-        },
-    )
-
-    item = _get_safety_review_item(world_id, review_id)
-    if item is None:
-        raise FileNotFoundError("Safety review item not found.")
-    return {
-        "review": item,
-        "safety_review_summary": get_safety_review_summary(world_id),
-        "checkpoint": get_checkpoint_info(world_id),
-    }
+        return {
+            "review": item,
+            "safety_review_summary": get_safety_review_summary(world_id),
+            "checkpoint": get_checkpoint_info(world_id),
+        }
+    except Exception as exc:
+        if live_snapshot is not None:
+            try:
+                await restore_live_snapshot()
+            except Exception:
+                logger.warning("Failed to restore live safety-review snapshot for %s/%s", world_id, review_id, exc_info=True)
+        return await mark_review_failure(
+            _classify_exception_kind(exc),
+            f"Safety review test stopped unexpectedly: {exc}",
+        )

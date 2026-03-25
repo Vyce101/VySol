@@ -28,6 +28,8 @@ from core.ingestion_engine import (
     drain_sse_events,
     get_actionable_resume_sources,
     get_reembed_eligibility,
+    get_ingest_runtime_summary,
+    get_safety_review_bulk_retry_status,
     get_checkpoint_info,
     get_safety_review_rebuild_guard,
     get_safety_review_summary,
@@ -37,6 +39,7 @@ from core.ingestion_engine import (
     manual_rescue_safety_reviews,
     recover_stale_ingestion,
     reset_safety_review,
+    start_bulk_safety_review_retry,
     start_ingestion,
     test_safety_review,
     update_safety_review_draft,
@@ -65,6 +68,13 @@ class SafetyReviewPatchRequest(BaseModel):
 class ManualSafetyReviewRescueRequest(BaseModel):
     source_id: str
     chunk_indices: list[int]
+
+
+class BulkSafetyReviewRetryRequest(BaseModel):
+    review_ids: list[str] | None = None
+    batch_size: int = 1
+    delay_seconds: float = 0.0
+    draft_overrides: dict[str, str] | None = None
 
 
 def _load_meta(world_id: str) -> dict:
@@ -351,6 +361,12 @@ async def ingest_checkpoint(world_id: str):
     return get_checkpoint_info(world_id)
 
 
+@router.get("/{world_id}/ingest/runtime-summary")
+async def ingest_runtime_summary(world_id: str):
+    _load_meta(world_id)
+    return get_ingest_runtime_summary(world_id)
+
+
 @router.get("/{world_id}/ingest/safety-reviews")
 async def ingest_safety_reviews(world_id: str):
     _load_meta(world_id)
@@ -358,6 +374,37 @@ async def ingest_safety_reviews(world_id: str):
         "reviews": list_safety_reviews(world_id),
         "summary": get_safety_review_summary(world_id),
     }
+
+
+@router.get("/{world_id}/ingest/safety-reviews/retry-all")
+async def ingest_safety_review_bulk_retry_status(world_id: str):
+    _load_meta(world_id)
+    return get_safety_review_bulk_retry_status(world_id)
+
+
+@router.post("/{world_id}/ingest/safety-reviews/retry-all")
+async def ingest_safety_review_bulk_retry(world_id: str, req: BulkSafetyReviewRetryRequest):
+    _load_meta(world_id)
+    try:
+        return await start_bulk_safety_review_retry(
+            world_id,
+            review_ids=req.review_ids,
+            batch_size=req.batch_size,
+            delay_seconds=req.delay_seconds,
+            draft_overrides=req.draft_overrides,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        message = str(exc)
+        lowered = message.lower()
+        status_code = 409 if (
+            "active ingest run" in lowered
+            or "entity-resolution run" in lowered
+            or "entity resolution" in lowered
+            or "already in progress" in lowered
+        ) else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
 
 @router.patch("/{world_id}/ingest/safety-reviews/{review_id}")

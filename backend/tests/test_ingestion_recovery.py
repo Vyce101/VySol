@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 
+import networkx as nx
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
@@ -2096,6 +2097,134 @@ def test_abort_route_rejects_missing_world(monkeypatch):
 
     assert exc.value.status_code == 404
     assert called["abort"] is False
+
+
+def test_bulk_safety_review_retry_status_route_returns_engine_status(monkeypatch):
+    expected = {
+        "world_id": "world-1",
+        "run_id": "run-1",
+        "status": "running",
+        "is_active": True,
+        "total_reviews": 3,
+        "processed_reviews": 1,
+        "passed_reviews": 1,
+        "failed_reviews": 0,
+        "skipped_reviews": 0,
+        "batch_size": 1,
+        "delay_seconds": 2.0,
+        "current_review_id": "review-2",
+        "current_review_label": "B1:C2 - Book 1",
+        "started_at": "2026-03-25T00:00:00+00:00",
+        "updated_at": "2026-03-25T00:00:05+00:00",
+        "finished_at": None,
+        "next_batch_at": None,
+        "message": None,
+    }
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: {"world_id": world_id})
+    monkeypatch.setattr(ingestion_router, "get_safety_review_bulk_retry_status", lambda world_id: expected)
+
+    result = asyncio.run(ingestion_router.ingest_safety_review_bulk_retry_status("world-1"))
+
+    assert result == expected
+
+
+def test_bulk_safety_review_retry_route_starts_bulk_retry(monkeypatch):
+    called: dict[str, object] = {}
+    response = {
+        "world_id": "world-1",
+        "run_id": "run-1",
+        "status": "queued",
+        "is_active": True,
+        "total_reviews": 2,
+        "processed_reviews": 0,
+        "passed_reviews": 0,
+        "failed_reviews": 0,
+        "skipped_reviews": 0,
+        "batch_size": 1,
+        "delay_seconds": 0.0,
+        "current_review_id": None,
+        "current_review_label": None,
+        "started_at": "2026-03-25T00:00:00+00:00",
+        "updated_at": "2026-03-25T00:00:00+00:00",
+        "finished_at": None,
+        "next_batch_at": None,
+        "message": None,
+    }
+
+    async def _start(world_id: str, **kwargs):
+        called["world_id"] = world_id
+        called["kwargs"] = kwargs
+        return response
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda world_id: {"world_id": world_id})
+    monkeypatch.setattr(ingestion_router, "start_bulk_safety_review_retry", _start)
+
+    result = asyncio.run(
+        ingestion_router.ingest_safety_review_bulk_retry(
+            "world-1",
+            ingestion_router.BulkSafetyReviewRetryRequest(
+                review_ids=["review-1", "review-2"],
+                batch_size=1,
+                delay_seconds=2.5,
+                draft_overrides={"review-1": "fixed text"},
+            ),
+        )
+    )
+
+    assert result == response
+    assert called["world_id"] == "world-1"
+    assert called["kwargs"] == {
+        "review_ids": ["review-1", "review-2"],
+        "batch_size": 1,
+        "delay_seconds": 2.5,
+        "draft_overrides": {"review-1": "fixed text"},
+    }
+
+
+def test_ingest_runtime_summary_route_returns_engine_summary(monkeypatch):
+    summary = {
+        "world": {
+            "world_name": "World 1",
+            "ingestion_status": "partial_failure",
+            "active_ingestion_run": False,
+        },
+        "checkpoint": {
+            "can_resume": True,
+            "chunk_index": 3,
+            "chunks_total": 7,
+            "reason": "failed_chunks",
+        },
+    }
+
+    monkeypatch.setattr(ingestion_router, "_load_meta", lambda _world_id: {"world_id": "world-1"})
+    monkeypatch.setattr(ingestion_router, "get_ingest_runtime_summary", lambda _world_id: summary)
+
+    result = asyncio.run(ingestion_router.ingest_runtime_summary("world-1"))
+
+    assert result == summary
+
+
+def test_graph_layout_manifest_and_level_payload_include_progressive_cache_data(monkeypatch):
+    graph = nx.MultiDiGraph()
+    graph.add_node("node-a", display_name="Node A", description="A", claims=[], source_chunks=["chunk-a"], created_at="2026-01-01T00:00:00+00:00")
+    graph.add_node("node-b", display_name="Node B", description="B", claims=[], source_chunks=["chunk-b"], created_at="2026-01-01T00:00:00+00:00")
+    graph.add_node("node-c", display_name="Node C", description="C", claims=[], source_chunks=["chunk-c"], created_at="2026-01-01T00:00:00+00:00")
+    graph.add_edge("node-a", "node-b", description="A to B", strength=2, source_book=1, source_chunk=1, created_at="2026-01-01T00:00:00+00:00")
+    graph.add_edge("node-b", "node-c", description="B to C", strength=2, source_book=1, source_chunk=2, created_at="2026-01-01T00:00:00+00:00")
+
+    store = graph_store.GraphStore.from_graph("world-graph", graph)
+    monkeypatch.setattr(graph_store, "dump_json_atomic", lambda *_args, **_kwargs: None)
+
+    manifest = store.get_graph_layout_manifest(force_refresh=True)
+    level_zero = store.get_graph_level_payload(0, force_refresh=True)
+
+    assert manifest["node_count"] == 3
+    assert manifest["edge_count"] == 2
+    assert manifest["total_levels"] >= 1
+    assert len(level_zero["nodes"]) >= 1
+    assert all("x" in node and "y" in node for node in level_zero["nodes"])
+    assert all("load_level" in node for node in level_zero["nodes"])
 
 
 @pytest.mark.skip(reason="Uses tmp_path and hits the repo's shared pytest temp cleanup issue on Windows.")
