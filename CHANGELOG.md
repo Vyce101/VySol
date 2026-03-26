@@ -4,6 +4,8 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-26
+
 ### Changed
 
 - Changed chat loading to use lightweight world-header and chat-summary endpoints, open threads with the newest 20 messages first, and page older history behind a `Show More Messages` action instead of loading full threads up front.
