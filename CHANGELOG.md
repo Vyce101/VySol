@@ -25,6 +25,7 @@ All notable user-visible changes to this project will be documented in this file
 - Fixed Gemini chat and retrieval-query embedding retries so ambiguous Gemini `429` throttles now back off at the request level instead of falsely cooling down every shared Gemini key.
 - Fixed entity-resolution startup, batching, and persistence so large unique-node clones respect Chroma batch limits, exact-only batching now uses the configured embedding batch size for changed winners, already committed embedded merges survive aborts, and Windows graph saves retry cleanly through temporary file-lock collisions.
 - Fixed shipped version metadata so the backend app version and frontend package version now agree with the current documented release line.
+- Fixed release hygiene by correcting the top-level AGPL license text encoding artifact and removing a stray tracked pytest placeholder path from the repo tree.
 
 ## [0.3.0] - 2026-03-25
 
