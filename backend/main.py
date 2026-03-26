@@ -16,7 +16,7 @@ from routers import worlds, ingestion, chat, graph, settings, entity_resolution
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-app = FastAPI(title="VySol", version="1.0.0")
+app = FastAPI(title="VySol", version="0.3.0")
 
 default_cors_origins = [
     "http://localhost:3000",
