@@ -243,6 +243,7 @@ def test_get_chat_messages_returns_latest_page(monkeypatch):
     assert len(page["messages"]) == 20
     assert page["messages"][0]["message_id"] == "m-5"
     assert page["cursor"] == 20
+    assert page["history_integrity"] is None
 
 
 def test_regenerate_from_model_message_truncates_and_returns_prompt(monkeypatch):

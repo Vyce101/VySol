@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,19 @@ from .config import world_dir
 CHAT_STORAGE_VERSION = 2
 CHAT_PAGE_SIZE = 20
 CHAT_INDEX_FILE = "_index.json"
+
+
+def _coerce_non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 class ChatVersionConflictError(RuntimeError):
@@ -41,8 +55,12 @@ class ChatStore:
     def _chat_pages_dir(self, chat_id: str) -> Path:
         return self._chat_dir(chat_id) / "pages"
 
-    def _chat_page_path(self, chat_id: str, page_index: int) -> Path:
-        return self._chat_pages_dir(chat_id) / f"page-{page_index + 1:06d}.json"
+    def _chat_page_set_dir(self, chat_id: str, page_set: str) -> Path:
+        return self._chat_pages_dir(chat_id) / page_set
+
+    def _chat_page_path(self, chat_id: str, page_index: int, *, page_set: str | None = None) -> Path:
+        base_dir = self._chat_page_set_dir(chat_id, page_set) if page_set else self._chat_pages_dir(chat_id)
+        return base_dir / f"page-{page_index + 1:06d}.json"
 
     def _read_json_file(self, path: Path) -> dict | None:
         try:
@@ -155,6 +173,68 @@ class ChatStore:
         normalized["status"] = payload.get("status") or "complete"
         return normalized
 
+    def _normalize_active_page_set(self, raw_value: object) -> str | None:
+        if not isinstance(raw_value, str):
+            return None
+        candidate = raw_value.strip()
+        if not candidate or candidate in {".", ".."}:
+            return None
+        if Path(candidate).name != candidate:
+            return None
+        return candidate
+
+    def _build_history_integrity(self, *, recorded_total: int, persisted_total: int) -> dict:
+        missing_messages = max(recorded_total - persisted_total, 0)
+        if missing_messages > 0:
+            noun = "message" if missing_messages == 1 else "messages"
+            message = (
+                f"Older saved chat history is missing from disk. "
+                f"Showing the {persisted_total} messages still available here; "
+                f"about {missing_messages} older {noun} could not be recovered."
+            )
+        else:
+            message = (
+                "Saved chat history metadata does not match the messages still on disk. "
+                "Showing the messages that are currently available."
+            )
+        return {
+            "status": "degraded",
+            "code": "messages_missing",
+            "message": message,
+            "recorded_total": recorded_total,
+            "persisted_total_at_detection": persisted_total,
+            "missing_messages_estimate": missing_messages,
+        }
+
+    def _normalize_history_integrity(self, raw_value: object) -> dict | None:
+        if not isinstance(raw_value, dict):
+            return None
+
+        recorded_total = _coerce_non_negative_int(raw_value.get("recorded_total"))
+        persisted_total = _coerce_non_negative_int(raw_value.get("persisted_total_at_detection"))
+        missing_messages = _coerce_non_negative_int(raw_value.get("missing_messages_estimate"))
+        if recorded_total is None or persisted_total is None or missing_messages is None:
+            return None
+
+        message = str(raw_value.get("message") or "").strip()
+        if not message:
+            message = self._build_history_integrity(
+                recorded_total=recorded_total,
+                persisted_total=persisted_total,
+            )["message"]
+
+        status = str(raw_value.get("status") or "degraded").strip() or "degraded"
+        code = str(raw_value.get("code") or "messages_missing").strip() or "messages_missing"
+
+        return {
+            "status": status,
+            "code": code,
+            "message": message,
+            "recorded_total": recorded_total,
+            "persisted_total_at_detection": persisted_total,
+            "missing_messages_estimate": missing_messages,
+        }
+
     def _derive_preview_title(self, messages: list[dict]) -> str:
         for message in messages:
             if message.get("role") != "user":
@@ -224,6 +304,9 @@ class ChatStore:
             "storage_version": CHAT_STORAGE_VERSION,
             "page_size": CHAT_PAGE_SIZE,
             "total_messages": len(messages),
+            "history_integrity": self._normalize_history_integrity(
+                data.get("history_integrity") if "history_integrity" in data else data.get("historyIntegrity")
+            ),
             "messages": messages,
         }
 
@@ -241,6 +324,10 @@ class ChatStore:
 
         title = str(data.get("title") or "").strip() or "New Chat"
         has_manual_title = bool(data.get("has_manual_title", False))
+        active_page_set = self._normalize_active_page_set(data.get("active_page_set"))
+        history_integrity = self._normalize_history_integrity(
+            data.get("history_integrity") if "history_integrity" in data else data.get("historyIntegrity")
+        )
 
         return {
             "id": data.get("id", chat_id),
@@ -252,6 +339,8 @@ class ChatStore:
             "storage_version": CHAT_STORAGE_VERSION,
             "page_size": CHAT_PAGE_SIZE,
             "total_messages": total_messages,
+            "active_page_set": active_page_set,
+            "history_integrity": history_integrity,
         }
 
     def _chat_summary_from_meta(self, meta: dict) -> dict:
@@ -377,26 +466,33 @@ class ChatStore:
                 "title": title,
                 "has_manual_title": has_manual_title,
                 "total_messages": len(messages),
+                "active_page_set": f"v{int(chat.get('version', 0) or 0)}",
             },
             chat_id,
         )
-
-        for existing_page in pages_dir.glob("page-*.json"):
-            try:
-                existing_page.unlink()
-            except OSError:
-                pass
+        active_page_set = meta.get("active_page_set")
+        if not active_page_set:
+            raise RuntimeError("Missing active page set for chat storage write.")
+        target_page_set_dir = self._chat_page_set_dir(chat_id, active_page_set)
+        if target_page_set_dir.exists():
+            shutil.rmtree(target_page_set_dir)
+        target_page_set_dir.mkdir(parents=True, exist_ok=True)
 
         for page_index, start in enumerate(range(0, len(messages), CHAT_PAGE_SIZE)):
             page_messages = messages[start:start + CHAT_PAGE_SIZE]
             dump_json_atomic(
-                self._chat_page_path(chat_id, page_index),
+                self._chat_page_path(chat_id, page_index, page_set=active_page_set),
                 {"messages": page_messages},
             )
 
         dump_json_atomic(self._chat_meta_path(chat_id), meta)
+        self._cleanup_inactive_page_storage(chat_id, active_page_set=active_page_set)
         self._update_index_entry(self._chat_summary_from_meta(meta))
-        return {**meta, "messages": messages}
+        return {
+            **meta,
+            "messages": messages,
+            "total_messages": len(messages),
+        }
 
     def _load_meta(self, chat_id: str) -> dict | None:
         self._ensure_split_chat(chat_id)
@@ -405,39 +501,69 @@ class ChatStore:
             return None
         return self._normalize_meta(meta, chat_id)
 
-    def _read_page_messages(self, chat_id: str, page_index: int) -> list[dict]:
-        payload = self._read_json_file(self._chat_page_path(chat_id, page_index))
+    def _page_paths(self, chat_id: str, *, page_set: str | None = None) -> list[Path]:
+        pages_dir = self._chat_pages_dir(chat_id)
+        if not pages_dir.exists():
+            return []
+        if page_set:
+            page_set_dir = self._chat_page_set_dir(chat_id, page_set)
+            if not page_set_dir.exists():
+                return []
+            return sorted(page_set_dir.glob("page-*.json"))
+        return sorted(pages_dir.glob("page-*.json"))
+
+    def _read_page_messages_from_path(self, path: Path) -> list[dict]:
+        payload = self._read_json_file(path)
         raw_messages = payload.get("messages") if isinstance(payload, dict) else []
         if not isinstance(raw_messages, list):
             return []
         return [self._normalize_message(message) for message in raw_messages]
 
-    def _load_all_messages(self, chat_id: str, total_messages: int | None = None) -> list[dict]:
-        meta = self._load_meta(chat_id)
-        if not meta:
+    def _read_page_messages(self, chat_id: str, page_index: int, *, page_set: str | None = None) -> list[dict]:
+        page_path = self._chat_page_path(chat_id, page_index, page_set=page_set)
+        if not page_path.exists():
             return []
-        total = meta.get("total_messages", 0) if total_messages is None else total_messages
+        return self._read_page_messages_from_path(page_path)
+
+    def _count_persisted_messages(self, page_paths: list[Path]) -> int:
+        total = 0
+        for page_path in page_paths:
+            total += len(self._read_page_messages_from_path(page_path))
+        return total
+
+    def _resolved_page_paths(self, chat_id: str, meta: dict) -> list[Path]:
+        active_page_set = meta.get("active_page_set")
+        if active_page_set:
+            return self._page_paths(chat_id, page_set=active_page_set)
+        return self._page_paths(chat_id)
+
+    def _load_all_messages(self, page_paths: list[Path], total_messages: int) -> list[dict]:
+        total = total_messages
         if total <= 0:
             return []
 
         messages: list[dict] = []
-        page_count = (total + CHAT_PAGE_SIZE - 1) // CHAT_PAGE_SIZE
-        for page_index in range(page_count):
-            messages.extend(self._read_page_messages(chat_id, page_index))
+        for page_path in page_paths:
+            messages.extend(self._read_page_messages_from_path(page_path))
+            if len(messages) >= total:
+                break
         return messages[:total]
 
-    def _load_message_window(self, chat_id: str, start_index: int, end_index: int) -> list[dict]:
+    def _load_message_window(self, page_paths: list[Path], start_index: int, end_index: int) -> list[dict]:
         if end_index <= start_index:
             return []
 
-        first_page = start_index // CHAT_PAGE_SIZE
-        last_page = (end_index - 1) // CHAT_PAGE_SIZE
         output: list[dict] = []
+        cursor = 0
 
-        for page_index in range(first_page, last_page + 1):
-            page_messages = self._read_page_messages(chat_id, page_index)
-            page_start = page_index * CHAT_PAGE_SIZE
+        for page_path in page_paths:
+            page_messages = self._read_page_messages_from_path(page_path)
+            page_start = cursor
             page_end = page_start + len(page_messages)
+            cursor = page_end
+
+            if end_index <= page_start:
+                break
             overlap_start = max(start_index, page_start)
             overlap_end = min(end_index, page_end)
             if overlap_end <= overlap_start:
@@ -445,8 +571,42 @@ class ChatStore:
             local_start = overlap_start - page_start
             local_end = overlap_end - page_start
             output.extend(page_messages[local_start:local_end])
+            if cursor >= end_index:
+                break
 
         return output
+
+    def _build_storage_state(self, chat_id: str, meta: dict) -> dict:
+        page_paths = self._resolved_page_paths(chat_id, meta)
+        persisted_total = self._count_persisted_messages(page_paths)
+        recorded_total = int(meta.get("total_messages", 0) or 0)
+        history_integrity = meta.get("history_integrity")
+        if recorded_total != persisted_total:
+            history_integrity = self._build_history_integrity(
+                recorded_total=recorded_total,
+                persisted_total=persisted_total,
+            )
+        return {
+            "page_paths": page_paths,
+            "persisted_total": persisted_total,
+            "history_integrity": history_integrity,
+        }
+
+    def _cleanup_inactive_page_storage(self, chat_id: str, *, active_page_set: str) -> None:
+        pages_dir = self._chat_pages_dir(chat_id)
+        if not pages_dir.exists():
+            return
+
+        for candidate in pages_dir.iterdir():
+            try:
+                if candidate.is_dir():
+                    if candidate.name != active_page_set:
+                        shutil.rmtree(candidate)
+                    continue
+                if candidate.is_file() and candidate.name.startswith("page-") and candidate.suffix == ".json":
+                    candidate.unlink()
+            except OSError:
+                pass
 
     def list_chats(self) -> list[dict]:
         return self._ensure_index()
@@ -471,22 +631,30 @@ class ChatStore:
         meta = self._load_meta(chat_id)
         if not meta:
             return None
-        messages = self._load_all_messages(chat_id, meta.get("total_messages", 0))
-        return {**meta, "messages": messages}
+        storage_state = self._build_storage_state(chat_id, meta)
+        effective_total = storage_state["persisted_total"]
+        messages = self._load_all_messages(storage_state["page_paths"], effective_total)
+        return {
+            **meta,
+            "total_messages": effective_total,
+            "history_integrity": storage_state["history_integrity"],
+            "messages": messages,
+        }
 
     def get_chat_page(self, chat_id: str, *, cursor: int | None = None, page_size: int = CHAT_PAGE_SIZE) -> dict | None:
         meta = self._load_meta(chat_id)
         if not meta:
             return None
 
-        total = int(meta.get("total_messages", 0) or 0)
+        storage_state = self._build_storage_state(chat_id, meta)
+        total = int(storage_state["persisted_total"] or 0)
         normalized_page_size = max(1, int(page_size or CHAT_PAGE_SIZE))
         offset = max(0, int(cursor or 0))
         offset = min(offset, total)
 
         end_index = total - offset
         start_index = max(0, end_index - normalized_page_size)
-        messages = self._load_message_window(chat_id, start_index, end_index)
+        messages = self._load_message_window(storage_state["page_paths"], start_index, end_index)
         loaded_count = offset + len(messages)
         has_more = start_index > 0
 
@@ -498,6 +666,7 @@ class ChatStore:
             "cursor": loaded_count if has_more else None,
             "page_size": normalized_page_size,
             "total_messages": total,
+            "history_integrity": storage_state["history_integrity"],
         }
 
     def save_chat(self, chat_id: str, data: dict, *, expected_version: int | None = None) -> dict:

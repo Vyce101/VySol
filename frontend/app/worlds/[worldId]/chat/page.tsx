@@ -53,6 +53,16 @@ interface ChatDetailResponse {
     cursor?: number | null;
     total_messages?: number;
     title?: string;
+    history_integrity?: HistoryIntegrity | null;
+}
+
+interface HistoryIntegrity {
+    status: "degraded";
+    code: "messages_missing";
+    message: string;
+    recorded_total: number;
+    persisted_total_at_detection: number;
+    missing_messages_estimate: number;
 }
 
 interface ChatThreadState {
@@ -62,6 +72,7 @@ interface ChatThreadState {
     hasMoreHistory: boolean;
     nextCursor: number | null;
     loadingOlder: boolean;
+    historyIntegrity: HistoryIntegrity | null;
     loadRequestId: number;
     streamRequestId: number;
 }
@@ -932,6 +943,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     const isAutoScrollEnabled = useRef(true);
     const previousScrollTopRef = useRef(0);
     const chatStatesRef = useRef<Record<string, ChatThreadState>>({});
+    const activeChatIdRef = useRef<string | null>(null);
     const loadRequestCounterRef = useRef(0);
     const streamRequestCounterRef = useRef(0);
     const localMessageKeyCounterRef = useRef(0);
@@ -980,6 +992,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         hasMoreHistory: false,
         nextCursor: null,
         loadingOlder: false,
+        historyIntegrity: null,
         loadRequestId: 0,
         streamRequestId: 0,
     });
@@ -1011,14 +1024,53 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         contextMeta: m.contextMeta || m.context_meta,
     });
 
+    const parseHistoryIntegrity = (value: ChatDetailResponse["history_integrity"]): HistoryIntegrity | null => {
+        if (!value || typeof value !== "object") {
+            return null;
+        }
+        if (
+            typeof value.message !== "string"
+            || typeof value.recorded_total !== "number"
+            || typeof value.persisted_total_at_detection !== "number"
+            || typeof value.missing_messages_estimate !== "number"
+        ) {
+            return null;
+        }
+        return {
+            status: value.status === "degraded" ? "degraded" : "degraded",
+            code: value.code === "messages_missing" ? "messages_missing" : "messages_missing",
+            message: value.message,
+            recorded_total: value.recorded_total,
+            persisted_total_at_detection: value.persisted_total_at_detection,
+            missing_messages_estimate: value.missing_messages_estimate,
+        };
+    };
+
+    const dedupeMessages = (items: Message[]) => {
+        const seen = new Set<string>();
+        const output: Message[] = [];
+
+        for (const item of items) {
+            const identity = item.messageId || item.localKey;
+            if (seen.has(identity)) {
+                continue;
+            }
+            seen.add(identity);
+            output.push(item);
+        }
+
+        return output;
+    };
+
     const applyPagedChatState = (chatId: string, data: ChatDetailResponse, messagesToApply: Message[]) => {
         setThreadState(chatId, (current) => ({
             ...current,
-            messages: messagesToApply,
+            messages: dedupeMessages(messagesToApply),
             version: data.version ?? current.version,
             hasMoreHistory: Boolean(data.has_more),
             nextCursor: typeof data.cursor === "number" ? data.cursor : null,
             loadingOlder: false,
+            historyIntegrity: parseHistoryIntegrity(data.history_integrity),
         }));
 
         if (typeof data.version === "number" || typeof data.title === "string") {
@@ -1086,6 +1138,30 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         Object.keys(streamAbortControllersRef.current).forEach((chatId) => abortChatStream(chatId));
     };
 
+    // Keep scroll effects scoped to the chat currently visible in the pane.
+    const scrollChatToBottom = (chatId: string | null, behavior: ScrollBehavior = "auto") => {
+        if (!chatId) return;
+
+        requestAnimationFrame(() => {
+            if (activeChatIdRef.current !== chatId) {
+                return;
+            }
+
+            const container = scrollContainerRef.current;
+            if (!container) {
+                return;
+            }
+
+            if (behavior === "smooth") {
+                messagesEndRef.current?.scrollIntoView({ behavior });
+            } else {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            previousScrollTopRef.current = container.scrollTop;
+        });
+    };
+
     async function loadRetrievalSettings() {
         try {
             const data = await apiFetch<any>("/settings");
@@ -1130,16 +1206,36 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
     }, [renamingChatId]);
 
     useEffect(() => {
-        if (isAutoScrollEnabled.current) {
-            messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-        }
-    }, [messages]);
-
-    useEffect(() => {
         const container = scrollContainerRef.current;
         if (!container) return;
         previousScrollTopRef.current = container.scrollTop;
     }, [activeChatId]);
+
+    useEffect(() => {
+        activeChatIdRef.current = activeChatId;
+        isAutoScrollEnabled.current = true;
+        previousScrollTopRef.current = 0;
+        setHoveredMsgIndex(null);
+        setMenuOpenIndex(null);
+        setEditingIndex(null);
+        setEditContent("");
+        setEditBubbleHeight(140);
+        setExpandedThoughtBlocks({});
+        setContextModalData(null);
+        messageBubbleRefs.current = {};
+
+        if (activeChatId) {
+            scrollChatToBottom(activeChatId, "auto");
+        }
+    }, [activeChatId]);
+
+    useEffect(() => {
+        if (!activeChatId || !isAutoScrollEnabled.current) {
+            return;
+        }
+
+        scrollChatToBottom(activeChatId, streaming ? "smooth" : "auto");
+    }, [activeChatId, messages, streaming]);
 
     useEffect(() => {
         if (!contextModalData) {
@@ -1217,7 +1313,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
         }));
         try {
             const data = await apiFetch<ChatDetailResponse>(`/worlds/${worldId}/chats/${chatId}/messages?limit=20`);
-            const mapped = (data.messages || []).map((message, index) => mapMessage(message, `loaded-${chatId}-${index}`));
+            const mapped = dedupeMessages((data.messages || []).map((message, index) => mapMessage(message, `loaded-${chatId}-${index}`)));
             setThreadState(chatId, (current) => {
                 if (current.loadRequestId !== requestId || current.streaming) {
                     return current;
@@ -1229,6 +1325,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                     hasMoreHistory: Boolean(data.has_more),
                     nextCursor: typeof data.cursor === "number" ? data.cursor : null,
                     loadingOlder: false,
+                    historyIntegrity: parseHistoryIntegrity(data.history_integrity),
                 };
             });
             if (typeof data.version === "number" || typeof data.title === "string") {
@@ -1288,6 +1385,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                 hasMoreHistory: false,
                 nextCursor: null,
                 loadingOlder: false,
+                historyIntegrity: null,
             }));
             setActiveChatId(data.id);
             void loadThreads();
@@ -1315,14 +1413,15 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             const data = await apiFetch<ChatDetailResponse>(
                 `/worlds/${worldId}/chats/${chatId}/messages?limit=20&cursor=${currentState.nextCursor}`
             );
-            const mapped = (data.messages || []).map((message, index) => mapMessage(message, `older-${chatId}-${index}`));
+            const mapped = dedupeMessages((data.messages || []).map((message, index) => mapMessage(message, `older-${chatId}-${index}`)));
             setThreadState(chatId, (current) => ({
                 ...current,
-                messages: [...mapped, ...current.messages],
+                messages: dedupeMessages([...mapped, ...current.messages]),
                 version: data.version ?? current.version,
                 hasMoreHistory: Boolean(data.has_more),
                 nextCursor: typeof data.cursor === "number" ? data.cursor : null,
                 loadingOlder: false,
+                historyIntegrity: parseHistoryIntegrity(data.history_integrity),
             }));
 
             if (typeof data.version === "number" || typeof data.title === "string") {
@@ -1338,9 +1437,13 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
             }
 
             requestAnimationFrame(() => {
+                if (activeChatIdRef.current !== chatId) {
+                    return;
+                }
                 const nextContainer = scrollContainerRef.current;
                 if (!nextContainer) return;
                 nextContainer.scrollTop = (nextContainer.scrollHeight - previousHeight) + previousTop;
+                previousScrollTopRef.current = nextContainer.scrollTop;
             });
         } catch {
             setThreadState(chatId, (current) => ({ ...current, loadingOlder: false }));
@@ -1856,6 +1959,23 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
                         <AlertTriangle size={14} /> World not fully ingested. Answers may be incomplete.
                     </div>
                 )}
+                {activeThreadState.historyIntegrity && (
+                    <div style={{
+                        padding: "10px 16px",
+                        background: "#7f1d1d1a",
+                        borderBottom: "1px solid #7f1d1d66",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 8,
+                        fontSize: 13,
+                        color: "#fca5a5",
+                        textAlign: "center",
+                    }}>
+                        <AlertTriangle size={14} />
+                        {activeThreadState.historyIntegrity.message}
+                    </div>
+                )}
 
                 {/* Fixed Overlay for Menu Closing */}
                 {menuOpenIndex !== null && (
@@ -1867,6 +1987,7 @@ export default function ChatPage({ params }: { params: Promise<{ worldId: string
 
                 {/* Messages */}
                 <div
+                    key={activeChatId ?? "no-chat"}
                     ref={scrollContainerRef}
                     onScroll={handleScroll}
                     style={{ flex: 1, overflowY: "auto", padding: "20px 0" }}
