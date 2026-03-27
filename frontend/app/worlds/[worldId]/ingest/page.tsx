@@ -900,6 +900,7 @@ export default function IngestPage({ params }: { params: Promise<{ worldId: stri
         embedding_provider: override?.embedding_provider ?? savedIngestSettings?.embedding_provider ?? "gemini",
         embedding_openai_compatible_provider: override?.embedding_openai_compatible_provider ?? savedIngestSettings?.embedding_openai_compatible_provider ?? "groq",
         embedding_model: override?.embedding_model ?? savedIngestSettings?.embedding_model ?? "gemini-embedding-2-preview",
+        embedding_params: override?.embedding_params ?? savedIngestSettings?.embedding_params ?? {},
         glean_amount: override?.glean_amount ?? savedIngestSettings?.glean_amount ?? 1,
     });
 

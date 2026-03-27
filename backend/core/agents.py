@@ -7,11 +7,10 @@ import json
 import logging
 from typing import Any, Literal
 
-from google import genai
-from google.genai import types
 import httpx
 from pydantic import BaseModel
 
+from .ai_catalog import get_provider_manifest_entry
 from .config import (
     SLOT_ENTITY_CHOOSER,
     SLOT_ENTITY_COMBINER,
@@ -19,8 +18,6 @@ from .config import (
     get_provider_pool,
     load_prompt,
     load_settings,
-    resolve_gemini_thinking_settings,
-    resolve_groq_reasoning_effort,
     resolve_slot_provider,
 )
 from .key_manager import (
@@ -30,10 +27,7 @@ from .key_manager import (
     get_key_manager,
     jittered_delay,
 )
-from .openai_compatible_provider import (
-    async_create_openai_compatible_chat_completion,
-    async_create_openai_compatible_chat_completion_for_api_key,
-)
+from .litellm_adapter import acompletion, extract_response_text, extract_usage
 
 logger = logging.getLogger(__name__)
 TransientKeyStrategy = Literal["default", "fail_fast_no_cooldown"]
@@ -398,6 +392,152 @@ def _parse_openai_compatible_agent_response(response: dict[str, Any]) -> tuple[d
     return parsed, usage
 
 
+def _response_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    for target in (exc, response):
+        if target is None:
+            continue
+        status_code = getattr(target, "status_code", None)
+        try:
+            if status_code is not None:
+                return int(status_code)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _build_agent_response_variants(
+    *,
+    prompt_key: str,
+    system_prompt: str,
+    user_content: str,
+) -> list[tuple[list[dict[str, Any]], dict[str, Any] | None]]:
+    schema_model = _output_model_for_prompt(prompt_key)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    if schema_model is None:
+        fallback_instruction = "Return only a single valid JSON object. Do not include markdown fences or extra prose."
+        return [
+            (messages, {"type": "json_object"}),
+            (
+                [
+                    {"role": "system", "content": f"{system_prompt}\n\n{fallback_instruction}".strip()},
+                    {"role": "user", "content": user_content},
+                ],
+                None,
+            ),
+        ]
+
+    schema = schema_model.model_json_schema()
+    schema_name = schema_model.__name__.lower()
+    schema_instruction = (
+        "Return only a single valid JSON object that satisfies this JSON schema: "
+        f"{json.dumps(schema, separators=(',', ':'))}. "
+        "Do not include markdown fences or extra prose."
+    )
+    return [
+        (
+            messages,
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "schema": schema,
+                },
+            },
+        ),
+        (messages, {"type": "json_object"}),
+        (
+            [
+                {"role": "system", "content": f"{system_prompt}\n\n{schema_instruction}".strip()},
+                {"role": "user", "content": user_content},
+            ],
+            None,
+        ),
+    ]
+
+
+def _parse_structured_response(response: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    text = extract_response_text(response).strip()
+    if not text:
+        raise AgentCallError("empty_response", "Provider returned an empty response.")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AgentCallError("parse_error", f"Provider returned invalid JSON: {exc}") from exc
+    return parsed, extract_usage(response)
+
+
+def _get_slot_params(settings: dict[str, Any], slot_name: str | None) -> dict[str, Any]:
+    if not slot_name:
+        return {}
+    slots = settings.get("slots")
+    if not isinstance(slots, dict):
+        return {}
+    slot_config = slots.get(slot_name)
+    if not isinstance(slot_config, dict):
+        return {}
+    params = slot_config.get("params")
+    return dict(params) if isinstance(params, dict) else {}
+
+
+def _candidate_provider_entries(provider: str) -> list[dict[str, Any]]:
+    pool = get_provider_pool(provider)
+    if pool:
+        return [dict(entry) for entry in pool]
+    manifest = get_provider_manifest_entry(provider) or {}
+    if manifest.get("required_credential_fields"):
+        return []
+    return [{}]
+
+
+async def _execute_structured_agent_request(
+    *,
+    provider: str,
+    model_name: str,
+    prompt_key: str,
+    system_prompt: str,
+    user_content: str,
+    params: dict[str, Any],
+    credential: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    last_exc: Exception | None = None
+    variants = _build_agent_response_variants(
+        prompt_key=prompt_key,
+        system_prompt=system_prompt,
+        user_content=user_content,
+    )
+    for messages, response_format in variants:
+        try:
+            response = await acompletion(
+                provider=provider,
+                model=model_name,
+                messages=messages,
+                params=params,
+                credential=credential,
+                response_format=response_format,
+            )
+            return _parse_structured_response(response)
+        except AgentCallError as exc:
+            last_exc = exc
+            if exc.kind == "parse_error":
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if _response_status_code(exc) == 400:
+                continue
+            raise
+    if isinstance(last_exc, AgentCallError):
+        raise last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise AgentCallError("provider_error", "Provider call did not execute.")
+
+
 async def _call_agent_fail_fast_no_cooldown(
     *,
     provider: str,
@@ -409,71 +549,35 @@ async def _call_agent_fail_fast_no_cooldown(
     system_prompt: str,
     resolved_slot_key: str | None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    pool = get_provider_pool(provider)
-    if not pool:
-        raise AgentCallError("provider_error", f"No API keys configured for {provider}. Add keys in Key Library.")
+    slot_name, _ = _agent_slot_for_prompt(prompt_key, resolved_slot_key)
+    provider_entries = _candidate_provider_entries(provider)
+    if not provider_entries:
+        raise AgentCallError("provider_error", f"No credentials configured for {provider}. Add credentials in Key Library.")
 
+    params = {
+        **_get_slot_params(settings, slot_name),
+        "temperature": temperature,
+    }
     last_transient_error: Exception | None = None
-
-    if provider == "gemini":
-        config = _build_gemini_generate_config(
-            settings=settings,
-            system_prompt=system_prompt,
-            resolved_slot_key=resolved_slot_key,
-            model_name=model_name,
-            temperature=temperature,
-        )
-        for entry in pool:
-            api_key = str(entry.get("api_key") or "").strip()
-            if not api_key:
+    for entry in provider_entries:
+        try:
+            return await _execute_structured_agent_request(
+                provider=provider,
+                model_name=model_name,
+                prompt_key=prompt_key,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                params=params,
+                credential=entry,
+            )
+        except AgentCallError:
+            raise
+        except Exception as exc:
+            transient_kind = classify_transient_provider_error(exc)
+            if transient_kind:
+                last_transient_error = exc
                 continue
-            try:
-                client = genai.Client(api_key=api_key)
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=user_content,
-                    config=config,
-                )
-                return _parse_gemini_agent_response(response, user_content)
-            except AgentCallError:
-                raise
-            except Exception as exc:
-                transient_kind = classify_transient_provider_error(exc)
-                if transient_kind:
-                    last_transient_error = exc
-                    continue
-                raise AgentCallError("provider_error", f"Provider call failed: {exc}") from exc
-    else:
-        payload = _build_openai_compatible_agent_payload(
-            settings=settings,
-            prompt_key=prompt_key,
-            system_prompt=system_prompt,
-            user_content=user_content,
-            model_name=model_name,
-            temperature=temperature,
-            resolved_slot_key=resolved_slot_key,
-        )
-        for entry in pool:
-            api_key = str(entry.get("api_key") or "").strip()
-            if not api_key:
-                continue
-            base_url = str(entry.get("base_url") or "").strip() or None
-            try:
-                response = await _execute_openai_compatible_agent_request(
-                    provider,
-                    payload,
-                    api_key=api_key,
-                    base_url=base_url,
-                )
-                return _parse_openai_compatible_agent_response(response)
-            except AgentCallError:
-                raise
-            except Exception as exc:
-                transient_kind = classify_transient_provider_error(exc)
-                if transient_kind:
-                    last_transient_error = exc
-                    continue
-                raise AgentCallError("provider_error", f"Provider call failed: {exc}") from exc
+            raise AgentCallError("provider_error", f"Provider call failed: {exc}") from exc
 
     if last_transient_error is not None:
         transient_kind = classify_transient_provider_error(last_transient_error)
@@ -481,7 +585,7 @@ async def _call_agent_fail_fast_no_cooldown(
             _agent_error_kind_for_transient(transient_kind),
             str(last_transient_error),
         ) from last_transient_error
-    raise AgentCallError("provider_error", f"No API keys configured for {provider}. Add keys in Key Library.")
+    raise AgentCallError("provider_error", f"No credentials configured for {provider}. Add credentials in Key Library.")
 
 
 async def _call_agent(
@@ -524,43 +628,25 @@ async def _call_agent(
 
     attempt = 0
     tried_key_indices: set[int] = set()
+    params = {
+        **_get_slot_params(settings, slot_name),
+        "temperature": temperature,
+    }
+    km = get_key_manager(provider)
 
     while attempt < max_retries:
         key_idx: int | None = None
         try:
-            if provider == "gemini":
-                km = _get_provider_key_manager("gemini")
-                if hasattr(km, "await_request_key"):
-                    api_key, key_idx = await km.await_request_key(tried_key_indices)
-                else:
-                    api_key, key_idx = await km.await_active_key()
-                client = genai.Client(api_key=api_key)
-                config = _build_gemini_generate_config(
-                    settings=settings,
-                    system_prompt=system_prompt,
-                    resolved_slot_key=resolved_slot_key,
-                    model_name=model_name,
-                    temperature=temperature,
-                )
-
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=user_content,
-                    config=config,
-                )
-                return _parse_gemini_agent_response(response, user_content)
-
-            payload = _build_openai_compatible_agent_payload(
-                settings=settings,
+            credential, key_idx = await km.await_request_credential(tried_key_indices)
+            return await _execute_structured_agent_request(
+                provider=provider,
+                model_name=model_name,
                 prompt_key=prompt_key,
                 system_prompt=system_prompt,
                 user_content=user_content,
-                model_name=model_name,
-                temperature=temperature,
-                resolved_slot_key=resolved_slot_key,
+                params=params,
+                credential=credential,
             )
-            response = await _execute_openai_compatible_agent_request(provider, payload)
-            return _parse_openai_compatible_agent_response(response)
 
         except json.JSONDecodeError as e:
             logger.warning(f"Agent {prompt_key} attempt {attempt + 1}: JSON parse error - {e}")
@@ -574,7 +660,7 @@ async def _call_agent(
         except Exception as e:
             transient_kind = classify_transient_provider_error(e)
             if transient_kind and key_idx is not None:
-                _get_provider_key_manager(provider).report_error(key_idx, transient_kind)
+                km.report_error(key_idx, transient_kind)
                 logger.warning(
                     "Agent %s attempt %s: transient %s on key %s: %s",
                     prompt_key,

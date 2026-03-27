@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from core.ai_catalog import build_ai_catalog
 from core.config import (
     LEGACY_REMOVED_KEYS,
     PROMPT_KEYS,
     PROVIDER_REGISTRY,
     activate_settings_preset,
     create_settings_preset,
+    get_provider_capabilities,
     get_provider_library_payload,
     load_default_prompts,
     load_settings,
@@ -44,10 +46,12 @@ class PresetRenameRequest(BaseModel):
 
 
 class CredentialUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     id: str | None = None
     label: str | None = None
     enabled: bool = True
     api_key: str | None = None
+    api_base: str | None = None
     base_url: str | None = None
 
 
@@ -83,14 +87,11 @@ async def get_settings():
 
 @router.post("")
 async def update_settings(body: dict):
-    current = load_settings()
-    for key in LEGACY_REMOVED_KEYS:
-        current.pop(key, None)
-    next_settings = dict(current)
-    for key, value in body.items():
-        if key in LEGACY_REMOVED_KEYS:
-            continue
-        next_settings[key] = value
+    next_settings = {
+        key: value
+        for key, value in body.items()
+        if key not in LEGACY_REMOVED_KEYS
+    }
     save_settings(next_settings)
     _reload_provider_managers()
     return _settings_payload()
@@ -138,6 +139,11 @@ async def get_key_library():
             for provider in PROVIDER_REGISTRY
         }
     }
+
+
+@router.get("/ai-catalog")
+async def get_ai_catalog():
+    return build_ai_catalog()
 
 
 @router.get("/key-library/{provider}")

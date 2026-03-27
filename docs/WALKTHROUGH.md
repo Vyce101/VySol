@@ -22,23 +22,24 @@ Presets:
 
 Key Library:
 
-- Use the provider dropdown to manage Gemini, Groq, IntenseRP Next, and any future providers the app knows about
+- Use the provider dropdown to manage the selectable providers the backend currently exposes
+- Providers are listed alphabetically
 - Credential entries are shared across all presets for that provider
-- Gemini and Groq entries store API keys
-- IntenseRP Next stores a base URL instead of an API key
+- Different providers can ask for different credential shapes such as API keys, base URLs, or Vertex project/location fields
 - Saved entries stay stored even when you toggle them off
 - Only enabled and fully filled entries join the live provider pool
+- `ChatGPT Subscription` is intentionally not shown as a selectable provider in these dropdowns
 
 Fallback behavior:
 
-- If no ready Gemini library entry is enabled, VySol can still fall back to `GEMINI_API_KEY`
-- If no ready Groq library entry is enabled, VySol can still fall back to `GROQ_API_KEY`
-- If no ready IntenseRP entry is enabled, VySol can still fall back to `INTENSERP_BASE_URL`
+- Many providers can still fall back to provider-specific environment variables when no enabled Key Library entry is ready
+- The exact env-backed fields come from the backend provider manifest, so they can include API keys, base URLs, or other provider-specific fields
 
 Key Rotation Mode:
 
 - `Fail Over`: keeps using the current provider key until it hits a rate limit, then moves to the next one
 - `Round Robin`: rotates across that provider's enabled keys to spread load more evenly
+- VySol still sends one explicit provider, one explicit model, and one explicit credential entry per request; it does not turn on LiteLLM router/fallback model groups behind the scenes
 
 Provider status dots:
 
@@ -73,114 +74,39 @@ Important behavior:
 
 Shipped defaults:
 
-- Graph Architect Model: `gemini-3.1-flash-lite-preview` with `minimal` thinking
-- Chat Model: `gemini-3-flash-preview` with `high` thinking
-- Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
-- Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
-- Default Embedding Provider: `Google (Gemini)`
-- Default Embedding Model: `gemini-embedding-2-preview`
+- Graph Architect Model: `gemini/gemini-2.0-flash-lite`
+- Chat Model: `gemini/gemini-2.0-flash`
+- Entity Chooser Model: `gemini/gemini-2.0-flash-lite`
+- Entity Combiner Model: `gemini/gemini-2.0-flash-lite`
+- Default Embedding Provider: `Google AI Studio`
+- Default Embedding Model: `gemini/gemini-embedding-001`
 
-Provider family rows:
+Provider and slot behavior:
 
-- Graph Architect, Chat, Entity Chooser, Entity Combiner, and Default Embeddings each have their own provider row
-- `Google (Gemini)` is available for all shipped text slots and embeddings
-- `OpenAI-compatible` opens a second provider dropdown underneath it; `Groq` is the only implementation provider in this build
-- `IntenseRP Next` remains a separate chat-only provider option
+- `Graph Architect`, `Chat`, `Entity Chooser`, `Entity Combiner`, and `Default Embeddings` each have their own collapsible card
+- All five cards start collapsed by default
+- Provider lists are alphabetical
+- The provider and model catalog now comes from the backend LiteLLM catalog rather than one hardcoded frontend provider family table
 
-What Groq supports right now:
+Model selection behavior:
 
-- Chat
-- Graph Architect
-- Entity Chooser
-- Entity Combiner
+- Strict catalog providers show a normal model dropdown and reject unknown model ids on save
+- Custom-model-first providers show a freeform model textbox with a placeholder example instead of pretending the catalog is authoritative
+- Right now the custom-model-first providers are `Hugging Face`, `NanoGPT`, `NVIDIA NIM`, `Ollama`, `OpenAI Compatible`, and `OpenRouter`
+- For those providers, shared task-appropriate parameters still stay available even when you type a model id the catalog did not explicitly list
 
-What Groq does not support in this build:
+Embedding behavior:
 
-- Embeddings
-- Gemini-only safety controls
-- Gemini-only thinking controls
+- The embedding slot only exposes embedding-capable catalog providers and models
+- Google AI Studio chat/text models such as `gemini-1.5-flash` are intentionally filtered out of embedding choices
+- Custom-model-first embedding providers like `Ollama` can still save a typed embedding model id even when the runtime catalog does not list one yet
+- The same embedding-provider behavior is reused in the world `Ingestion Setup` and `Re-ingest` editor
 
-Graph Architect Model:
+Parameters:
 
-- This is the extraction model used to turn text chunks into entities and relationships
-- Lighter, faster models usually work best here because ingestion can make many calls
-- A Gemini Flash-class model is a good fit for most users
-
-Gemini thinking:
-
-- Gemini model rows now show a `Thinking` control next to the model field
-- If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown instead of a free-text field
-- `Gemini 3.1 Pro` supports `low`, `medium`, and `high`
-- `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
-- `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
-- Leaving the dropdown blank means `use the model's provider default`
-- Known Gemini catalog models that do not support a built-in thinking dropdown now show a visible unsupported note instead of silently hiding the row
-- Custom or unknown Gemini model ids get an advanced manual thinking field because VySol cannot truthfully infer their supported presets
-
-Groq reasoning:
-
-- Groq model rows resolve reasoning support per model, not just per provider
-- `openai/gpt-oss-20b` and `openai/gpt-oss-120b` show `low`, `medium`, and `high`
-- `qwen/qwen3-32b` shows `none` plus `Reasoning On (provider default)`, which keeps the provider's own default distinct from VySol's blank `Use model default` state
-- Known Groq catalog models without reasoning support show a visible unsupported note instead of silently hiding the row
-- Custom or unknown Groq model ids get an advanced manual reasoning field because VySol cannot safely infer their supported presets
-- The setting is still stored per Groq-backed slot, but VySol now ignores stale saved reasoning values when the currently selected model does not support them
-- Chat also gets a Groq-only `Include Reasoning` toggle
-- VySol does not fake live thought-token streaming for Groq; if reasoning is returned, it is attached after the reply completes
-
-Chat providers:
-
-- `Google (Gemini)` uses the normal Gemini chat model field and Gemini key pool
-- `OpenAI-compatible > Groq` uses the Groq key pool from `Key Library`
-- `IntenseRP Next` lets you point chat at a local IntenseRP-compatible endpoint instead
-
-IntenseRP Next:
-
-- GitHub: [LyubomirT/intense-rp-next](https://github.com/LyubomirT/intense-rp-next)
-- This path is optional
-- You add the endpoint URL in `Key Library`
-- No API key is required by VySol for this provider path
-- Extraction, entity resolution, and embeddings do not use IntenseRP Next
-- Using IntenseRP Next and any provider behind it is subject to that provider's own terms of service
-
-Chat Model:
-
-- This is the model used to answer chat requests
-
-Entity Chooser Model:
-
-- This is the entity-resolution model that decides which candidate entities are actually the same entity as the current anchor entity
-
-Entity Combiner Model:
-
-- After the chooser selects matching entities, the combiner rewrites the merged result
-- It chooses the best final display name and creates one final description from the chosen group
-
-Default Embedding Model:
-
-- This is the default embedding model for new worlds when the embedding provider is `Google (Gemini)`
-- The shipped default is `gemini-embedding-2-preview`
-- VySol also stores an embedding provider, both globally and per world
-- If you switch embeddings to `OpenAI-compatible > Groq`, the UI tells the truth and blocks ingest/re-embed because Groq embeddings are not available in this build
-
-Unsupported Gemini models and manual thinking entry:
-
-- If you type a Gemini model name that does not match one of VySol's built-in Gemini 3 dropdown families, the `Thinking` row shows `Built-in thinking dropdown not supported`
-- Click the pencil button to open the manual thinking field for that model slot
-- Enter only one raw value in that field
-- If you enter digits only, such as `512` or `1024`, VySol sends that as a Gemini `thinkingBudget`
-- If you enter text, such as `high`, `medium`, or another provider-documented level name, VySol sends that as a Gemini `thinkingLevel`
-- Do not type wrappers such as `thinking.thinkingLevel=high`, `thinkingBudget=1024`, `level: high`, or JSON
-- Good manual examples: `high`, `medium`, `minimal`, `1024`
-- Bad manual examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingLevel": "high" }`
-- If you are unsure what values a custom Gemini model accepts, check that model family's provider docs first and then enter only the final raw value VySol should send
-- The embedding slot does not use Gemini thinking controls in VySol
-
-Gemini safety:
-
-- `Disable Safety Filters` is Gemini-only
-- It appears only when one of the selected model rows is using Gemini
-- Groq and IntenseRP do not show a fake safety toggle in Configuration
+- Shared/common model parameters are rendered from metadata instead of hardcoded one-provider controls
+- Provider-specific parameters show up only when the backend provider manifest declares them
+- If a model supports extra parameters that do not have a dedicated UI control yet, VySol keeps them in `Additional LiteLLM Params JSON`
 
 ## Creating A World
 
@@ -233,8 +159,8 @@ Shipped defaults:
 
 - Chunk size: `4000`
 - Chunk overlap: `150`
-- World embedding provider: `Google (Gemini)`
-- World embedding model: `gemini-embedding-2-preview`
+- World embedding provider: `Google AI Studio`
+- World embedding model: `gemini/gemini-embedding-001`
 - Graph Architect glean amount: `1`
 
 What they mean:
@@ -256,7 +182,8 @@ Important behavior:
 - Once a world has resumable or completed ingest history, the main page returns to a read-only snapshot of the world's saved settings and effective prompts
 - Clicking the small settings icon next to `Re-ingest` opens the editable world-specific setup popup for rebuilds
 - Starting either the first ingest or `Re-ingest` with edited values saves those settings as the world's new defaults
-- If the selected world embedding provider is not actually available yet, such as `OpenAI-compatible > Groq` in this build, ingest and `Re-embed All` are blocked with a truthful explanation instead of pretending the provider works
+- The world embedding provider/model controls use the same catalog-backed versus custom-model-first behavior as the global `Default Embeddings` slot
+- If the selected world embedding provider/model combination is not actually available for embeddings, ingest and `Re-embed All` are blocked with a truthful explanation instead of pretending the provider works
 
 ## Prompt Snapshot
 
@@ -434,14 +361,10 @@ The retrieval sidebar is grouped into collapsible sections. All sections start c
 
 `Provider-specific extras`
 
-- `Send Thinking` appears only when the chat provider is `Google (Gemini)`
-- It is `on` by default in the shipped app defaults
-- Turning it on asks Gemini to include thought content when the chosen model and provider path support it
-- When Gemini returns thought content, VySol saves it with the message and renders a collapsible `Model Thinking` block above the normal reply text
-- `Include Reasoning` appears only when the chat provider is `OpenAI-compatible > Groq`
-- Turning it on asks Groq for reasoning when that model/provider path supports it
-- Groq reasoning, when returned, is attached after the reply instead of streaming as live thought tokens
-- `IntenseRP Next` shows neither of these provider-specific toggles
+- The contents of this section come from the selected provider/model metadata instead of one hardcoded provider family layout
+- Gemini-specific fields only appear when the selected chat provider/model actually supports them
+- Groq-specific fields only appear when the selected chat provider/model actually supports them
+- If a provider/model pair does not expose any provider-specific extras, this section simply stays minimal instead of showing fake controls
 
 `Vector Query (Msgs)`
 

@@ -131,6 +131,70 @@ def test_settings_payload_strips_secrets_and_internal_fields(monkeypatch):
     assert "_active_settings_preset_id" not in payload
 
 
+def test_update_settings_route_forwards_partial_patch_without_expanding_snapshot(monkeypatch):
+    captured: list[dict] = []
+    body = {
+        "slots": {
+            "chat": {
+                "provider": "gemini",
+                "model": "gemini/gemini-2.0-flash",
+                "task": "chat",
+                "params": {"temperature": 0.7},
+            }
+        }
+    }
+
+    monkeypatch.setattr(settings_router, "save_settings", lambda payload: captured.append(payload))
+    monkeypatch.setattr(settings_router, "_reload_provider_managers", lambda: None)
+    monkeypatch.setattr(settings_router, "_settings_payload", lambda: {"ok": True})
+
+    result = asyncio.run(settings_router.update_settings(body))
+
+    assert captured == [body]
+    assert result == {"ok": True}
+
+
+def test_save_settings_merges_partial_slot_updates_without_replacing_other_slots(monkeypatch):
+    settings_path, prompts_path = _make_temp_paths("settings-slot-merge")
+    try:
+        monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+        config.load_settings()
+
+        config.save_settings(
+            {
+                "slots": {
+                    "chat": {
+                        "provider": "openai",
+                        "model": "openai/chatgpt-4o-latest",
+                        "task": "chat",
+                        "params": {"temperature": 1.0},
+                    }
+                }
+            }
+        )
+        config.save_settings(
+            {
+                "slots": {
+                    "flash": {
+                        "provider": "anthropic",
+                        "model": "anthropic/claude-3-7-sonnet-20250219",
+                        "task": "chat",
+                        "params": {"temperature": 0.1, "reasoning_effort": "medium"},
+                    }
+                }
+            }
+        )
+
+        loaded = config.load_settings()
+
+        assert loaded["slots"]["chat"]["provider"] == "openai"
+        assert loaded["slots"]["chat"]["model"] == "openai/chatgpt-4o-latest"
+        assert loaded["slots"]["flash"]["provider"] == "anthropic"
+        assert loaded["slots"]["flash"]["model"] == "anthropic/claude-3-7-sonnet-20250219"
+    finally:
+        _cleanup_temp_paths(settings_path, prompts_path)
+
+
 def test_prompt_keys_expose_graph_and_entity_resolution_prompts():
     expected = {
         "graph_architect_prompt",

@@ -16,7 +16,7 @@ You can ingest plain-text source material, control how the graph is built, resol
 
 Entity resolution supports a fast `Exact only` cleanup pass or a fuller `Exact + chooser/combiner` workflow after ingestion, plus per-run unique-node embedding batch and delay controls.
 
-Global settings now split into a preset-backed `Configuration` tab and a shared `Key Library`. Gemini and Groq can be selected per text-model slot, IntenseRP Next stays chat-only, and embedding settings are provider-aware even though this build still only enables Gemini embeddings.
+Global settings now split into a preset-backed `Configuration` tab and a shared `Key Library`, both backed by a LiteLLM catalog pinned to exact version `1.82.6`. Providers are listed alphabetically, open-ended providers can use custom model ids where appropriate, and embedding settings are provider-aware in both global settings and world re-ingest setup.
 
 This project is licensed under the GNU AGPLv3. Companies requiring a commercial license should see [COMMERCIAL.md](COMMERCIAL.md).
 

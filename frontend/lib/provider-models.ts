@@ -1,8 +1,14 @@
 export const CUSTOM_MODEL_OPTION_VALUE = "__custom__";
 
-export interface ProviderFamilyOption {
-    value: string;
+export type SlotKey = "flash" | "chat" | "entity_chooser" | "entity_combiner" | "embedding";
+export type ModelTask = "chat" | "embedding";
+
+export interface ProviderFieldMeta {
+    name: string;
     label: string;
+    secret?: boolean;
+    multiline?: boolean;
+    help_text?: string;
 }
 
 export interface ProviderReasoningOption {
@@ -10,36 +16,62 @@ export interface ProviderReasoningOption {
     label: string;
 }
 
-export type ModelCapabilityState = "supported" | "unsupported" | "custom";
-
-export interface ModelCapabilityInfo {
-    state: ModelCapabilityState;
-    option: ProviderModelOption | null;
-}
-
-export interface GeminiThinkingUiState extends ModelCapabilityInfo {
-    supportedLevels: string[];
-}
-
-export interface GroqReasoningUiState extends ModelCapabilityInfo {
-    supportedOptions: ProviderReasoningOption[];
+export interface ParamDefinition {
+    name: string;
+    label: string;
+    type: "number" | "integer" | "enum" | "json";
+    min?: number;
+    max?: number;
+    step?: number;
+    options?: ProviderReasoningOption[];
+    help_text?: string;
+    tasks?: ModelTask[];
 }
 
 export interface ProviderModelOption {
     value: string;
     label: string;
-    supports_gemini_thinking?: boolean;
-    gemini_thinking_levels?: string[];
-    supports_groq_reasoning?: boolean;
-    groq_reasoning_options?: ProviderReasoningOption[];
-    provider?: string;
+    task: ModelTask;
+    mode?: string;
+    catalog_source?: string;
+    max_input_tokens?: number | null;
+    max_output_tokens?: number | null;
+    output_vector_size?: number | null;
+    supports_function_calling?: boolean;
+    supports_response_schema?: boolean;
+    supports_vision?: boolean;
+    litellm_provider?: string;
+    supported_params?: string[];
 }
 
-export interface ProviderFieldMeta {
-    name: string;
-    label: string;
-    secret?: boolean;
-    multiline?: boolean;
+export interface CatalogProvider {
+    id: string;
+    display_name: string;
+    supported_slots: SlotKey[];
+    supported_tasks: ModelTask[];
+    required_credential_fields: string[];
+    credential_fields: ProviderFieldMeta[];
+    catalog_source?: string;
+    custom_model_first?: boolean;
+    selectable?: boolean;
+    placeholder_models?: Partial<Record<ModelTask, string>>;
+    notes?: string | null;
+    models: Record<ModelTask, ProviderModelOption[]>;
+    provider_param_defs: ParamDefinition[];
+}
+
+export interface AICatalog {
+    litellm_version: string;
+    slots: Record<SlotKey, { task: ModelTask }>;
+    providers: Record<string, CatalogProvider>;
+    common_params: Record<ModelTask, ParamDefinition[]>;
+}
+
+export interface SlotConfig {
+    provider: string;
+    model: string;
+    task: ModelTask;
+    params: Record<string, unknown>;
 }
 
 export interface ProviderMeta {
@@ -51,40 +83,88 @@ export interface ProviderMeta {
     credential_fields: ProviderFieldMeta[];
     supports_embedding: boolean;
     supports_gemini_safety: boolean;
-    supports_gemini_thinking: boolean;
     supports_groq_reasoning: boolean;
+    supports_gemini_thinking: boolean;
     text_model_options?: ProviderModelOption[];
     embedding_model_options?: ProviderModelOption[];
 }
 
 export interface ProviderCapabilities {
     providers: Record<string, ProviderMeta>;
-    families: Record<string, { default: string; options: ProviderFamilyOption[] }>;
+    families: Record<string, { default: string; options: Array<{ value: string; label: string }> }>;
     openai_compatible_providers: Array<{ value: string; label: string }>;
 }
 
-export function getProviderTextModelOptions(
-    registry: ProviderCapabilities | null | undefined,
-    provider: string,
-): ProviderModelOption[] {
-    return registry?.providers?.[provider]?.text_model_options ?? [];
+export interface ParamUiShape {
+    typed: ParamDefinition[];
+    providerSpecific: ParamDefinition[];
+    rawSupportedNames: string[];
 }
 
-export function getProviderEmbeddingModelOptions(
-    registry: ProviderCapabilities | null | undefined,
+function normalizeModelValue(value: string): string {
+    return value.trim().toLowerCase();
+}
+
+export function listCatalogProviders(
+    catalog: AICatalog | null | undefined,
+    slot?: SlotKey,
+): CatalogProvider[] {
+    const providers = Object.values(catalog?.providers ?? {});
+    const filtered = slot
+        ? providers.filter((provider) => provider.selectable !== false && provider.supported_slots.includes(slot))
+        : providers.filter((provider) => provider.selectable !== false);
+    return filtered.slice().sort((left, right) => left.display_name.localeCompare(right.display_name));
+}
+
+export function getCatalogProvider(
+    catalog: AICatalog | null | undefined,
     provider: string,
+): CatalogProvider | null {
+    return catalog?.providers?.[provider] ?? null;
+}
+
+export function getSlotTask(
+    catalog: AICatalog | null | undefined,
+    slot: SlotKey,
+): ModelTask {
+    return catalog?.slots?.[slot]?.task ?? (slot === "embedding" ? "embedding" : "chat");
+}
+
+export function getProviderModels(
+    catalog: AICatalog | null | undefined,
+    provider: string,
+    task: ModelTask,
 ): ProviderModelOption[] {
-    return registry?.providers?.[provider]?.embedding_model_options ?? [];
+    return catalog?.providers?.[provider]?.models?.[task] ?? [];
+}
+
+export function providerUsesCustomModelField(
+    catalog: AICatalog | null | undefined,
+    provider: string,
+): boolean {
+    return Boolean(catalog?.providers?.[provider]?.custom_model_first);
+}
+
+export function getProviderModelPlaceholder(
+    catalog: AICatalog | null | undefined,
+    provider: string,
+    task: ModelTask,
+): string {
+    const explicit = String(catalog?.providers?.[provider]?.placeholder_models?.[task] ?? "").trim();
+    if (explicit) {
+        return explicit;
+    }
+    return String(getProviderModels(catalog, provider, task)[0]?.value ?? "").trim();
 }
 
 export function findProviderModelOption(
     options: ProviderModelOption[],
     modelValue: string,
 ): ProviderModelOption | null {
-    const normalized = modelValue.trim().toLowerCase();
+    const normalized = normalizeModelValue(modelValue);
     if (!normalized) return null;
     return options.find((option) => {
-        const optionValue = option.value.trim().toLowerCase();
+        const optionValue = normalizeModelValue(option.value);
         if (optionValue === normalized) {
             return true;
         }
@@ -95,6 +175,15 @@ export function findProviderModelOption(
     }) ?? null;
 }
 
+export function findCatalogModel(
+    catalog: AICatalog | null | undefined,
+    provider: string,
+    task: ModelTask,
+    modelValue: string,
+): ProviderModelOption | null {
+    return findProviderModelOption(getProviderModels(catalog, provider, task), modelValue);
+}
+
 export function getModelPickerValue(
     options: ProviderModelOption[],
     modelValue: string,
@@ -102,87 +191,113 @@ export function getModelPickerValue(
     return findProviderModelOption(options, modelValue)?.value ?? CUSTOM_MODEL_OPTION_VALUE;
 }
 
-export function getGeminiThinkingLevelsForModel(
-    registry: ProviderCapabilities | null | undefined,
+export function getFirstCatalogModelValue(
+    catalog: AICatalog | null | undefined,
     provider: string,
-    modelValue: string,
-): string[] {
-    const option = findProviderModelOption(getProviderTextModelOptions(registry, provider), modelValue);
-    return option?.gemini_thinking_levels ?? [];
+    task: ModelTask,
+): string | null {
+    const first = getProviderModels(catalog, provider, task)[0];
+    return first?.value ?? null;
 }
 
-export function getGroqReasoningOptionsForModel(
-    registry: ProviderCapabilities | null | undefined,
+export function getParamUiShape(
+    catalog: AICatalog | null | undefined,
     provider: string,
+    task: ModelTask,
     modelValue: string,
-): ProviderReasoningOption[] | null {
-    const option = findProviderModelOption(getProviderTextModelOptions(registry, provider), modelValue);
-    if (!option?.groq_reasoning_options?.length) {
-        return null;
-    }
-    return option.groq_reasoning_options.map((reasoningOption) => {
-        if (reasoningOption.value === "default") {
-            return {
-                ...reasoningOption,
-                label: "Reasoning On (provider default)",
-            };
+): ParamUiShape {
+    const providerEntry = getCatalogProvider(catalog, provider);
+    const modelEntry = findCatalogModel(catalog, provider, task, modelValue);
+    const supportedNames = new Set((modelEntry?.supported_params ?? []).map((item) => String(item)));
+    if (!modelEntry && providerUsesCustomModelField(catalog, provider)) {
+        for (const definition of catalog?.common_params?.[task] ?? []) {
+            supportedNames.add(definition.name);
         }
-        return reasoningOption;
+    }
+    const typed = (catalog?.common_params?.[task] ?? []).filter((definition) => supportedNames.has(definition.name));
+    const providerSpecific = (providerEntry?.provider_param_defs ?? []).filter((definition) => {
+        if (definition.tasks?.length && !definition.tasks.includes(task)) {
+            return false;
+        }
+        return true;
     });
-}
-
-export function getGeminiThinkingUiState(
-    registry: ProviderCapabilities | null | undefined,
-    provider: string,
-    modelValue: string,
-): GeminiThinkingUiState {
-    const option = findProviderModelOption(getProviderTextModelOptions(registry, provider), modelValue);
-    const supportedLevels = option?.gemini_thinking_levels ?? [];
-    if (!option) {
-        return {
-            state: "custom",
-            option: null,
-            supportedLevels: [],
-        };
-    }
-    if (!supportedLevels.length) {
-        return {
-            state: "unsupported",
-            option,
-            supportedLevels: [],
-        };
-    }
+    const knownNames = new Set<string>([
+        ...typed.map((definition) => definition.name),
+        ...providerSpecific.map((definition) => definition.name),
+    ]);
+    const rawSupportedNames = Array.from(supportedNames)
+        .filter((name) => !knownNames.has(name))
+        .sort((left, right) => left.localeCompare(right));
     return {
-        state: "supported",
-        option,
-        supportedLevels,
+        typed,
+        providerSpecific,
+        rawSupportedNames,
     };
 }
 
-export function getGroqReasoningUiState(
-    registry: ProviderCapabilities | null | undefined,
+export function sanitizeSlotParamsForModel(
+    catalog: AICatalog | null | undefined,
+    slotConfig: SlotConfig,
     provider: string,
     modelValue: string,
-): GroqReasoningUiState {
-    const option = findProviderModelOption(getProviderTextModelOptions(registry, provider), modelValue);
-    const supportedOptions = getGroqReasoningOptionsForModel(registry, provider, modelValue) ?? [];
-    if (!option) {
-        return {
-            state: "custom",
-            option: null,
-            supportedOptions: [],
-        };
+    task: ModelTask,
+): Record<string, unknown> {
+    const modelEntry = findCatalogModel(catalog, provider, task, modelValue);
+    const providerEntry = getCatalogProvider(catalog, provider);
+    const supportedNames = new Set((modelEntry?.supported_params ?? []).map((item) => String(item)));
+    if (!modelEntry && providerUsesCustomModelField(catalog, provider)) {
+        for (const definition of catalog?.common_params?.[task] ?? []) {
+            supportedNames.add(definition.name);
+        }
     }
-    if (!supportedOptions.length) {
-        return {
-            state: "unsupported",
-            option,
-            supportedOptions: [],
-        };
+    for (const definition of providerEntry?.provider_param_defs ?? []) {
+        if (!definition.tasks?.length || definition.tasks.includes(task)) {
+            supportedNames.add(definition.name);
+        }
     }
-    return {
-        state: "supported",
-        option,
-        supportedOptions,
-    };
+    const nextParams: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(slotConfig.params ?? {})) {
+        if (supportedNames.has(key)) {
+            nextParams[key] = value;
+        }
+    }
+    return nextParams;
+}
+
+export function buildModelOptionsWithCurrent(
+    options: ProviderModelOption[],
+    currentValue: string,
+): ProviderModelOption[] {
+    if (!currentValue.trim()) {
+        return options;
+    }
+    const existing = findProviderModelOption(options, currentValue);
+    if (existing) {
+        return options;
+    }
+    return [
+        {
+            value: currentValue,
+            label: `${currentValue} (Unlisted)`,
+            task: options[0]?.task ?? "chat",
+            supported_params: [],
+        },
+        ...options,
+    ];
+}
+
+export function formatProviderLabel(
+    catalog: AICatalog | null | undefined,
+    provider?: string | null,
+): string {
+    const normalized = String(provider ?? "").trim();
+    if (!normalized) return "-";
+    const providerEntry = catalog?.providers?.[normalized];
+    if (providerEntry?.display_name) {
+        return providerEntry.display_name;
+    }
+    return normalized
+        .split("_")
+        .map((part) => part ? `${part[0].toUpperCase()}${part.slice(1)}` : part)
+        .join(" ");
 }

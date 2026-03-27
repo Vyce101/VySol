@@ -61,7 +61,7 @@ Important behavior:
 
 ## Provider Presets And Key Library
 
-VySol now separates global settings into a preset-backed `Configuration` tab and a shared `Key Library`.
+VySol now separates global settings into a preset-backed `Configuration` tab and a shared `Key Library`, both driven by a LiteLLM-backed provider catalog pinned to exact `1.82.6`.
 
 Important behavior:
 
@@ -69,9 +69,11 @@ Important behavior:
 - `Save As New Preset` clones the active Configuration into a new editable preset
 - Switching presets applies immediately
 - Provider credentials are shared globally per provider and are not copied into each preset
-- Gemini and Groq pool enabled API keys from `Key Library`
-- IntenseRP Next uses a shared stored base URL from `Key Library`
+- Provider selectors are alphabetical
+- Different providers can require different credential shapes such as API keys, base URLs, or Vertex project/location fields
 - Provider-backed Configuration rows show a status dot so missing keys, missing URLs, or unsupported slot/provider combinations are visible before a run starts
+- `ChatGPT Subscription` is hidden from the selectable provider surfaces
+- VySol still chooses one explicit provider, one explicit model, and one explicit credential entry per call instead of turning on LiteLLM router/fallback model groups
 
 ## Provider-Scoped Model Controls
 
@@ -79,59 +81,27 @@ VySol now exposes provider-specific advanced controls per model slot instead of 
 
 Shipped defaults:
 
-- Graph Architect Model: `gemini-3.1-flash-lite-preview` with `minimal` thinking
-- Chat Model: `gemini-3-flash-preview` with `high` thinking
-- Entity Chooser Model: `gemini-3.1-flash-lite-preview` with `high` thinking
-- Entity Combiner Model: `gemini-3.1-flash-lite-preview` with `high` thinking
-- Default Embedding Provider: `Google (Gemini)`
-- Default Embedding Model: `gemini-embedding-2-preview`
+- Graph Architect Model: `gemini/gemini-2.0-flash-lite`
+- Chat Model: `gemini/gemini-2.0-flash`
+- Entity Chooser Model: `gemini/gemini-2.0-flash-lite`
+- Entity Combiner Model: `gemini/gemini-2.0-flash-lite`
+- Default Embedding Provider: `Google AI Studio`
+- Default Embedding Model: `gemini/gemini-embedding-001`
 
-Gemini behavior:
+Slot and model behavior:
 
-- If the current model name matches a supported Gemini 3 family, VySol shows a built-in dropdown for that slot
-- `Gemini 3.1 Pro` supports `low`, `medium`, and `high`
-- `Gemini 3.1 Flash-Lite` supports `minimal`, `low`, `medium`, and `high`
-- `Gemini 3 Flash` supports `minimal`, `low`, `medium`, and `high`
-- Leaving the dropdown blank means `use the provider default` for that model
-- Known Gemini catalog models that do not support a built-in dropdown now show a visible unsupported note instead of silently hiding the control
+- `Graph Architect`, `Chat`, `Entity Chooser`, `Entity Combiner`, and `Default Embeddings` each have their own collapsible card, and all five start collapsed by default
+- Strict catalog providers show normal model dropdowns and reject unknown model ids on save
+- Custom-model-first providers show freeform model-id textboxes with placeholder examples instead of pretending the backend catalog is exhaustive
+- Right now the custom-model-first providers are `Hugging Face`, `NanoGPT`, `NVIDIA NIM`, `Ollama`, `OpenAI Compatible`, and `OpenRouter`
+- Common model parameters are rendered from task metadata, provider-specific parameters come from the provider manifest, and unsupported-but-allowed extras stay in `Additional LiteLLM Params JSON`
 
-Manual fallback behavior:
-
-- If the model name does not match one of the built-in Gemini 3 dropdown families, the row shows `Built-in thinking dropdown not supported`
-- Clicking the pencil opens a manual field for that exact model slot
-- VySol expects one raw value only in that field
-- Digits only, such as `512` or `1024`, are sent as Gemini `thinkingBudget`
-- Non-numeric text, such as `high`, `medium`, or another provider-documented level name, is sent as Gemini `thinkingLevel`
-- Do not type wrappers such as `thinking.thinkingLevel=high`, `thinkingBudget=1024`, JSON, or any other code-looking syntax
-- Good examples: `high`, `minimal`, `1024`
-- Bad examples: `thinkingLevel=high`, `thinking.thinkingLevel=high`, `{ "thinkingBudget": 1024 }`
-
-Groq behavior:
-
-- `OpenAI-compatible > Groq` can be selected for chat, graph extraction, entity chooser, and entity combiner
-- Groq rows use `Reasoning Effort` instead of Gemini thinking controls, but only when the selected Groq model actually supports reasoning
-- `openai/gpt-oss-20b` and `openai/gpt-oss-120b` expose `low`, `medium`, and `high`
-- `qwen/qwen3-32b` exposes `none` plus `Reasoning On (provider default)`
-- Known non-reasoning Groq catalog models show a visible unsupported note instead of a fake dropdown
-- Custom or unknown Groq model ids get an advanced manual reasoning field because VySol cannot safely infer their supported presets
-- Chat exposes a Groq-only `Include Reasoning` toggle
-- If Groq returns reasoning, VySol stores it with the message after completion instead of pretending it streamed Gemini-style thought tokens
-- Groq does not show Gemini-only safety controls
-
-Chat thought and reasoning visibility:
-
-- Chat has a Gemini-only `Send Thinking` toggle
-- The shipped default has `Send Thinking` enabled
-- When enabled, VySol asks Gemini to return thought content when that model/provider path supports it
-- Thought content is saved with the message and shown in a collapsible `Model Thinking` block above the normal answer text
-- Chat has a Groq-only `Include Reasoning` toggle when Groq is selected
-- `IntenseRP Next` uses neither toggle
-
-Embedding provider readiness:
+Embedding behavior:
 
 - Embedding settings are now provider-aware globally and per world
-- This build still only enables Gemini embeddings
-- If you choose `OpenAI-compatible > Groq` for embeddings, the UI stays truthful and blocks ingest or `Re-embed All` until a real Groq embedding adapter exists
+- Only embedding-capable catalog providers and models are shown in strict embedding pickers
+- Gemini chat/text models such as `gemini-1.5-flash` are intentionally filtered out of embedding choices
+- Custom-model-first embedding providers like `Ollama` can still save a typed embedding model id even when the runtime catalog does not currently list one
 
 ## Context X-Ray
 

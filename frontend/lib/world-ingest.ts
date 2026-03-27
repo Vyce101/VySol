@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from "@/lib/provider-models";
+import { formatProviderLabel, type AICatalog, type ProviderCapabilities } from "@/lib/provider-models";
 
 export type WorldIngestPromptKey =
     | "graph_architect_prompt"
@@ -17,6 +17,7 @@ export interface WorldIngestSettings {
     embedding_provider: string;
     embedding_openai_compatible_provider: string;
     embedding_model: string;
+    embedding_params?: Record<string, unknown>;
     glean_amount: number;
     locked_at?: string | null;
     last_ingest_settings_at?: string | null;
@@ -28,6 +29,7 @@ export interface WorldIngestConfigResponse {
     has_active_chunk_overrides: boolean;
     active_chunk_override_count: number;
     provider_registry: ProviderCapabilities;
+    ai_catalog: AICatalog;
 }
 
 export const WORLD_INGEST_PROMPT_FIELDS: Array<{ key: WorldIngestPromptKey; label: string }> = [
@@ -47,9 +49,13 @@ export function formatPromptSourceLabel(source?: string | null): string {
 export function formatEmbeddingProviderLabel(
     provider?: string | null,
     openAiCompatibleProvider?: string | null,
+    catalog?: AICatalog | null,
 ): string {
     const family = String(provider ?? "").trim().toLowerCase();
-    if (family === "gemini") return "Google (Gemini)";
+    if (catalog) {
+        return formatProviderLabel(catalog, family || undefined);
+    }
+    if (family === "gemini") return "Google AI Studio";
     if (family === "openai_compatible") {
         const implementation = String(openAiCompatibleProvider ?? "").trim();
         return implementation ? `OpenAI-compatible > ${implementation[0].toUpperCase()}${implementation.slice(1)}` : "OpenAI-compatible";

@@ -4,6 +4,24 @@ All notable user-visible changes to this project will be documented in this file
 
 ## [Unreleased]
 
+### Changed
+
+- Changed provider and model configuration to use a LiteLLM-backed catalog across settings and world re-ingest, with provider lists sorted alphabetically and per-slot model metadata coming from the backend instead of hardcoded frontend families.
+- Changed the `Configuration` sidebar so `Chat`, `Graph Architect`, `Entity Chooser`, `Entity Combiner`, and `Default Embeddings` now open as collapsible cards that start collapsed by default.
+- Changed open-ended provider UX so `Hugging Face`, `NanoGPT`, `NVIDIA NIM`, `Ollama`, `OpenAI Compatible`, and `OpenRouter` use freeform model-id textboxes with placeholder examples instead of pretending they have one fixed authoritative dropdown.
+- Changed embedding setup in global settings and world `Re-ingest` so only embedding-capable provider/model combinations are shown as catalog choices, while custom-model-first embedding providers like Ollama can still use typed custom model ids.
+
+### Fixed
+
+- Fixed settings persistence so back-to-back slot changes no longer overwrite each other when multiple auto-saves finish out of order or when one partial slot patch is saved after another.
+- Fixed strict provider validation so unknown catalog model ids are rejected truthfully instead of being silently normalized to a fallback model.
+- Fixed Google AI Studio embedding catalog classification so chat/text models such as `gemini-1.5-flash` no longer appear as embedding choices.
+- Fixed provider selectors so `ChatGPT Subscription` is no longer shown as a selectable provider in settings or ingest surfaces.
+
+### Security
+
+- Pinned LiteLLM to exact version `1.82.6` in backend dependencies and launcher validation, and now fail startup or dependency validation if a different LiteLLM version is installed.
+
 ## [0.4.0] - 2026-03-26
 
 ### Changed

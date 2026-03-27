@@ -9,19 +9,19 @@ from pathlib import Path
 from uuid import uuid4
 
 import chromadb
-from google import genai
 
 from .atomic_json import dump_json_atomic
 from .config import (
     get_world_embedding_model,
     get_world_embedding_provider,
+    get_world_ingest_settings,
     load_settings,
-    resolve_slot_provider,
     set_world_embedding_model,
     set_world_ingest_settings,
     world_chroma_dir,
 )
 from .key_manager import assess_transient_provider_error, classify_transient_provider_error, get_key_manager, jittered_delay
+from .litellm_adapter import embedding as litellm_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +65,13 @@ class VectorStore:
         self.world_id = world_id
         self.embedding_provider = embedding_provider or get_world_embedding_provider(world_id)
         self.embedding_model = embedding_model or get_world_embedding_model(world_id)
+        self.embedding_params = dict(get_world_ingest_settings(world_id=world_id).get("embedding_params") or {})
         self.collection_suffix = collection_suffix
         self.manage_manifest = manage_manifest
         self.collection_key = str(collection_suffix or "chunks")
         self.collection_kind = self._infer_collection_kind(self.collection_key)
         chroma_path = str(world_chroma_dir(world_id))
         self.client = chromadb.PersistentClient(path=chroma_path)
-        self._embed_clients: dict[str, genai.Client] = {}
         base_name = f"world_{world_id.replace('-', '_')}"
         collection_name = (
             str(collection_name_override)
@@ -164,13 +164,6 @@ class VectorStore:
         if recorded_model and recorded_model != self.embedding_model:
             raise RuntimeError(self._rebuild_required_message())
 
-    def _get_embed_client(self, api_key: str) -> genai.Client:
-        client = self._embed_clients.get(api_key)
-        if client is None:
-            client = genai.Client(api_key=api_key)
-            self._embed_clients[api_key] = client
-        return client
-
     def _get_max_upsert_batch_size(self) -> int | None:
         try:
             max_batch_size = int(self.client.get_max_batch_size())
@@ -206,20 +199,7 @@ class VectorStore:
             )
 
     def _candidate_embedding_models(self) -> list[str]:
-        if self.embedding_provider != "gemini":
-            return [self.embedding_model]
-        settings_model = load_settings().get("embedding_model")
-
-        candidates: list[str] = [self.embedding_model]
-        if settings_model and settings_model not in candidates:
-            candidates.append(settings_model)
-
-        # Compatibility aliases for older model IDs.
-        if self.embedding_model == "models/text-embedding-004":
-            for alias in ("gemini-embedding-001", "models/gemini-embedding-001"):
-                if alias not in candidates:
-                    candidates.append(alias)
-        return candidates
+        return [self.embedding_model]
 
     def _record_effective_embedding_model(self, candidates: list[str], model_name: str) -> None:
         if model_name != self.embedding_model:
@@ -242,8 +222,8 @@ class VectorStore:
 
     def _lookup_key_index(self, api_key: str, used_indices: set[int]) -> int | None:
         key_manager = _get_provider_key_manager(self.embedding_provider)
-        for index, configured_key in enumerate(key_manager.api_keys):
-            if configured_key == api_key and index not in used_indices:
+        for index, entry in enumerate(getattr(key_manager, "entries", [])):
+            if str(entry.get("api_key") or "") == api_key and index not in used_indices:
                 return index
         return None
 
@@ -251,10 +231,6 @@ class VectorStore:
         """Embed one or more texts using the configured embedding provider."""
         if not texts:
             return []
-        if self.embedding_provider != "gemini":
-            raise RuntimeError(
-                f"{self.embedding_provider} is selected for embeddings, but this build only supports Gemini embeddings right now."
-            )
 
         candidates = self._candidate_embedding_models()
         last_error: Exception | None = None
@@ -264,23 +240,27 @@ class VectorStore:
         if api_key:
             existing_index = self._lookup_key_index(api_key, set())
             if existing_index is not None:
-                current_api_key = api_key
+                current_credential = dict(key_manager.entries[existing_index])
                 current_key_index = existing_index
             else:
-                current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
+                current_credential, current_key_index = key_manager.wait_for_request_credential(tried_key_indices)
         else:
-            current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
+            current_credential, current_key_index = key_manager.wait_for_request_credential(tried_key_indices)
 
         while True:
-            client = self._get_embed_client(current_api_key)
             rotated_key = False
             for model_name in candidates:
                 request_backoff_attempts = 0
                 while True:
                     try:
                         payload: str | list[str] = texts if len(texts) > 1 else texts[0]
-                        result = client.models.embed_content(model=model_name, contents=payload)
-                        embeddings = [list(item.values) for item in (result.embeddings or [])]
+                        embeddings = litellm_embedding(
+                            provider=self.embedding_provider,
+                            model=model_name,
+                            input_value=payload,
+                            params=self.embedding_params,
+                            credential=current_credential,
+                        )
                         if len(embeddings) != len(texts):
                             raise RuntimeError(
                                 f"Embedding API returned {len(embeddings)} embeddings for {len(texts)} texts."
@@ -290,7 +270,7 @@ class VectorStore:
                     except Exception as e:
                         last_error = e
                         message = str(e).lower()
-                        assessment = assess_transient_provider_error(e, provider="gemini")
+                        assessment = assess_transient_provider_error(e, provider=self.embedding_provider)
 
                         if assessment and current_key_index is not None:
                             if assessment.action == "request_backoff":
@@ -300,7 +280,7 @@ class VectorStore:
                                     if delay is None:
                                         delay = backoff[min(request_backoff_attempts - 1, len(backoff) - 1)]
                                     logger.warning(
-                                        "Gemini embedding request throttled for world %s; retrying key %s without cooldown (%s).",
+                                        "Embedding request throttled for world %s; retrying credential %s without cooldown (%s).",
                                         self.world_id,
                                         current_key_index,
                                         assessment.provider_message or e,
@@ -314,14 +294,13 @@ class VectorStore:
                                 key_manager.report_error(current_key_index, assessment.kind)
                                 delay = assessment.retry_after_seconds if assessment.retry_after_seconds is not None else 0.5
                                 logger.warning(
-                                    "Gemini embedding key %s entered cooldown for world %s after explicit limit signal (%s).",
+                                    "Embedding credential %s entered cooldown for world %s after explicit limit signal (%s).",
                                     current_key_index,
                                     self.world_id,
                                     assessment.provider_message or e,
                                 )
                                 time.sleep(jittered_delay(delay))
-                                current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
-                                client = self._get_embed_client(current_api_key)
+                                current_credential, current_key_index = key_manager.wait_for_request_credential(tried_key_indices)
                                 rotated_key = True
                                 break
 
@@ -330,8 +309,7 @@ class VectorStore:
                             tried_key_indices.add(current_key_index)
                             key_manager.report_error(current_key_index, transient_kind)
                             time.sleep(jittered_delay(0.5))
-                            current_api_key, current_key_index = key_manager.wait_for_request_key(tried_key_indices)
-                            client = self._get_embed_client(current_api_key)
+                            current_credential, current_key_index = key_manager.wait_for_request_credential(tried_key_indices)
                             rotated_key = True
                             break
 

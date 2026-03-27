@@ -284,22 +284,36 @@ def classify_transient_provider_error(exc: Exception | str) -> str | None:
 
 
 class KeyManager:
-    """Manages multiple API keys with rotation and cooldown."""
+    """Manages provider credential rotation and cooldown."""
 
-    def __init__(self, api_keys: list[str] | None = None, mode: str = "FAIL_OVER", provider: str = "gemini"):
+    def __init__(
+        self,
+        api_keys: list[str] | None = None,
+        mode: str = "FAIL_OVER",
+        provider: str = "gemini",
+        credential_entries: list[dict[str, Any]] | None = None,
+    ):
         from .config import get_provider_pool, load_settings
 
         self.provider = provider
-        if api_keys is None:
+        if credential_entries is None:
             settings = load_settings()
-            api_keys = [
-                str(entry.get("api_key") or "")
-                for entry in get_provider_pool(provider)
-                if str(entry.get("api_key") or "").strip()
-            ]
+            credential_entries = [dict(entry) for entry in get_provider_pool(provider)]
             mode = settings.get("key_rotation_mode", "FAIL_OVER")
+            if api_keys is not None:
+                credential_entries = [
+                    {
+                        "id": f"legacy:{provider}:{index}",
+                        "label": f"{provider} {index + 1}",
+                        "enabled": True,
+                        "api_key": str(value or "").strip(),
+                    }
+                    for index, value in enumerate(api_keys)
+                    if str(value or "").strip()
+                ]
 
-        self.api_keys: list[str] = api_keys
+        self.entries: list[dict[str, Any]] = [dict(entry) for entry in list(credential_entries or [])]
+        self.api_keys: list[str] = [str(entry.get("api_key") or "") for entry in self.entries if str(entry.get("api_key") or "").strip()]
         self.mode: str = mode
         self._current_index: int = 0
         self._cooldown_map: dict[int, float] = {}
@@ -308,7 +322,7 @@ class KeyManager:
 
     @property
     def key_count(self) -> int:
-        return len(self.api_keys)
+        return len(self.entries)
 
     def _is_in_cooldown_unlocked(self, index: int) -> bool:
         if index not in self._cooldown_map:
@@ -330,7 +344,7 @@ class KeyManager:
 
     def _next_available_index_unlocked(self, *, exclude_indices: set[int] | None = None) -> int | None:
         excluded = exclude_indices or set()
-        key_count = len(self.api_keys)
+        key_count = len(self.entries)
 
         if self.mode == "ROUND_ROBIN":
             for offset in range(key_count):
@@ -350,13 +364,13 @@ class KeyManager:
             return idx
         return None
 
-    def get_active_key(self) -> tuple[str, int]:
-        """Return (key, index). Raises AllKeysInCooldownError if all keys are cooling down."""
+    def get_active_credential(self) -> tuple[dict[str, Any], int]:
+        """Return (credential, index). Raises AllKeysInCooldownError if all entries are cooling down."""
         with self._lock:
-            if not self.api_keys:
-                raise RuntimeError(f"No API keys configured for {self.provider}. Add keys in Key Library.")
+            if not self.entries:
+                raise RuntimeError(f"No credentials configured for {self.provider}. Add credentials in Key Library.")
 
-            key_count = len(self.api_keys)
+            key_count = len(self.entries)
 
             if self.mode == "ROUND_ROBIN":
                 self._call_count += 1
@@ -364,35 +378,58 @@ class KeyManager:
                     idx = self._current_index % key_count
                     self._current_index = (self._current_index + 1) % key_count
                     if not self._is_in_cooldown_unlocked(idx):
-                        return self.api_keys[idx], idx
+                        return dict(self.entries[idx]), idx
                 raise self._all_keys_cooling_down_error_unlocked(key_count)
 
             for offset in range(key_count):
                 idx = (self._current_index + offset) % key_count
                 if not self._is_in_cooldown_unlocked(idx):
                     self._current_index = idx
-                    return self.api_keys[idx], idx
+                    return dict(self.entries[idx]), idx
             raise self._all_keys_cooling_down_error_unlocked(key_count)
 
-    def get_request_key(self, tried_indices: set[int] | None = None) -> tuple[str, int]:
-        """Return the next available key for one logical request, excluding already-tried indices."""
+    def get_request_credential(self, tried_indices: set[int] | None = None) -> tuple[dict[str, Any], int]:
+        """Return the next available credential for one logical request."""
         with self._lock:
-            if not self.api_keys:
-                raise RuntimeError(f"No API keys configured for {self.provider}. Add keys in Key Library.")
+            if not self.entries:
+                raise RuntimeError(f"No credentials configured for {self.provider}. Add credentials in Key Library.")
 
             excluded = set(tried_indices or ())
             idx = self._next_available_index_unlocked(exclude_indices=excluded)
             if idx is not None:
-                return self.api_keys[idx], idx
+                return dict(self.entries[idx]), idx
 
-            remaining = [index for index in range(len(self.api_keys)) if index not in excluded]
+            remaining = [index for index in range(len(self.entries)) if index not in excluded]
             if not remaining:
                 raise RequestKeyPoolExhaustedError(
-                    f"Every configured key for {self.provider} has already been tried for this request."
+                    f"Every configured credential for {self.provider} has already been tried for this request."
                 )
 
             min_wait = min(self._cooldown_remaining_unlocked(index) for index in remaining)
             raise AllKeysInCooldownError(min_wait)
+
+    def get_active_key(self) -> tuple[str, int]:
+        """Compatibility wrapper returning the active API key only."""
+        credential, index = self.get_active_credential()
+        api_key = str(credential.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError(f"{self.provider} does not expose an API key on the selected credential.")
+        return api_key, index
+
+    def get_request_key(self, tried_indices: set[int] | None = None) -> tuple[str, int]:
+        """Compatibility wrapper returning the request API key only."""
+        credential, index = self.get_request_credential(tried_indices)
+        api_key = str(credential.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError(f"{self.provider} does not expose an API key on the selected credential.")
+        return api_key, index
+
+    def wait_for_available_credential(self, *, jitter_seconds: float = 0.25) -> tuple[dict[str, Any], int]:
+        while True:
+            try:
+                return self.get_active_credential()
+            except AllKeysInCooldownError as exc:
+                time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
     def wait_for_available_key(self, *, jitter_seconds: float = 0.25) -> tuple[str, int]:
         """Block until a key is available, sleeping through cooldown windows."""
@@ -402,21 +439,41 @@ class KeyManager:
             except AllKeysInCooldownError as exc:
                 time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
+    def wait_for_request_credential(
+        self,
+        tried_indices: set[int] | None = None,
+        *,
+        jitter_seconds: float = 0.25,
+    ) -> tuple[dict[str, Any], int]:
+        """Wait for the first available credential, then only rotate across untried entries for this request."""
+        excluded = set(tried_indices or ())
+        while True:
+            try:
+                return self.get_request_credential(excluded)
+            except AllKeysInCooldownError as exc:
+                if excluded:
+                    raise
+                time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+
     def wait_for_request_key(
         self,
         tried_indices: set[int] | None = None,
         *,
         jitter_seconds: float = 0.25,
     ) -> tuple[str, int]:
-        """Wait for the first available key, then only rotate across untried keys for this request."""
-        excluded = set(tried_indices or ())
+        """Compatibility wrapper returning the request API key only."""
+        credential, index = self.wait_for_request_credential(tried_indices, jitter_seconds=jitter_seconds)
+        api_key = str(credential.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError(f"{self.provider} does not expose an API key on the selected credential.")
+        return api_key, index
+
+    async def await_active_credential(self, *, jitter_seconds: float = 0.25) -> tuple[dict[str, Any], int]:
         while True:
             try:
-                return self.get_request_key(excluded)
+                return self.get_active_credential()
             except AllKeysInCooldownError as exc:
-                if excluded:
-                    raise
-                time.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+                await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
     async def await_active_key(self, *, jitter_seconds: float = 0.25) -> tuple[str, int]:
         """Async variant of wait_for_available_key()."""
@@ -426,21 +483,34 @@ class KeyManager:
             except AllKeysInCooldownError as exc:
                 await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
 
+    async def await_request_credential(
+        self,
+        tried_indices: set[int] | None = None,
+        *,
+        jitter_seconds: float = 0.25,
+    ) -> tuple[dict[str, Any], int]:
+        """Async variant of wait_for_request_credential()."""
+        excluded = set(tried_indices or ())
+        while True:
+            try:
+                return self.get_request_credential(excluded)
+            except AllKeysInCooldownError as exc:
+                if excluded:
+                    raise
+                await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+
     async def await_request_key(
         self,
         tried_indices: set[int] | None = None,
         *,
         jitter_seconds: float = 0.25,
     ) -> tuple[str, int]:
-        """Async variant of wait_for_request_key()."""
-        excluded = set(tried_indices or ())
-        while True:
-            try:
-                return self.get_request_key(excluded)
-            except AllKeysInCooldownError as exc:
-                if excluded:
-                    raise
-                await asyncio.sleep(jittered_delay(exc.retry_after_seconds, jitter_seconds=jitter_seconds))
+        """Compatibility wrapper returning the request API key only."""
+        credential, index = await self.await_request_credential(tried_indices, jitter_seconds=jitter_seconds)
+        api_key = str(credential.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError(f"{self.provider} does not expose an API key on the selected credential.")
+        return api_key, index
 
     def report_error(self, key_index: int, error_type: str) -> None:
         """Report an error for a key and apply any configured cooldown."""

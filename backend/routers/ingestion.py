@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Literal
 
+from core.ai_catalog import build_ai_catalog, provider_supports_embeddings
 from core.config import (
     PROVIDER_REGISTRY,
     SLOT_EMBEDDING,
@@ -89,7 +90,7 @@ def _merge_requested_ingest_settings(current: dict, override: dict | None) -> di
     merged = dict(current)
     if not isinstance(override, dict):
         return merged
-    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider", "embedding_openai_compatible_provider", "embedding_model", "glean_amount"):
+    for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider", "embedding_model", "embedding_params", "glean_amount"):
         value = override.get(key)
         if value in (None, ""):
             continue
@@ -98,15 +99,17 @@ def _merge_requested_ingest_settings(current: dict, override: dict | None) -> di
                 merged[key] = int(value)
             except (TypeError, ValueError):
                 continue
+        elif key == "embedding_params" and isinstance(value, dict):
+            merged[key] = dict(value)
         else:
             merged[key] = str(value)
     return merged
 
 
 def _ensure_supported_embedding_backend(ingest_settings: dict) -> None:
-    provider = resolve_slot_provider(ingest_settings, SLOT_EMBEDDING)
+    provider = str(ingest_settings.get("embedding_provider") or resolve_slot_provider(ingest_settings, SLOT_EMBEDDING))
     provider_info = PROVIDER_REGISTRY.get(provider, {})
-    if not provider_info.get("supports_embedding", False):
+    if not provider_supports_embeddings(provider):
         raise HTTPException(
             status_code=400,
             detail=f"{provider_info.get('display_name', provider)} is not available for embeddings yet. Choose a supported embedding provider first.",
@@ -134,6 +137,7 @@ async def ingest_config(world_id: str):
         "active_chunk_override_count": int(summary.get("active_override_reviews", 0) or 0),
         "safety_review_summary": summary,
         "provider_registry": get_provider_capabilities(),
+        "ai_catalog": build_ai_catalog(),
     }
 
 
@@ -178,7 +182,7 @@ async def ingest_start(world_id: str, req: IngestStartRequest, bg: BackgroundTas
 
         locked_settings = get_world_ingest_settings(meta=meta)
         if req.ingest_settings:
-            for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider", "embedding_openai_compatible_provider"):
+            for key in ("chunk_size_chars", "chunk_overlap_chars", "embedding_provider"):
                 value = req.ingest_settings.get(key)
                 if value in (None, ""):
                     continue

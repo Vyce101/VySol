@@ -1,28 +1,16 @@
-"""Chat engine: builds prompt, performs retrieval, streams response via Gemini or IntenseRP Next."""
+"""Chat engine: builds prompt, performs retrieval, and streams response via LiteLLM."""
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Generator
 
-from google import genai
-from google.genai import types
-
-from .config import (
-    SLOT_CHAT,
-    load_prompt,
-    load_settings,
-    resolve_gemini_thinking_settings,
-    resolve_groq_reasoning_effort,
-    resolve_slot_provider,
-)
-from .intenserp_provider import stream_intenserp_chat
+from .config import SLOT_CHAT, load_prompt, load_settings, sanitize_settings
 from .key_manager import assess_transient_provider_error, classify_transient_provider_error, get_key_manager, jittered_delay
-from .openai_compatible_provider import create_openai_compatible_chat_completion, stream_openai_compatible_chat
+from .litellm_adapter import extract_stream_delta_reasoning, extract_stream_delta_text, stream_completion
 from .retrieval_engine import RetrievalEngine
 
 logger = logging.getLogger(__name__)
@@ -37,146 +25,39 @@ def _build_context_limit_message(*, context_characters: int, limit_characters: i
     )
 
 
-def _serialize_gemini_payload_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return {
-            "__kind__": "bytes",
-            "base64": base64.b64encode(bytes(value)).decode("ascii"),
-        }
-    if isinstance(value, (list, tuple)):
-        return [_serialize_gemini_payload_value(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(key): _serialize_gemini_payload_value(item)
-            for key, item in value.items()
-            if item is not None
-        }
-    if hasattr(value, "model_dump"):
-        try:
-            return _serialize_gemini_payload_value(value.model_dump(exclude_none=True))
-        except Exception:
-            return None
-    return value
+def _slot_chat_config(settings: dict[str, Any]) -> dict[str, Any]:
+    slots = settings.get("slots")
+    if isinstance(slots, dict) and isinstance(slots.get(SLOT_CHAT), dict):
+        return dict(slots[SLOT_CHAT])
+    return {
+        "provider": str(settings.get("chat_provider") or "gemini"),
+        "model": str(settings.get("default_model_chat") or ""),
+        "params": {},
+    }
 
 
-def _deserialize_gemini_payload_value(value: Any) -> Any:
-    if isinstance(value, list):
-        return [_deserialize_gemini_payload_value(item) for item in value]
-    if isinstance(value, dict):
-        if value.get("__kind__") == "bytes" and isinstance(value.get("base64"), str):
-            try:
-                return base64.b64decode(value["base64"])
-            except Exception:
-                return None
-        return {
-            str(key): _deserialize_gemini_payload_value(item)
-            for key, item in value.items()
-        }
-    return value
-
-
-def _serialize_gemini_part(part: Any) -> dict[str, Any] | None:
-    serialized = _serialize_gemini_payload_value(part)
-    if isinstance(serialized, dict) and serialized:
-        return serialized
-
-    text = getattr(part, "text", None)
-    thought = getattr(part, "thought", None)
-    thought_signature = getattr(part, "thought_signature", None)
-
-    payload: dict[str, Any] = {}
-    if isinstance(text, str) and text:
-        payload["text"] = text
-    if isinstance(thought, bool):
-        payload["thought"] = thought
-    if isinstance(thought_signature, (bytes, bytearray)) and thought_signature:
-        payload["thought_signature"] = {
-            "__kind__": "bytes",
-            "base64": base64.b64encode(bytes(thought_signature)).decode("ascii"),
-        }
-    return payload or None
-
-
-def _extract_gemini_chunk_parts(chunk: Any) -> list[dict[str, Any]]:
-    serialized: list[dict[str, Any]] = []
-    for candidate in list(getattr(chunk, "candidates", None) or []):
-        content = getattr(candidate, "content", None)
-        for part in list(getattr(content, "parts", None) or []):
-            serialized_part = _serialize_gemini_part(part)
-            if serialized_part:
-                serialized.append(serialized_part)
-    return serialized
-
-
-def _build_gemini_sdk_parts(text: str, parts_payload: list[dict[str, Any]] | None = None) -> list[types.Part]:
-    built_parts: list[types.Part] = []
-    for raw_part in list(parts_payload or []):
-        if not isinstance(raw_part, dict):
-            continue
-
-        try:
-            restored_part = _deserialize_gemini_payload_value(raw_part)
-            if isinstance(restored_part, dict):
-                built_parts.append(types.Part.model_validate(restored_part))
-                continue
-        except Exception:
-            pass
-
-        part_kwargs: dict[str, Any] = {}
-        raw_text = raw_part.get("text")
-        if isinstance(raw_text, str) and raw_text:
-            part_kwargs["text"] = raw_text
-
-        raw_thought = raw_part.get("thought")
-        if isinstance(raw_thought, bool):
-            part_kwargs["thought"] = raw_thought
-
-        raw_signature = raw_part.get("thought_signature")
-        if isinstance(raw_signature, str) and raw_signature:
-            try:
-                part_kwargs["thought_signature"] = base64.b64decode(raw_signature)
-            except Exception:
-                pass
-
-        if part_kwargs:
-            built_parts.append(types.Part(**part_kwargs))
-
-    if built_parts:
-        return built_parts
-    return [types.Part.from_text(text=text)]
-
-
-def _build_gemini_sdk_content(role: str, text: str, parts_payload: list[dict[str, Any]] | None = None) -> types.Content:
-    parts = _build_gemini_sdk_parts(text, parts_payload)
-    if role == "assistant":
-        return types.ModelContent(parts=parts)
-    return types.UserContent(parts=parts)
-
-
-def _build_gemini_debug_content(role: str, text: str, parts_payload: list[dict[str, Any]] | None = None) -> dict:
-    gemini_role = "model" if role == "assistant" else "user"
-    if parts_payload:
-        return {"role": gemini_role, "parts": parts_payload}
-    return {"role": gemini_role, "parts": [text]}
-
-
-def _iter_text_tokens(text: str, *, chunk_size: int = 18) -> Generator[str, None, None]:
-    if not text:
-        return
-    if len(text) <= chunk_size:
-        yield text
-        return
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + chunk_size)
-        if end < len(text):
-            next_space = text.rfind(" ", start, end)
-            if next_space > start:
-                end = next_space + 1
-        yield text[start:end]
-        start = end
+def _build_messages_payload(
+    *,
+    system_prompt: str,
+    history: list[dict[str, Any]] | None,
+    message: str,
+    chat_history_msgs: int,
+) -> list[dict[str, Any]]:
+    sliced_history = history[-chat_history_msgs:] if history else []
+    full_system = system_prompt
+    if sliced_history:
+        full_system = f"{full_system}\n\n# Chat History"
+    messages_payload = [{"role": "system", "content": full_system}]
+    for turn in sliced_history:
+        role = "assistant" if turn.get("role") == "model" else turn.get("role", "user")
+        messages_payload.append(
+            {
+                "role": role,
+                "content": turn.get("content", ""),
+            }
+        )
+    messages_payload.append({"role": "user", "content": message})
+    return messages_payload
 
 
 def stream_chat(
@@ -194,11 +75,11 @@ def stream_chat(
     settings = load_settings()
     if settings_override:
         settings.update(settings_override)
+        settings = sanitize_settings(settings)
 
     try:
         retriever = RetrievalEngine(world_id)
 
-        # Determine retrieval query context length.
         context_msgs = settings.get("retrieval_context_messages", 3)
         if isinstance(settings_override, dict) and "retrieval_context_messages" in settings_override:
             context_msgs = settings_override["retrieval_context_messages"]
@@ -206,9 +87,9 @@ def stream_chat(
         query_parts = []
         if context_msgs > 1 and history:
             subset = history[-(context_msgs - 1):]
-            for m in subset:
-                role = m.get("role", "user")
-                content = m.get("content", "")
+            for turn in subset:
+                role = turn.get("role", "user")
+                content = turn.get("content", "")
                 if content:
                     query_parts.append(f"{role}: {content}")
         query_parts.append(f"user: {message}")
@@ -262,319 +143,129 @@ def stream_chat(
         system_prompt = load_prompt("chat_system_prompt")
         full_system = f"{system_prompt}\n\n{context_string}" if context_string else system_prompt
 
-        chat_provider = resolve_slot_provider(settings, SLOT_CHAT)
-
         chat_history_msgs = settings.get("chat_history_messages", 1000)
         if isinstance(settings_override, dict) and "chat_history_messages" in settings_override:
             chat_history_msgs = settings_override["chat_history_messages"]
-        sliced_history = history[-chat_history_msgs:] if history else []
 
-        # Build canonical turn ordering: system context, prior turns, current user turn.
-        if sliced_history:
-            full_system = f"{full_system}\n\n# Chat History"
-        gemini_messages_payload = [{"role": "system", "content": full_system}]
-        intenserp_messages_payload = [{"role": "system", "content": full_system}]
-        if sliced_history:
-            for turn in sliced_history:
-                role = "assistant" if turn.get("role") == "model" else turn.get("role", "user")
-                history_message = {
-                    "role": role,
-                    "content": turn.get("content", ""),
-                }
-                if isinstance(turn.get("gemini_parts"), list):
-                    history_message["gemini_parts"] = turn.get("gemini_parts")
-                gemini_messages_payload.append(history_message)
-                intenserp_messages_payload.append({
-                    "role": role,
-                    "content": turn.get("content", ""),
-                })
-        gemini_messages_payload.append({"role": "user", "content": message})
-        intenserp_messages_payload.append({"role": "user", "content": message})
+        messages_payload = _build_messages_payload(
+            system_prompt=full_system,
+            history=history,
+            message=message,
+            chat_history_msgs=chat_history_msgs,
+        )
 
-        model_name = settings.get("default_model_chat", "gemini-3-flash-preview")
-        intenserp_model_id = settings.get("intenserp_model_id", "glm-chat")
+        slot_config = _slot_chat_config(settings)
+        chat_provider = str(slot_config.get("provider") or settings.get("chat_provider") or "gemini")
+        model_name = str(slot_config.get("model") or settings.get("default_model_chat") or "")
+        slot_params = dict(slot_config.get("params") or {})
         captured_at = datetime.now(timezone.utc).isoformat()
 
-        gemini_sdk_contents = []
-        gemini_debug_contents = []
-        for msg in gemini_messages_payload:
-            if msg["role"] == "system":
-                continue
-            parts_payload = msg.get("gemini_parts") if isinstance(msg.get("gemini_parts"), list) else None
-            gemini_sdk_contents.append(_build_gemini_sdk_content(msg["role"], msg["content"], parts_payload))
-            gemini_debug_contents.append(_build_gemini_debug_content(msg["role"], msg["content"], parts_payload))
-
-        # context_payload stays model-context only. Metadata goes to context_meta.
-        gemini_context_payload = {
-            "system_instruction": full_system,
-            "contents": gemini_debug_contents,
+        context_payload = {
+            "messages": messages_payload,
+            "params": slot_params,
         }
-        gemini_context_meta = {
-            "schema_version": "model_context.v1",
-            "provider": "gemini",
+        context_meta = {
+            "schema_version": "model_context.v2",
+            "provider": chat_provider,
             "model": model_name,
             "captured_stage": "pre_provider_call",
             "captured_at": captured_at,
+            "slot": SLOT_CHAT,
         }
         if retrieval_meta:
-            gemini_context_meta["retrieval"] = retrieval_meta
+            context_meta["retrieval"] = retrieval_meta
         if context_graph:
-            gemini_context_meta["visualization"] = {
-                "context_graph": context_graph,
-            }
-        intenserp_context_payload = {
-            "messages": intenserp_messages_payload,
-        }
-        intenserp_context_meta = {
-            "schema_version": "model_context.v1",
-            "provider": "intenserp",
-            "model": intenserp_model_id,
-            "captured_stage": "pre_provider_call",
-            "captured_at": captured_at,
-        }
-        if retrieval_meta:
-            intenserp_context_meta["retrieval"] = retrieval_meta
-        if context_graph:
-            intenserp_context_meta["visualization"] = {
+            context_meta["visualization"] = {
                 "context_graph": context_graph,
             }
 
-        if chat_provider == "intenserp":
-            for chunk in stream_intenserp_chat(
-                messages_payload=intenserp_messages_payload,
-                nodes_used=nodes_used,
-                settings=settings,
-            ):
-                if chunk.startswith("data: "):
-                    d_str = chunk[6:].strip()
-                    if d_str.startswith("{"):
-                        try:
-                            d = json.loads(d_str)
-                            if d.get("event") == "done":
-                                d["context_payload"] = intenserp_context_payload
-                                d["context_meta"] = intenserp_context_meta
-                                yield f"data: {json.dumps(d)}\n\n"
-                                continue
-                        except Exception:
-                            pass
-                yield chunk
-            return
-
-        if chat_provider != "gemini":
-            reasoning_effort = resolve_groq_reasoning_effort(
-                settings,
-                slot_key="default_model_chat",
-                model_name=model_name,
-            )
-            include_reasoning = bool(settings.get("groq_chat_include_reasoning"))
-            openai_context_payload = {
-                "messages": intenserp_messages_payload,
-            }
-            openai_context_meta = {
-                "schema_version": "model_context.v1",
-                "provider": chat_provider,
-                "model": model_name,
-                "captured_stage": "pre_provider_call",
-                "captured_at": captured_at,
-            }
-            if reasoning_effort:
-                openai_context_meta["reasoning_effort"] = reasoning_effort
-            if include_reasoning:
-                openai_context_meta["include_reasoning"] = True
-            if retrieval_meta:
-                openai_context_meta["retrieval"] = retrieval_meta
-            if context_graph:
-                openai_context_meta["visualization"] = {
-                    "context_graph": context_graph,
-                }
-
-            groq_payload: dict[str, Any] = {
-                "model": model_name,
-                "messages": intenserp_messages_payload,
-                "temperature": 1.0,
-                "max_completion_tokens": 4096,
-            }
-            if reasoning_effort:
-                groq_payload["reasoning_effort"] = reasoning_effort
-            if include_reasoning:
-                groq_payload["include_reasoning"] = True
-
-            if include_reasoning:
-                response = create_openai_compatible_chat_completion(chat_provider, groq_payload)
-                choice = ((response.get("choices") or [{}])[0]) if isinstance(response, dict) else {}
-                message_payload = choice.get("message") or {}
-                content = str(message_payload.get("content") or "")
-                reasoning_text = str(
-                    message_payload.get("reasoning")
-                    or message_payload.get("reasoning_content")
-                    or choice.get("reasoning")
-                    or ""
-                )
-                for token in _iter_text_tokens(content):
-                    yield f"data: {json.dumps({'token': token})}\n\n"
-                done_payload = {
-                    "event": "done",
-                    "nodes_used": nodes_used,
-                    "context_payload": openai_context_payload,
-                    "context_meta": openai_context_meta,
-                    "thought_text": reasoning_text,
-                }
-                yield f"data: {json.dumps(done_payload)}\n\n"
-                return
-
-            content_parts: list[str] = []
-            reasoning_text = ""
-            for event in stream_openai_compatible_chat(chat_provider, groq_payload):
-                choices = event.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
-                if isinstance(reasoning_delta, str) and reasoning_delta:
-                    reasoning_text += reasoning_delta
-                content = delta.get("content")
-                if isinstance(content, str) and content:
-                    content_parts.append(content)
-                    yield f"data: {json.dumps({'token': content})}\n\n"
-
-            done_payload = {
-                "event": "done",
-                "nodes_used": nodes_used,
-                "context_payload": openai_context_payload,
-                "context_meta": openai_context_meta,
-                "thought_text": reasoning_text,
-            }
-            yield f"data: {json.dumps(done_payload)}\n\n"
-            return
-
-        disable_safety = settings.get("disable_safety_filters", False)
-        safety_settings = None
-        if disable_safety:
-            safety_settings = [
-                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            ]
-
-        config_kwargs: dict[str, Any] = {
-            "system_instruction": full_system,
-            "temperature": 1.0,
-            "safety_settings": safety_settings,
-        }
-        thinking_config = resolve_gemini_thinking_settings(
-            settings,
-            slot_key="default_model_chat",
-            model_name=model_name,
-            include_thoughts=bool(settings.get("gemini_chat_send_thinking")),
-        )
-        if thinking_config:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(**thinking_config)
-        config = types.GenerateContentConfig(**config_kwargs)
-
-        km = get_key_manager()
+        km = get_key_manager(chat_provider)
         backoff = [2, 4, 8]
-        tried_key_indices: set[int] = set()
+        tried_indices: set[int] = set()
         request_backoff_attempts = 0
-        reused_key: tuple[str, int] | None = None
+        reused_credential: tuple[dict[str, Any], int] | None = None
 
         while True:
-            key_idx: int | None = None
-            api_key: str | None = None
+            credential_index: int | None = None
+            credential_entry: dict[str, Any] | None = None
             emitted_token = False
+            thought_text = ""
             try:
-                if reused_key is not None:
-                    api_key, key_idx = reused_key
-                    reused_key = None
-                elif hasattr(km, "wait_for_request_key"):
-                    api_key, key_idx = km.wait_for_request_key(tried_key_indices)
+                if reused_credential is not None:
+                    credential_entry, credential_index = reused_credential
+                    reused_credential = None
                 else:
-                    api_key, key_idx = km.wait_for_available_key()
-                client = genai.Client(api_key=api_key)
-                response = client.models.generate_content_stream(
+                    credential_entry, credential_index = km.wait_for_request_credential(tried_indices)
+
+                for chunk in stream_completion(
+                    provider=chat_provider,
                     model=model_name,
-                    contents=gemini_sdk_contents,
-                    config=config,
-                )
-
-                gemini_parts: list[dict[str, Any]] = []
-                thought_text = ""
-                for chunk in response:
-                    serialized_parts = _extract_gemini_chunk_parts(chunk)
-                    if serialized_parts:
-                        for part_payload in serialized_parts:
-                            gemini_parts.append(part_payload)
-                            text = part_payload.get("text")
-                            if not isinstance(text, str) or not text:
-                                continue
-                            emitted_token = True
-                            if part_payload.get("thought") is True:
-                                thought_text += text
-                                yield f"data: {json.dumps({'thought_token': text})}\n\n"
-                            else:
-                                yield f"data: {json.dumps({'token': text})}\n\n"
-                        continue
-
-                    if chunk.text:
+                    messages=messages_payload,
+                    params=slot_params,
+                    credential=credential_entry,
+                ):
+                    reasoning_delta = extract_stream_delta_reasoning(chunk)
+                    if reasoning_delta:
                         emitted_token = True
-                        gemini_parts.append({"text": chunk.text, "thought": False})
-                        yield f"data: {json.dumps({'token': chunk.text})}\n\n"
+                        thought_text += reasoning_delta
+                        yield f"data: {json.dumps({'thought_token': reasoning_delta})}\n\n"
+
+                    text_delta = extract_stream_delta_text(chunk)
+                    if text_delta:
+                        emitted_token = True
+                        yield f"data: {json.dumps({'token': text_delta})}\n\n"
 
                 done_payload = {
                     "event": "done",
                     "nodes_used": nodes_used,
-                    "context_payload": gemini_context_payload,
-                    "context_meta": gemini_context_meta,
+                    "context_payload": context_payload,
+                    "context_meta": context_meta,
                     "thought_text": thought_text,
-                    "gemini_parts": gemini_parts,
+                    "gemini_parts": [],
                 }
                 yield f"data: {json.dumps(done_payload)}\n\n"
                 return
-            except Exception as e:
+            except Exception as exc:
                 if emitted_token:
                     raise
-                assessment = assess_transient_provider_error(e, provider="gemini")
-                if assessment and key_idx is not None:
-                    if assessment.action == "request_backoff" and api_key is not None:
+
+                assessment = assess_transient_provider_error(exc, provider=chat_provider)
+                if assessment and credential_index is not None:
+                    if assessment.action == "request_backoff" and credential_entry is not None:
                         request_backoff_attempts += 1
                         if request_backoff_attempts <= len(backoff):
                             delay = assessment.retry_after_seconds
                             if delay is None:
                                 delay = backoff[min(request_backoff_attempts - 1, len(backoff) - 1)]
                             logger.warning(
-                                "Gemini chat request throttled for world %s; retrying key %s without cooldown (%s).",
+                                "LiteLLM chat request throttled for world %s; retrying credential %s without cooldown (%s).",
                                 world_id,
-                                key_idx,
-                                assessment.provider_message or e,
+                                credential_index,
+                                assessment.provider_message or exc,
                             )
                             time.sleep(jittered_delay(delay))
-                            reused_key = (api_key, key_idx)
+                            reused_credential = (credential_entry, credential_index)
                             continue
                         raise
+
                     if assessment.action == "cooldown_key":
                         request_backoff_attempts = 0
-                        km.report_error(key_idx, assessment.kind)
-                        tried_key_indices.add(key_idx)
+                        km.report_error(credential_index, assessment.kind)
+                        tried_indices.add(credential_index)
                         delay = assessment.retry_after_seconds
                         if delay is None:
-                            delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
-                        logger.warning(
-                            "Gemini chat key %s entered cooldown after explicit limit signal for world %s (%s).",
-                            key_idx,
-                            world_id,
-                            assessment.provider_message or e,
-                        )
+                            delay = backoff[min(len(tried_indices) - 1, len(backoff) - 1)]
                         time.sleep(jittered_delay(delay))
                         continue
-                transient_kind = assessment.kind if assessment is not None else classify_transient_provider_error(e)
-                if transient_kind and key_idx is not None:
-                    km.report_error(key_idx, transient_kind)
-                    tried_key_indices.add(key_idx)
-                    delay = backoff[min(len(tried_key_indices) - 1, len(backoff) - 1)]
-                    time.sleep(jittered_delay(delay))
+
+                transient_kind = assessment.kind if assessment is not None else classify_transient_provider_error(exc)
+                if transient_kind and credential_index is not None:
+                    km.report_error(credential_index, transient_kind)
+                    tried_indices.add(credential_index)
+                    time.sleep(jittered_delay(0.5))
                     continue
                 raise
 
-    except Exception as e:
+    except Exception as exc:
         logger.exception("Chat stream error for world %s", world_id)
-        yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'event': 'error', 'message': str(exc)})}\n\n"

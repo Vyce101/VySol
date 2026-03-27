@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 set "MIN_PYTHON_MINOR=10"
 set "MIN_NODE_MAJOR=18"
+set "LITELLM_REQUIRED_VERSION=1.82.6"
 set "PYTHON_INSTALL_ID=Python.Python.3.11"
 set "NODE_INSTALL_ID=OpenJS.NodeJS.LTS"
 set "BACKEND_VENV=backend\venv"
@@ -271,6 +272,10 @@ if defined BACKEND_STORED_HASH (
     call :is_valid_hash BACKEND_STORED_HASH
     if errorlevel 1 set "BACKEND_STAMP_STATE=invalid"
 )
+if /I "!BACKEND_STAMP_STATE!"=="valid" (
+    call :litellm_version_matches
+    if errorlevel 1 set "BACKEND_STAMP_STATE=invalid"
+)
 
 if /I "!BACKEND_STORED_HASH!"=="!BACKEND_HASH!" if /I "!BACKEND_STAMP_STATE!"=="valid" (
     echo       Status: skipping backend pip install ^(requirements unchanged^).
@@ -303,6 +308,11 @@ echo       Status: backend dependency stamp is !BACKEND_STAMP_STATE!, installing
 "%BACKEND_VENV%\Scripts\python.exe" -m pip install -r "%BACKEND_REQ%" --disable-pip-version-check --quiet
 if errorlevel 1 (
     echo ERROR: pip install failed.
+    exit /b 1
+)
+call :litellm_version_matches
+if errorlevel 1 (
+    echo ERROR: LiteLLM must be exactly %LITELLM_REQUIRED_VERSION% in the backend virtual environment.
     exit /b 1
 )
 call :write_hash_stamp "%BACKEND_REQ_STAMP%" "!BACKEND_HASH!"
@@ -363,7 +373,14 @@ echo       Status: frontend dependencies ready.
 exit /b 0
 
 :backend_dependencies_present
-"%BACKEND_VENV%\Scripts\python.exe" -m pip show fastapi uvicorn pydantic networkx chromadb google-genai httpx python-multipart python-dotenv >nul 2>nul
+"%BACKEND_VENV%\Scripts\python.exe" -m pip show fastapi uvicorn pydantic networkx chromadb google-genai httpx litellm python-multipart python-dotenv >nul 2>nul
+if errorlevel 1 exit /b 1
+call :litellm_version_matches
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:litellm_version_matches
+"%BACKEND_VENV%\Scripts\python.exe" -c "from importlib.metadata import version; import sys; sys.exit(0 if version('litellm') == '%LITELLM_REQUIRED_VERSION%' else 1)" >nul 2>nul
 if errorlevel 1 exit /b 1
 exit /b 0
 
