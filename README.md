@@ -1,3 +1,7 @@
+> [!WARNING]
+> This branch is an outdated prototype snapshot and is **not** the main VySol build.
+> Use the main branch in this repository for the fresh active build.
+
 # VySol
 
 <p align="center">
@@ -62,3 +66,4 @@ It gives you one place to:
 - System Architecture Diagram: [docs/DIAGRAM.md](docs/DIAGRAM.md)
 - License Terms: [LICENSE](LICENSE)
 - Commercial Licensing: [COMMERCIAL.md](COMMERCIAL.md)
+
