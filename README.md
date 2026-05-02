@@ -1,3 +1,7 @@
+> [!WARNING]
+> This branch is an outdated prototype snapshot and is **not** the main VySol build.
+> Use the main branch in this repository for the fresh active build.
+
 <div align="center">
 
 # VySol
@@ -106,3 +110,4 @@ If one chunk fails during ingestion, VySol will let users review that specific c
 ## License
 
 VySol is licensed under the GNU AGPLv3. See [LICENSE](LICENSE).
+
