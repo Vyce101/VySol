@@ -1,7 +1,3 @@
----
-layout: central
----
-
 # VySol Documentation
 
 Welcome to the VySol project documentation.
