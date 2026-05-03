@@ -1,0 +1,10 @@
+input: .
+output: .retype
+url: https://vyce101.github.io/VySol/
+
+branding:
+  title: VySol
+
+links:
+  - text: GitHub
+    link: https://github.com/Vyce101/VySol
