@@ -1,9 +1,9 @@
 # Guides
 
-Use this path if you want to install, launch, or configure VySol without needing to understand the internals first.
+Use this path if you want to use or configure VySol without needing to understand the internals first.
 
 Guides are user-facing how-to pages. They should explain what to do, keep decisions simple, and avoid turning into architecture notes.
 
 ## Pages
 
-- [Quickstart](../quickstart.md)
+For setup and launch steps, use the [repo QUICKSTART](https://github.com/Vyce101/VySol/blob/main/docs/QUICKSTART.md).

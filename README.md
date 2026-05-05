@@ -7,7 +7,7 @@
 VySol is an early-stage roleplay and world-simulation app for building believable scenes inside established fictional worlds.
 
 <p align="center">
-  <a href="docs/documentation/quickstart.md"><img alt="Quickstart: Windows" src="https://img.shields.io/badge/quickstart-Windows-0892D0?labelColor=4A5568"></a>
+  <a href="docs/QUICKSTART.md"><img alt="QUICKSTART: Windows" src="https://img.shields.io/badge/QUICKSTART-Windows-0892D0?labelColor=4A5568"></a>
   <img alt="Status: rebuild alpha" src="https://img.shields.io/badge/status-rebuild--alpha-F59E0B?labelColor=4A5568">
   <a href="https://vyce101.github.io/VySol/"><img alt="Docs: latest main" src="https://img.shields.io/badge/docs-latest%20main-0892D0?labelColor=4A5568"></a>
   <img alt="License: AGPLv3" src="https://img.shields.io/badge/license-AGPLv3-0892D0?labelColor=4A5568">
@@ -74,6 +74,6 @@ If one chunk fails during ingestion, VySol will let users review that specific c
 ## Links
 
 - [Documentation](https://vyce101.github.io/VySol/) - These docs track the latest main branch. Released app builds may not include every documented feature yet.
-- [QUICKSTART](docs/documentation/quickstart.md)
+- [QUICKSTART](docs/QUICKSTART.md)
 - [CHANGELOG](docs/CHANGELOG.md) - See unreleased changes that are only available in the latest commits.
 - [LICENSE](LICENSE)
