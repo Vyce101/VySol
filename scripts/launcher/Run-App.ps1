@@ -4,6 +4,8 @@ $ErrorActionPreference = "Stop"
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootPath = Resolve-Path (Join-Path $scriptPath "..\..")
 $configPath = Join-Path $scriptPath "launcher.config.json"
+$pythonPath = Join-Path $rootPath ".venv\Scripts\python.exe"
+$requirementsPath = Join-Path $rootPath "requirements.txt"
 $runtimePath = Join-Path $rootPath "runtime"
 $logPath = Join-Path $runtimePath "logs"
 $statePath = Join-Path $runtimePath "state"
@@ -29,6 +31,80 @@ function Read-Config {
     }
 
     return Get-Content $configPath -Raw | ConvertFrom-Json
+}
+
+function Assert-PythonVirtualEnvironment {
+    if (-not (Test-Path $pythonPath)) {
+        throw "Missing project virtual environment Python: .venv\Scripts\python.exe"
+    }
+
+    if (-not (Test-Path $requirementsPath)) {
+        throw "Missing backend requirements file: requirements.txt"
+    }
+}
+
+function Read-PinnedRequirements {
+    $requirements = @()
+    $lines = Get-Content $requirementsPath
+
+    foreach ($line in $lines) {
+        $trimmedLine = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmedLine) -or $trimmedLine.StartsWith("#")) {
+            continue
+        }
+
+        $parts = $trimmedLine -split [regex]::Escape("=="), 2
+        if ($parts.Count -ne 2) {
+            throw "Requirement '$trimmedLine' must use an exact == version pin."
+        }
+
+        $requirements += [pscustomobject]@{
+            Name = [string]$parts[0]
+            Version = [string]$parts[1]
+        }
+    }
+
+    return $requirements
+}
+
+function Test-PinnedRequirementInstalled {
+    param([Parameter(Mandatory = $true)]$Requirement)
+
+    $packageInfo = & $pythonPath -m pip show ([string]$Requirement.Name) 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($packageInfo)) {
+        return $false
+    }
+
+    $versionLine = $packageInfo | Where-Object { $_.StartsWith("Version:") } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($versionLine)) {
+        return $false
+    }
+
+    $installedVersion = $versionLine.Substring("Version:".Length).Trim()
+    return $installedVersion -eq ([string]$Requirement.Version)
+}
+
+function Install-MissingPythonDependencies {
+    Assert-PythonVirtualEnvironment
+    $requirements = Read-PinnedRequirements
+    $missingRequirements = @()
+
+    foreach ($requirement in $requirements) {
+        if (-not (Test-PinnedRequirementInstalled -Requirement $requirement)) {
+            $missingRequirements += "$($requirement.Name)==$($requirement.Version)"
+        }
+    }
+
+    if ($missingRequirements.Count -eq 0) {
+        Write-LauncherLog "Python dependencies are already installed."
+        return
+    }
+
+    Write-LauncherLog "Installing missing Python dependencies: $($missingRequirements -join ', ')"
+    & $pythonPath -m pip install -r $requirementsPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python dependency installation failed."
+    }
 }
 
 function Get-CommandLineByPid {
@@ -367,6 +443,7 @@ try {
     $config = Read-Config
     $enabledServices = @($config.services | Where-Object { $_.enabled -eq $true })
 
+    Install-MissingPythonDependencies
     Stop-StaleAppOwnedProcesses
 
     if ($enabledServices.Count -eq 0) {

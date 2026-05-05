@@ -1,6 +1,6 @@
 {
   "appName": "VySol",
-  "browserUrl": "http://127.0.0.1:5173",
+  "browserUrl": "http://127.0.0.1:8000/health",
   "readyTimeoutSeconds": 60,
   "services": [
     {
@@ -15,7 +15,7 @@
     },
     {
       "name": "backend",
-      "enabled": false,
+      "enabled": true,
       "workingDirectory": ".",
       "command": ".venv/Scripts/python.exe",
       "arguments": ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
@@ -25,8 +25,7 @@
     }
   ],
   "todos": [
-    "Enable services once the app startup contract exists.",
-    "Confirm final frontend command, backend command, ports, and health checks.",
+    "Confirm final frontend command, ports, and health checks once UI work starts.",
     "Keep requiredPort and healthUrl aligned with the app's real runtime configuration."
   ]
 }

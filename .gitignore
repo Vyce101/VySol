@@ -1,6 +1,9 @@
 AGENTS.md
+__pycache__/
+*.pyc
 node_modules/
 .venv/
 docs/documentation/.retype/
 docs/documentation/retype.manifest
 runtime/
+user/
