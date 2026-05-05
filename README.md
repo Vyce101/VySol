@@ -4,8 +4,6 @@
   <img src="docs/assets/Butterfly-logo-with-background_compressed.png" alt="VySol butterfly logo" width="360">
 </p>
 
----
-
 VySol is an early-stage roleplay and world-simulation app for building believable scenes inside established fictional worlds.
 
 <p align="center">
@@ -15,8 +13,6 @@ VySol is an early-stage roleplay and world-simulation app for building believabl
   <img alt="License: AGPLv3" src="https://img.shields.io/badge/license-AGPLv3-0892D0?labelColor=4A5568">
 </p>
 
----
-
 ## Table of Contents
 
 - [What It Solves](#what-it-solves)
@@ -24,8 +20,6 @@ VySol is an early-stage roleplay and world-simulation app for building believabl
 - [Why It Is Different](#why-it-is-different)
 - [Major Milestones Roadmap](#major-milestones-roadmap)
 - [Links](#links)
-
----
 
 ## What It Solves
 
@@ -50,8 +44,6 @@ VySol targets the missing cause, not just the matching scene.
 In tools like SillyTavern, long-running roleplay often depends on lorebooks, memory entries, summaries, or normal chunk retrieval. Those can help, but they still tend to retrieve what looks similar to the current message. If a character is arguing right now, the system may retrieve another argument scene while missing the childhood abuse, self-blame, betrayal, oath, or world rule that actually explains why the argument matters.
 
 VySol is being built around that pain. The goal is not only to retrieve a matching chunk, but to recover the connected background that a human reader would know belongs in the scene even when the wording is not semantically similar. That same structure is also meant to support richer world simulation over time, where characters, rules, places, and past events can shape what should happen next.
-
----
 
 ## Major Milestones Roadmap
 
@@ -78,8 +70,6 @@ Benchmark mode will let users compare different retrieval styles on the same wor
 ### Failed Chunk Repair And Retry
 
 If one chunk fails during ingestion, VySol will let users review that specific chunk, retry it, or repair it without throwing away the whole world. This is meant to make large ingestions less fragile when a provider blocks, times out, or returns unusable output.
-
----
 
 ## Links
 
