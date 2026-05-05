@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 VySol needs a small global database for app-level state before world-specific storage exists. The global database gives startup a known place to create, open, version, and migrate app-wide data without mixing that data into future per-world databases.
 
-This boundary matters because later worlds should be easier to export, inspect, recover, and ingest independently. Future world records, graph extraction data, chunks, nodes, edges, and assets should not be added to `app.sqlite` just because a SQLite connection already exists.
+This boundary matters because later worlds should be easier to export, inspect, recover, and ingest independently. New tables should be added intentionally through accepted feature work instead of reusing `app.sqlite` just because a SQLite connection already exists.
 
 ## Ownership Boundary
 
@@ -21,10 +21,10 @@ Global App Storage owns:
 - Returning a usable global database connection.
 - Closing the global connection during backend shutdown.
 
-Global App Storage does not own:
+Global App Storage does not currently own:
 
 - World records or per-world databases.
-- Asset records, chunk storage, graph nodes, graph edges, or graph manifestation.
+- Chunk storage, graph nodes, graph edges, or graph manifestation.
 - Ingestion, parsing, embeddings, provider keys, retrieval, or chat.
 - User interface state.
 - Launcher logs or documentation build output.
@@ -63,7 +63,7 @@ Cross-system edge cases:
 
 - Backend startup treats unrecoverable database bootstrap failure as a startup failure.
 - The launcher can report backend readiness only after database bootstrap succeeds.
-- Future world storage must not silently reuse the global database for per-world content.
+- Future world storage should not silently reuse the global database for per-world content.
 
 ## Invariants
 
@@ -73,7 +73,7 @@ Cross-system edge cases:
 - A migration must not advance `user_version` unless its schema changes completed successfully.
 - Startup must not continue after an unrecoverable database bootstrap failure.
 - Feature modules must use the central database helper instead of opening their own global app connection ad hoc.
-- New world, asset, ingestion, parser, chunk, node, or edge storage must not be added to the global database without a new accepted storage decision.
+- New feature storage should be added through explicit schema migrations and accepted feature scope.
 
 ## Implementation Landmarks
 
