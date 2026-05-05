@@ -1,7 +1,7 @@
 <h1 align="center">VySol</h1>
 
 <p align="center">
-  <img src="docs/assets/Butterfly-logo-with-background_compressed.png" alt="VySol butterfly logo" width="360">
+  <img src="docs/assets/Butterfly-logo-with-background_compressed.png" alt="VySol butterfly logo" width="1080">
 </p>
 
 VySol is an early-stage roleplay and world-simulation app for building believable scenes inside established fictional worlds.
