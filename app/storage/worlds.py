@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 import sqlite3
 from typing import NoReturn
 from uuid import uuid4
@@ -7,6 +8,7 @@ from app.logger import get_logger
 from app.storage.database import get_global_connection
 
 logger = get_logger()
+LAST_USED_AT_FORMAT = "%d-%m-%Y %H:%M:%S"
 
 
 class CommittedWorldValidationError(ValueError):
@@ -24,6 +26,7 @@ class CommittedWorld:
     description: str | None
     background_asset_id: str
     font_asset_id: str
+    last_used_at: str
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,7 @@ def create_committed_world(
     validated_world = validate_new_committed_world(world)
     database_connection = connection if connection is not None else get_global_connection()
     display_name_key = get_display_name_key(validated_world.display_name)
+    last_used_at = get_last_used_at_timestamp()
     reject_duplicate_display_name(
         database_connection,
         display_name_key,
@@ -60,6 +64,7 @@ def create_committed_world(
         description=validated_world.description,
         background_asset_id=validated_world.background_asset_id,
         font_asset_id=validated_world.font_asset_id,
+        last_used_at=last_used_at,
     )
 
     try:
@@ -71,9 +76,10 @@ def create_committed_world(
                 display_name_key,
                 description,
                 background_asset_id,
-                font_asset_id
+                font_asset_id,
+                last_used_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 committed_world.world_id,
@@ -82,6 +88,7 @@ def create_committed_world(
                 committed_world.description,
                 committed_world.background_asset_id,
                 committed_world.font_asset_id,
+                committed_world.last_used_at,
             ),
         )
         database_connection.commit()
@@ -90,7 +97,8 @@ def create_committed_world(
         logger.error("Failed to create committed world index record.", exc_info=True)
         raise
 
-    logger.info("Created committed world index record: %s", committed_world.world_id)
+    logger.info("Created committed world index record.")
+    logger.debug("Created committed world index record: %s", committed_world.world_id)
     return committed_world
 
 
@@ -108,7 +116,8 @@ def get_committed_world(
                 display_name,
                 description,
                 background_asset_id,
-                font_asset_id
+                font_asset_id,
+                last_used_at
             FROM worlds
             WHERE world_id = ?
             """,
@@ -131,10 +140,13 @@ def update_committed_world(
 ) -> CommittedWorld | None:
     database_connection = connection if connection is not None else get_global_connection()
     if not has_committed_world(world_id, database_connection):
+        logger.error("Missing committed world index record for update.")
+        logger.debug("Missing committed world ID: %s", world_id)
         return None
 
     validated_world = validate_committed_world_update(world)
     display_name_key = get_display_name_key(validated_world.display_name)
+    last_used_at = get_last_used_at_timestamp()
     reject_duplicate_display_name(
         database_connection,
         display_name_key,
@@ -151,7 +163,8 @@ def update_committed_world(
                 display_name_key = ?,
                 description = ?,
                 background_asset_id = ?,
-                font_asset_id = ?
+                font_asset_id = ?,
+                last_used_at = ?
             WHERE world_id = ?
             """,
             (
@@ -160,6 +173,7 @@ def update_committed_world(
                 validated_world.description,
                 validated_world.background_asset_id,
                 validated_world.font_asset_id,
+                last_used_at,
                 world_id,
             ),
         )
@@ -178,8 +192,10 @@ def update_committed_world(
         description=validated_world.description,
         background_asset_id=validated_world.background_asset_id,
         font_asset_id=validated_world.font_asset_id,
+        last_used_at=last_used_at,
     )
-    logger.info("Updated committed world index record: %s", world_id)
+    logger.info("Updated committed world index record.")
+    logger.debug("Refreshed committed world last_used_at: %s %s", world_id, last_used_at)
     return updated_world
 
 
@@ -196,7 +212,8 @@ def list_committed_worlds(
                 display_name,
                 description,
                 background_asset_id,
-                font_asset_id
+                font_asset_id,
+                last_used_at
             FROM worlds
             ORDER BY display_name_key, world_id
             """
@@ -206,6 +223,79 @@ def list_committed_worlds(
         raise
 
     return [committed_world_from_row(row) for row in rows]
+
+
+def list_committed_worlds_by_recent_use(
+    connection: sqlite3.Connection | None = None,
+) -> list[CommittedWorld]:
+    database_connection = connection if connection is not None else get_global_connection()
+
+    try:
+        rows = database_connection.execute(
+            """
+            SELECT
+                world_id,
+                display_name,
+                description,
+                background_asset_id,
+                font_asset_id,
+                last_used_at
+            FROM worlds
+            ORDER BY
+                substr(last_used_at, 7, 4) DESC,
+                substr(last_used_at, 4, 2) DESC,
+                substr(last_used_at, 1, 2) DESC,
+                substr(last_used_at, 12, 8) DESC,
+                display_name_key,
+                world_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        logger.error(
+            "Failed to list committed world index records by recent use.",
+            exc_info=True,
+        )
+        raise
+
+    return [committed_world_from_row(row) for row in rows]
+
+
+def mark_committed_world_used(
+    world_id: str,
+    used_at: datetime | None = None,
+    connection: sqlite3.Connection | None = None,
+) -> CommittedWorld | None:
+    database_connection = connection if connection is not None else get_global_connection()
+    last_used_at = get_last_used_at_timestamp(used_at)
+
+    try:
+        cursor = database_connection.execute(
+            """
+            UPDATE worlds
+            SET last_used_at = ?
+            WHERE world_id = ?
+            """,
+            (last_used_at, world_id),
+        )
+        database_connection.commit()
+    except sqlite3.Error:
+        database_connection.rollback()
+        logger.error("Failed to update committed world last_used_at.", exc_info=True)
+        logger.debug(
+            "Failed committed world last_used_at update: %s %s",
+            world_id,
+            last_used_at,
+        )
+        raise
+
+    if cursor.rowcount == 0:
+        logger.error("Missing committed world index record for last_used_at update.")
+        logger.debug("Missing committed world ID for last_used_at update: %s", world_id)
+        return None
+
+    logger.info("Updated committed world last_used_at.")
+    logger.debug("Updated committed world last_used_at: %s %s", world_id, last_used_at)
+    return get_committed_world(world_id, database_connection)
 
 
 def has_committed_world(world_id: str, connection: sqlite3.Connection) -> bool:
@@ -297,6 +387,11 @@ def get_display_name_key(display_name: str) -> str:
     return display_name.casefold()
 
 
+def get_last_used_at_timestamp(used_at: datetime | None = None) -> str:
+    timestamp = used_at if used_at is not None else datetime.now()
+    return timestamp.strftime(LAST_USED_AT_FORMAT)
+
+
 def committed_world_from_row(row: sqlite3.Row) -> CommittedWorld:
     return CommittedWorld(
         world_id=row["world_id"],
@@ -304,4 +399,5 @@ def committed_world_from_row(row: sqlite3.Row) -> CommittedWorld:
         description=row["description"],
         background_asset_id=row["background_asset_id"],
         font_asset_id=row["font_asset_id"],
+        last_used_at=row["last_used_at"],
     )

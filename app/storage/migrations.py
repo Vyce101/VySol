@@ -1,10 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import sqlite3
 
 from app.logger import get_logger
 
 logger = get_logger()
+LAST_USED_AT_FORMAT = "%d-%m-%Y %H:%M:%S"
+LAST_USED_AT_DEFAULT = "01-01-1970 00:00:00"
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,23 @@ def apply_worlds_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def apply_world_last_used_at_schema(connection: sqlite3.Connection) -> None:
+    last_used_at = datetime.now().strftime(LAST_USED_AT_FORMAT)
+    connection.execute(
+        f"""
+        ALTER TABLE worlds
+        ADD COLUMN last_used_at TEXT NOT NULL DEFAULT '{LAST_USED_AT_DEFAULT}'
+        """
+    )
+    connection.execute(
+        """
+        UPDATE worlds
+        SET last_used_at = ?
+        """,
+        (last_used_at,),
+    )
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -72,6 +92,11 @@ MIGRATIONS = (
         version=3,
         name="create_worlds_table",
         apply=apply_worlds_schema,
+    ),
+    Migration(
+        version=4,
+        name="add_world_last_used_at",
+        apply=apply_world_last_used_at_schema,
     ),
 )
 
