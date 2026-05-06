@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
@@ -11,7 +12,9 @@ from app.draft_worlds.splitter_settings import (
     DEFAULT_MAX_LOOKBACK_SIZE,
     DEFAULT_OVERLAP_SIZE,
     SplitterSettings,
+    SplitterSettingsValidationError,
     create_default_splitter_settings,
+    validate_splitter_settings,
 )
 from app.storage.database import bootstrap_global_database, close_global_connection
 from app.storage.migrations import get_schema_version
@@ -136,6 +139,150 @@ class DraftWorldSplitterDefaultsTests(unittest.TestCase):
                     registry.create_draft_world()
 
         self.assertEqual(registry._draft_worlds, {})
+
+
+class SplitterSettingsValidationTests(unittest.TestCase):
+    def test_accepts_default_splitter_settings(self) -> None:
+        splitter_settings = create_default_splitter_settings()
+
+        validated_settings = validate_splitter_settings(splitter_settings)
+
+        self.assertIs(validated_settings, splitter_settings)
+
+    def test_accepts_boundary_splitter_settings(self) -> None:
+        splitter_settings = SplitterSettings(
+            chunk_size=1,
+            max_lookback_size=0,
+            overlap_size=0,
+        )
+
+        validated_settings = validate_splitter_settings(splitter_settings)
+
+        self.assertIs(validated_settings, splitter_settings)
+
+    def test_allows_overlap_size_larger_than_chunk_size(self) -> None:
+        splitter_settings = SplitterSettings(
+            chunk_size=2,
+            max_lookback_size=1,
+            overlap_size=9,
+        )
+
+        validated_settings = validate_splitter_settings(splitter_settings)
+
+        self.assertIs(validated_settings, splitter_settings)
+
+    def test_rejects_invalid_chunk_size(self) -> None:
+        invalid_values: list[Any] = [0, -1, 1.0, "1", True]
+
+        for invalid_value in invalid_values:
+            with self.subTest(invalid_value=invalid_value):
+                self.assert_invalid_settings(
+                    SplitterSettings(
+                        chunk_size=invalid_value,
+                        max_lookback_size=0,
+                        overlap_size=0,
+                    )
+                )
+
+    def test_rejects_invalid_max_lookback_size(self) -> None:
+        invalid_values: list[Any] = [-1, 1.0, "1", True]
+
+        for invalid_value in invalid_values:
+            with self.subTest(invalid_value=invalid_value):
+                self.assert_invalid_settings(
+                    SplitterSettings(
+                        chunk_size=2,
+                        max_lookback_size=invalid_value,
+                        overlap_size=0,
+                    )
+                )
+
+    def test_rejects_max_lookback_size_equal_to_chunk_size(self) -> None:
+        self.assert_invalid_settings(
+            SplitterSettings(
+                chunk_size=2,
+                max_lookback_size=2,
+                overlap_size=0,
+            )
+        )
+
+    def test_rejects_max_lookback_size_larger_than_chunk_size(self) -> None:
+        self.assert_invalid_settings(
+            SplitterSettings(
+                chunk_size=2,
+                max_lookback_size=3,
+                overlap_size=0,
+            )
+        )
+
+    def test_rejects_invalid_overlap_size(self) -> None:
+        invalid_values: list[Any] = [-1, 1.0, "1", True]
+
+        for invalid_value in invalid_values:
+            with self.subTest(invalid_value=invalid_value):
+                self.assert_invalid_settings(
+                    SplitterSettings(
+                        chunk_size=2,
+                        max_lookback_size=1,
+                        overlap_size=invalid_value,
+                    )
+                )
+
+    def test_logs_invalid_setting_rejection_at_warning(self) -> None:
+        splitter_settings = SplitterSettings(
+            chunk_size=0,
+            max_lookback_size=0,
+            overlap_size=0,
+        )
+
+        with patch("app.draft_worlds.splitter_settings.logger") as logger:
+            with self.assertRaises(SplitterSettingsValidationError):
+                validate_splitter_settings(splitter_settings)
+
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_logs_numeric_setting_values_at_debug(self) -> None:
+        splitter_settings = SplitterSettings(
+            chunk_size=1,
+            max_lookback_size=0,
+            overlap_size=0,
+        )
+
+        with patch("app.draft_worlds.splitter_settings.logger") as logger:
+            validate_splitter_settings(splitter_settings)
+
+        logger.debug.assert_called_once_with(
+            "Validating splitter settings: chunk_size=%s max_lookback_size=%s "
+            "overlap_size=%s",
+            1,
+            0,
+            0,
+        )
+
+    def test_logs_unexpected_validation_failure_at_error(self) -> None:
+        splitter_settings = SplitterSettings(
+            chunk_size=1,
+            max_lookback_size=0,
+            overlap_size=0,
+        )
+
+        with patch("app.draft_worlds.splitter_settings.logger") as logger:
+            with patch(
+                "app.draft_worlds.splitter_settings.require_whole_number",
+                side_effect=RuntimeError("validation helper unavailable"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    validate_splitter_settings(splitter_settings)
+
+        logger.error.assert_called_once_with(
+            "Unexpected splitter settings validation failure.",
+            exc_info=True,
+        )
+
+    def assert_invalid_settings(self, splitter_settings: SplitterSettings) -> None:
+        with self.assertRaises(SplitterSettingsValidationError):
+            validate_splitter_settings(splitter_settings)
 
 
 if __name__ == "__main__":
