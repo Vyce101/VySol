@@ -6,6 +6,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added committed world index storage for saving committed world names, descriptions, and selected assets.
+- Added a Committed World Index Storage concept page.
 - Added seeded built-in default image and font asset references.
 - Added asset metadata storage for image and font records.
 - Added the global SQLite app database bootstrap with `PRAGMA user_version` migrations.

@@ -6,7 +6,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs a small global database for app-level state before world-specific storage exists. The global database gives startup a known place to create, open, version, and migrate app-wide data without mixing that data into future per-world databases.
+VySol needs a small global database for app-level state before world-specific storage exists. The global database gives startup a known place to create, open, version, and migrate app-wide data without mixing per-world content into future per-world databases.
 
 This boundary matters because later worlds should be easier to export, inspect, recover, and ingest independently. New tables should be added intentionally through accepted feature work instead of reusing `app.sqlite` just because a SQLite connection already exists.
 
@@ -19,12 +19,13 @@ Global App Storage owns:
 - Reading and writing schema version through `PRAGMA user_version`.
 - Applying ordered handwritten migrations.
 - Triggering app-level default data seeding that depends on the migrated global schema.
+- Hosting app-level metadata tables such as asset metadata and committed world indexes.
 - Returning a usable global database connection.
 - Closing the global connection during backend shutdown.
 
-Global App Storage does not currently own:
+Global App Storage does not own:
 
-- World records or per-world databases.
+- Draft worlds, world folders, or per-world databases.
 - Chunk storage, graph nodes, graph edges, or graph manifestation.
 - Ingestion, parsing, embeddings, provider keys, retrieval, or chat.
 - User interface state.
@@ -46,11 +47,12 @@ Global App Storage currently interacts with:
 
 - Backend startup, which initializes storage before the app is considered ready.
 - Asset Metadata Storage, which receives its built-in default asset seeding trigger after migrations complete.
+- Committed World Index Storage, which stores committed world metadata in the global database.
 - The health endpoint indirectly, because startup must complete before the backend can serve normally.
 - The launcher, which starts the backend and waits for its health check.
-- Future global app systems, such as settings, hub metadata, or world indexes.
+- Future global app systems, such as settings or additional hub metadata.
 
-It must stay separate from future per-world storage. The global database may eventually point to worlds or store app-level metadata about them, but it should not become the storage location for world content itself.
+It must stay separate from future per-world storage. The global database may point to committed worlds or store app-level metadata about them, but it should not become the storage location for world content itself.
 
 ## Current Edge Cases
 
@@ -61,6 +63,7 @@ Internal edge cases:
 - Existing databases are opened and migrated instead of recreated.
 - Already-applied migrations are skipped by comparing against `PRAGMA user_version`.
 - Default app-owned seed data can run repeatedly without duplicating rows when the target system uses stable IDs.
+- App-level metadata tables can be added through explicit migrations without changing the database bootstrap contract.
 - Failed SQLite setup or migration work is logged and re-raised.
 - Failed migrations roll back their transaction before the error leaves the migration runner.
 
@@ -69,11 +72,11 @@ Cross-system edge cases:
 - Backend startup treats unrecoverable database bootstrap failure as a startup failure.
 - Default data seeding must run only after migrations create the tables it depends on.
 - The launcher can report backend readiness only after database bootstrap succeeds.
-- Future world storage should not silently reuse the global database for per-world content.
+- Committed world indexes may live in the global database, but future per-world content must not silently reuse it.
 
 ## Invariants
 
-- `app.sqlite` is the global app database, not a world database.
+- `app.sqlite` is the global app database, not a per-world content database.
 - Schema version must come from `PRAGMA user_version`.
 - Migrations must be ordered, handwritten, and idempotent when rerun against an already-migrated database.
 - A migration must not advance `user_version` unless its schema changes completed successfully.
