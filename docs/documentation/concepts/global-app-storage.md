@@ -18,6 +18,7 @@ Global App Storage owns:
 - Opening the global SQLite database with Python standard-library `sqlite3`.
 - Reading and writing schema version through `PRAGMA user_version`.
 - Applying ordered handwritten migrations.
+- Triggering app-level default data seeding that depends on the migrated global schema.
 - Returning a usable global database connection.
 - Closing the global connection during backend shutdown.
 
@@ -31,9 +32,11 @@ Global App Storage does not currently own:
 
 ## Normal Flow
 
-On backend startup, the FastAPI lifespan calls the global database bootstrap. The bootstrap ensures the `user/data/` folder exists, opens or creates `app.sqlite`, reads the current schema version, applies any pending migrations in order, and stores the resulting connection as the global connection.
+On backend startup, the FastAPI lifespan calls the global database bootstrap. The bootstrap ensures the `user/data/` folder exists, opens or creates `app.sqlite`, reads the current schema version, applies any pending migrations in order, seeds app-level defaults that depend on the migrated schema, and stores the resulting connection as the global connection.
 
 Each migration runs inside an explicit transaction. After a migration succeeds, the database `user_version` is advanced to that migration version. If a migration fails, the transaction is rolled back and startup fails instead of serving the app with a partially migrated database.
+
+Default data seeding runs after migrations instead of as a migration. This lets idempotent app-owned records, such as built-in asset references, be refreshed on startup without changing schema version.
 
 On backend shutdown, the global connection is closed.
 
@@ -42,6 +45,7 @@ On backend shutdown, the global connection is closed.
 Global App Storage currently interacts with:
 
 - Backend startup, which initializes storage before the app is considered ready.
+- Asset Metadata Storage, which receives its built-in default asset seeding trigger after migrations complete.
 - The health endpoint indirectly, because startup must complete before the backend can serve normally.
 - The launcher, which starts the backend and waits for its health check.
 - Future global app systems, such as settings, hub metadata, or world indexes.
@@ -56,12 +60,14 @@ Internal edge cases:
 - Missing `app.sqlite` is created by SQLite when opened.
 - Existing databases are opened and migrated instead of recreated.
 - Already-applied migrations are skipped by comparing against `PRAGMA user_version`.
+- Default app-owned seed data can run repeatedly without duplicating rows when the target system uses stable IDs.
 - Failed SQLite setup or migration work is logged and re-raised.
 - Failed migrations roll back their transaction before the error leaves the migration runner.
 
 Cross-system edge cases:
 
 - Backend startup treats unrecoverable database bootstrap failure as a startup failure.
+- Default data seeding must run only after migrations create the tables it depends on.
 - The launcher can report backend readiness only after database bootstrap succeeds.
 - Future world storage should not silently reuse the global database for per-world content.
 
@@ -71,6 +77,7 @@ Cross-system edge cases:
 - Schema version must come from `PRAGMA user_version`.
 - Migrations must be ordered, handwritten, and idempotent when rerun against an already-migrated database.
 - A migration must not advance `user_version` unless its schema changes completed successfully.
+- Default data seeding must not rely on generating new IDs each startup; app-owned seed records need stable identifiers or another idempotent key.
 - Startup must not continue after an unrecoverable database bootstrap failure.
 - Feature modules must use the central database helper instead of opening their own global app connection ad hoc.
 - New feature storage should be added through explicit schema migrations and accepted feature scope.
@@ -80,6 +87,7 @@ Cross-system edge cases:
 - `app/storage/paths.py` defines repo-local storage paths.
 - `app/storage/database.py` owns global database bootstrap and connection management.
 - `app/storage/migrations.py` owns migration ordering and `PRAGMA user_version`.
+- Feature storage modules own their own default seed data when bootstrap calls into them.
 - `app/main.py` initializes storage during backend lifespan startup.
 
 ## What AI/Coders Must Check Before Changing This System
@@ -88,6 +96,7 @@ Before editing Global App Storage, check:
 
 - Whether the change belongs in global app storage or future per-world storage.
 - Whether a new migration is needed and whether it advances `PRAGMA user_version`.
+- Whether new default data belongs in idempotent seed logic after migrations rather than in a schema migration.
 - Whether startup still fails loudly on unrecoverable database setup problems.
 - Whether tests cover missing database creation, schema versioning, migration ordering, and usable connections.
 - Whether the change preserves the ADR decision for SQLite and handwritten migrations.

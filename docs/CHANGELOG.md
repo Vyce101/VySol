@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added seeded built-in default image and font asset references.
 - Added asset metadata storage for image and font records.
 - Added the global SQLite app database bootstrap with `PRAGMA user_version` migrations.
 - Added a minimal FastAPI backend startup path and health check.
