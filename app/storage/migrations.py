@@ -42,6 +42,21 @@ def apply_assets_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def apply_worlds_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS worlds (
+            world_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+            display_name_key TEXT NOT NULL UNIQUE CHECK (length(display_name_key) > 0),
+            description TEXT,
+            background_asset_id TEXT NOT NULL CHECK (length(trim(background_asset_id)) > 0),
+            font_asset_id TEXT NOT NULL CHECK (length(trim(font_asset_id)) > 0)
+        )
+        """
+    )
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -52,6 +67,11 @@ MIGRATIONS = (
         version=2,
         name="create_assets_table",
         apply=apply_assets_schema,
+    ),
+    Migration(
+        version=3,
+        name="create_worlds_table",
+        apply=apply_worlds_schema,
     ),
 )
 
