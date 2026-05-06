@@ -34,7 +34,7 @@ class DatabaseBootstrapTests(unittest.TestCase):
                 database_path = Path(temp_directory) / "app.sqlite"
                 connection = bootstrap_global_database(database_path)
 
-                self.assertEqual(get_schema_version(connection), 3)
+                self.assertEqual(get_schema_version(connection), 4)
             finally:
                 close_global_connection()
 
