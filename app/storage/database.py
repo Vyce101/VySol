@@ -24,6 +24,7 @@ def bootstrap_global_database(database_path: Path | None = None) -> sqlite3.Conn
         logger.debug("Current schema version: %s", current_version)
         apply_migrations(connection)
         logger.info("Database migrations completed.")
+        seed_default_asset_references(connection)
     except (OSError, sqlite3.Error):
         logger.error("Recoverable database setup or migration problem.", exc_info=True)
         raise
@@ -64,3 +65,9 @@ def set_global_connection(connection: sqlite3.Connection) -> None:
         _global_connection.close()
 
     _global_connection = connection
+
+
+def seed_default_asset_references(connection: sqlite3.Connection) -> None:
+    from app.storage.default_assets import seed_default_asset_references as seed_references
+
+    seed_references(connection)

@@ -27,6 +27,14 @@ class AssetMetadata:
     is_built_in: bool
     full_font_name: str | None = None
 
+    @property
+    def is_user_uploaded(self) -> bool:
+        return not self.is_built_in
+
+    @property
+    def is_deletable(self) -> bool:
+        return not self.is_built_in
+
 
 @dataclass(frozen=True)
 class NewAssetMetadata:
