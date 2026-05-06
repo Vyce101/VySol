@@ -1,12 +1,12 @@
 # Committed World Index Storage
 
-Committed World Index Storage is VySol's app-level record system for worlds that have been committed by the backend. It stores world index metadata in `user/data/app.sqlite` so backend systems can create, read, update, and list committed worlds without creating world folders, per-world databases, source records, chunk records, graph records, or UI state.
+Committed World Index Storage is VySol's app-level record system for worlds that have been committed by the backend. It stores world index metadata in `user/data/app.sqlite` so backend systems can create, read, update, mark as used, and list committed worlds without creating world folders, per-world databases, source records, chunk records, graph records, or UI state.
 
 This page is for developers, power users, and AI coding agents that need to understand the committed-world index contract before changing world creation, storage migrations, asset selection, future World Hub behavior, or per-world storage boundaries.
 
 ## Why It Exists
 
-VySol needs a durable app-level index of committed worlds before deeper world storage exists. The index lets the backend remember which worlds exist, what display name users chose, optional descriptive text, and which background and font asset references belong to the world card or future hub view.
+VySol needs a durable app-level index of committed worlds before deeper world storage exists. The index lets the backend remember which worlds exist, what display name users chose, optional descriptive text, which background and font asset references belong to the world card or future hub view, and when each committed world was last used.
 
 The index is intentionally separate from future per-world storage. It can point to a committed world and preserve user-facing metadata, but it must not become the place where world content, source text, chunks, graph nodes, graph edges, or ingestion state are stored.
 
@@ -18,12 +18,15 @@ Committed World Index Storage owns:
 - Reading one committed world index record by world ID.
 - Updating a committed world index record by world ID.
 - Listing committed world index records in stable display order.
+- Listing committed world index records by most recent use.
+- Refreshing `last_used_at` when a committed world is created, edited, or explicitly marked as used.
 - Generating UUID world IDs with Python standard-library `uuid`.
 - Preserving display names exactly as entered.
 - Rejecting case-insensitive duplicate display names.
 - Storing optional descriptions.
 - Storing selected background and font asset references as asset ID strings.
-- Logging committed world creation, update, duplicate-name rejection, and database failures.
+- Storing `last_used_at` timestamps in `DD-MM-YYYY HH:MM:SS` format.
+- Logging committed world creation, update, last-used updates, duplicate-name rejection, missing world IDs, and database failures.
 
 Committed World Index Storage does not own:
 
@@ -33,6 +36,7 @@ Committed World Index Storage does not own:
 - Source records, chunk records, graph records, or ingestion state.
 - Asset metadata creation, upload handling, file copying, or physical asset validation.
 - World Hub UI or other user interface flows.
+- Customize, Ingestion, chat instance, analytics, or usage-history behavior.
 
 ## Normal Flow
 
@@ -40,15 +44,17 @@ Global App Storage applies the migration that creates the `worlds` table. Backen
 
 Before writing, the storage layer validates that the display name and asset references are non-empty. It stores the display name exactly as entered and also stores an internal normalized display-name key using Python `casefold()` so names like `Naruto`, `naruto`, and `NARUTO` conflict with each other.
 
-If validation and duplicate checks pass, the storage layer generates a UUID world ID, inserts the row, commits the transaction, logs creation at `INFO`, and returns the saved record. Read and list operations query the same table and map SQLite rows back into committed world objects. Update operations replace the mutable index fields for an existing world ID and return no record when the world ID is missing.
+If validation and duplicate checks pass, the storage layer generates a UUID world ID, sets `last_used_at`, inserts the row, commits the transaction, logs creation at `INFO`, and returns the saved record. Read and list operations query the same table and map SQLite rows back into committed world objects.
+
+Update operations replace the mutable index fields for an existing world ID and refresh `last_used_at` because metadata edits count as world use. Explicit last-used updates are handled by a dedicated repository function so future world-scoped systems can refresh the timestamp at their real interaction boundaries without owning the timestamp format or SQL update. Missing world IDs return no record; explicit last-used misses are logged at `ERROR`.
 
 ## Inputs
 
-Committed World Index Storage receives backend-created committed world metadata: display name, optional description, selected background asset ID, and selected font asset ID. The asset IDs are references to records owned by Asset Metadata Storage; this system does not validate physical files or create asset records.
+Committed World Index Storage receives backend-created committed world metadata: display name, optional description, selected background asset ID, selected font asset ID, and world IDs for later read, update, or mark-used calls. The asset IDs are references to records owned by Asset Metadata Storage; this system does not validate physical files or create asset records.
 
 ## Outputs
 
-The system writes committed world index rows into `app.sqlite` and returns committed world objects to backend callers. It does not produce folders, per-world databases, UI state, source records, chunk records, graph records, or draft-world records.
+The system writes committed world index rows into `app.sqlite` and returns committed world objects to backend callers. It can return worlds in stable display order or most-recent-use order. It does not produce folders, per-world databases, UI state, source records, chunk records, graph records, usage-history records, or draft-world records.
 
 ## System Interactions
 
@@ -56,9 +62,9 @@ Committed World Index Storage currently interacts with:
 
 - Global App Storage, which opens `app.sqlite`, applies migrations, and provides the shared database connection.
 - Asset Metadata Storage by storing background and font asset IDs that refer to known asset records.
-- The central logger, which records committed world creation, update, duplicate rejection, and database failures.
+- The central logger, which records committed world creation, update, last-used updates, duplicate rejection, missing world IDs, and database failures.
 
-Future World Hub, world folder, per-world database, ingestion, and graph systems may use committed world IDs as stable references, but those systems should keep their own storage responsibilities separate.
+Future World Hub, Customize, Ingestion, chat instance, world folder, per-world database, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
 
 ## Current Edge Cases
 
@@ -69,8 +75,13 @@ Internal edge cases:
 - Empty font asset references are rejected before a database write.
 - Display names are stored exactly as entered, including casing.
 - Case-insensitive duplicate display names are rejected before insert or update.
+- Created committed worlds receive a `last_used_at` timestamp before insert.
+- Committed world metadata updates refresh `last_used_at`.
+- Explicit mark-used calls update only `last_used_at`.
+- Recent-use listing sorts `DD-MM-YYYY HH:MM:SS` timestamps chronologically instead of relying on naive text ordering.
 - Missing world IDs return no record instead of creating one.
 - Updating a missing world ID returns no record before duplicate-name checks.
+- Marking a missing world ID as used returns no record and logs an error.
 - SQLite write failures are rolled back, logged at `ERROR`, and re-raised.
 - SQLite read failures are logged at `ERROR` and re-raised.
 
@@ -79,6 +90,8 @@ Cross-system edge cases:
 - Draft worlds must not be written to the committed world index.
 - Asset references are stored as IDs only; this system must not assume a physical asset file exists.
 - Logs must not include sensitive local paths.
+- Last-used logs must keep world IDs and timestamps at `DEBUG` when those details are useful.
+- Future Customize, Ingestion, and chat instance flows should use the shared mark-used behavior instead of duplicating timestamp SQL.
 - The global database must store only the committed world index, not per-world content.
 
 ## Invariants
@@ -88,14 +101,16 @@ Cross-system edge cases:
 - Display-name uniqueness must be enforced case-insensitively through the normalized key.
 - `description` must remain optional.
 - Background and font asset references must be non-empty asset ID strings.
+- `last_used_at` must be stored as a zero-padded `DD-MM-YYYY HH:MM:SS` string.
+- Recent-use ordering must sort by chronological meaning of `last_used_at`, not by raw text order.
 - Draft worlds must remain outside this storage system.
 - Per-world content must remain outside `app.sqlite`.
 - Feature modules must use the central database helper instead of opening separate app database connections ad hoc.
 
 ## Implementation Landmarks
 
-- `app/storage/migrations.py` owns the `worlds` table migration.
-- `app/storage/worlds.py` owns committed world validation and create/read/update/list behavior.
+- `app/storage/migrations.py` owns the `worlds` table migrations.
+- `app/storage/worlds.py` owns committed world validation, create/read/update/list, recent-use listing, and mark-used behavior.
 - `tests/test_committed_world_storage.py` covers the current storage contract.
 
 ## What AI/Coders Must Check Before Changing This System
@@ -106,6 +121,8 @@ Before editing Committed World Index Storage, check:
 - Whether schema changes need a new handwritten migration and `PRAGMA user_version` advance.
 - Whether draft-world behavior is being accidentally persisted here.
 - Whether display-name uniqueness still matches the case-insensitive committed-world rule.
+- Whether `last_used_at` is refreshed only for committed-world use signals and not for unrelated storage reads.
+- Whether recent-use sorting still handles the day-month-year timestamp format correctly.
 - Whether logs avoid sensitive local paths and other user-owned details.
 - Whether database failures are logged and re-raised without swallowing the original error.
-- Whether tests cover create, read, update, list, duplicate rejection, and database failure behavior.
+- Whether tests cover create, read, update, list, mark-used behavior, recent-use ordering, duplicate rejection, migration backfill, and database failure behavior.
