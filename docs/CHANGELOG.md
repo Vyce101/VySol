@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added in-memory draft world splitter defaults for uncommitted ingestion setup.
 - Added last-used timestamps so committed worlds can be sorted by most recent use.
 - Added committed world index storage for saving committed world names, descriptions, and selected assets.
 - Added a Committed World Index Storage concept page.

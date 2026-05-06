@@ -8,4 +8,5 @@ Concept pages explain system contracts and features: what each system owns, what
 
 - [Asset Metadata Storage](asset-metadata-storage.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
+- [Draft World Splitter Settings](draft-world-splitter-settings.md)
 - [Global App Storage](global-app-storage.md)
