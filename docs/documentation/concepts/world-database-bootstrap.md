@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 Committed worlds need durable storage that belongs to one world at a time. Keeping world data in `world.sqlite` inside the UUID world folder makes each world easier to inspect, export, migrate, and recover independently from the global app database.
 
-The bootstrap is intentionally minimal. It establishes the database file, schema versioning, and a small metadata table so future source records, chunks, embeddings, graph records, and ingestion state can be added through explicit world database migrations.
+The bootstrap is intentionally narrow. It establishes the database file, schema versioning, migration runner, and baseline metadata table so world-scoped storage systems can add their own tables through explicit world database migrations.
 
 ## Ownership Boundary
 
@@ -20,7 +20,7 @@ World Database Bootstrap owns:
 - Returning SQLite connections configured with row access by column name.
 - Reading and writing per-world schema version through `PRAGMA user_version`.
 - Applying ordered handwritten world database migrations.
-- Creating the minimal world metadata bootstrap schema.
+- Creating the world metadata bootstrap schema.
 - Logging world database creation, opening, migrations, failed opens, failed migrations, and corrupted database opens.
 
 World Database Bootstrap does not own:
@@ -28,7 +28,7 @@ World Database Bootstrap does not own:
 - Creating committed world index records.
 - Looking up worlds by display name.
 - Draft world persistence.
-- Defining source, chunk, embedding, graph, parser, or ingestion tables beyond the bootstrap metadata table.
+- Owning splitter settings, source, chunk, embedding, graph, parser, or ingestion table behavior.
 - Copying source files into `sources/`.
 - Global app database migrations or default app data seeding.
 - UI, World Hub behavior, Customize behavior, retrieval, or chat behavior.
@@ -47,7 +47,7 @@ World Database Bootstrap receives a `world_id` string. It does not receive displ
 
 ## Outputs
 
-The system creates or opens `world.sqlite` under ignored user-owned storage and returns a `sqlite3.Connection`. The bootstrap migration creates `world_metadata`; it does not create source records, chunks, embeddings, graph records, manifests, or UI state.
+The system creates or opens `world.sqlite` under ignored user-owned storage and returns a `sqlite3.Connection`. World migrations may create tables owned by separate world-scoped storage systems; the bootstrap itself does not create source records, chunks, embeddings, graph records, manifests, or UI state.
 
 ## Failure Behavior
 
@@ -60,9 +60,10 @@ World Database Bootstrap currently interacts with:
 - Committed World Folder Bootstrap, which validates UUID world IDs and resolves committed world folders.
 - Global App Storage by following the same SQLite and handwritten migration strategy while keeping world content out of `app.sqlite`.
 - Committed World Index Storage, which produces stable committed world IDs that callers can pass into world database helpers.
+- World Splitter Settings Storage, which owns the splitter settings table created by a world database migration.
 - The central logger, which records world database lifecycle and failure events.
 
-Future ingestion, graph, retrieval, and chat systems may use this bootstrap to reach their world-scoped storage, but they should add their own tables through world database migrations instead of mixing world content into the global app database.
+Future ingestion, graph, retrieval, and chat systems may use this bootstrap to reach their world-scoped storage, but each system should own its table behavior and add schema through world database migrations instead of mixing world content into the global app database.
 
 ## Current Edge Cases
 
@@ -74,6 +75,7 @@ Internal edge cases:
 - Missing `world.sqlite` files are created by SQLite when opened.
 - Existing world databases are opened and migrated instead of recreated.
 - Already-applied migrations are skipped by comparing against `PRAGMA user_version`.
+- World-scoped feature tables can be added by ordered world migrations without moving their repository behavior into the bootstrap module.
 - Failed world migrations roll back before the error leaves the migration runner.
 - Corrupted world database opens are treated as unrecoverable and logged at `CRITICAL`.
 
@@ -82,6 +84,7 @@ Cross-system edge cases:
 - The global database must not receive world content tables just because it already has SQLite helpers.
 - Committed world renames must not move or rename the UUID folder or `world.sqlite`.
 - Source file storage may use the sibling `sources/` folder, but it must not add source records without a world database migration.
+- World Splitter Settings Storage may use a world migration for its table, but the bootstrap must not own settings creation, reading, or locking.
 - Future ingestion and graph systems must keep their tables inside the relevant world database, not in `app.sqlite`.
 - Logs must avoid local absolute paths and display names.
 
@@ -93,7 +96,7 @@ Cross-system edge cases:
 - World database migrations must be separate from global app database migrations.
 - Schema version must come from `PRAGMA user_version`.
 - A migration must not advance `user_version` unless its schema changes completed successfully.
-- The bootstrap schema must stay minimal until accepted feature work adds specific world tables.
+- World-scoped feature tables must be added through accepted feature work and explicit world migrations.
 - World content must remain outside `app.sqlite`.
 
 ## Implementation Landmarks

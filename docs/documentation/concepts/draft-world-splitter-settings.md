@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 VySol needs draft worlds to start with agreed splitter settings before the recursive text splitter, Ingestion tab, and full commit flow exist. The settings are available to backend code as character counts, and validation gives future Start or Resume flows a backend-owned gate before parsing, splitting, source copying, or commit work begins.
 
-The boundary matters because uncommitted draft worlds are temporary setup state. They must not become committed worlds, app-wide settings, migrations, source records, chunk records, or hidden database rows just because the backend needs a place to hold defaults.
+The boundary matters because uncommitted draft worlds are temporary setup state. They must not become committed worlds, app-wide settings, migrations, source records, chunk records, or hidden database rows just because the backend needs a place to hold defaults. Committed-world splitter settings are handled by a separate world database storage contract.
 
 ## Ownership Boundary
 
@@ -29,8 +29,8 @@ Draft World Splitter Settings does not own:
 - HTTP routes or UI behavior.
 - Recursive text splitting.
 - Ingestion source records, chunk records, embeddings, graph records, or provider calls.
-- Locking, normalizing, correcting, or persisting splitter settings.
-- Persisting draft worlds or committed splitter settings.
+- Locking, normalizing, correcting, or persisting draft splitter settings.
+- Persisting draft worlds or owning committed splitter settings storage.
 - Creating committed world index records.
 - Database migrations or schema changes.
 
@@ -38,13 +38,13 @@ Draft World Splitter Settings does not own:
 
 Backend code creates a new draft world through the draft-world registry. The registry creates default splitter settings, generates a draft ID, stores the draft world in memory, and returns it to the caller.
 
-The default settings are `chunk_size` `4000`, `max_lookback_size` `1000`, `overlap_size` `400`, and `splitter_version` `"1"`. The size values are plain integer character counts. The splitter version is string metadata that identifies the current splitter behavior for future locked settings or chunk metadata. No byte counting, token counting, source parsing, or splitter execution happens in this system.
+The default settings are `chunk_size` `4000`, `max_lookback_size` `1000`, `overlap_size` `400`, and `splitter_version` `"1"`. The size values are plain integer character counts. The splitter version is string metadata that can also seed committed-world splitter settings storage. No byte counting, token counting, source parsing, or splitter execution happens in this system.
 
 Before a future successful commit, backend code may replace the draft splitter settings in memory. Updates still store replacement values exactly as provided so draft editing can stay separate from use-time validation. When a future Start or Resume flow is ready to process staged ingestion work, it should validate the current settings first and reject invalid settings before any parsing, splitting, source copying, or commit work begins.
 
 Validation accepts whole-number character counts only. `chunk_size` must be at least `1`, `max_lookback_size` must be at least `0` and less than `chunk_size`, and `overlap_size` must be at least `0`. `splitter_version` must be a non-empty string. Overlap can be larger than chunk size because future splitting behavior may use it independently from the fixed chunk priority.
 
-After a future commit or discard action, the draft-world registry can remove the draft so the temporary settings are no longer available.
+After a future commit or discard action, the draft-world registry can remove the draft so the temporary settings are no longer available. Persisting and locking committed-world splitter settings happens outside this draft registry boundary.
 
 ## Inputs
 
@@ -59,11 +59,12 @@ The system returns in-memory draft-world objects and splitter-setting objects to
 Draft World Splitter Settings currently interacts with:
 
 - The central logger, which records default initialization failures, validation rejections, validation diagnostics, and unexpected validation failures.
+- World Splitter Settings Storage, which can reuse the default splitter values when committed settings are created in `world.sqlite`.
 - Future Ingestion tab or ingestion setup code, which can read and update the draft settings once an HTTP or UI surface exists.
 - Future Start or Resume ingestion code, which should validate settings before it processes staged batches.
 - Future commit or discard flow, which should remove draft state after it no longer represents an uncommitted world.
 
-It must stay separate from Global App Storage and Committed World Index Storage. Draft settings may inform a future commit flow, but this system does not write committed-world records or app database state.
+It must stay separate from Global App Storage and Committed World Index Storage. Draft settings may inform a future commit flow, but this system does not write committed-world records, committed splitter settings, or app database state.
 
 ## Current Edge Cases
 
@@ -88,7 +89,7 @@ Cross-system edge cases:
 - Future Ingestion tab code must treat these settings as setup state, not as proof that splitting has run.
 - Future Start or Resume code must call validation before using settings for staged ingestion work.
 - Future commit code must remove the draft only after a successful commit, not before.
-- Future locking, persistence, or UI-only validation must be added outside this temporary draft-state contract unless that feature explicitly expands the system.
+- Committed-world locking and persistence must stay in World Splitter Settings Storage unless a later feature explicitly changes the boundary.
 
 ## Invariants
 
@@ -98,7 +99,7 @@ Cross-system edge cases:
 - Draft-world state must remain in memory and outside `app/storage`.
 - No database migration is required for uncommitted draft splitter settings.
 - The system must not run the splitter.
-- The system must not lock or persist committed splitter settings.
+- Committed settings locking and persistence must remain outside this draft system.
 - Validation must reject invalid settings without correcting or normalizing them.
 - Validation must keep overlap independent enough to allow values larger than chunk size.
 - Routine create, read, update, and discard behavior must not log success messages.
@@ -115,9 +116,9 @@ Cross-system edge cases:
 
 Before editing Draft World Splitter Settings, check:
 
-- Whether the change is still temporary draft setup state or has become committed-world persistence.
+- Whether the change is still temporary draft setup state or belongs in World Splitter Settings Storage.
 - Whether the recursive splitter is being accidentally introduced into a defaults-only ticket.
-- Whether new locking, normalization, correction, or persistence belongs in a separate feature.
+- Whether new locking, normalization, correction, or persistence belongs in a separate feature or committed storage boundary.
 - Whether any database migration or `app/storage` change would violate the in-memory draft boundary.
 - Whether future ingestion code validates settings before using them for staged batch processing.
 - Whether future commit or discard code removes drafts only after the intended lifecycle event.

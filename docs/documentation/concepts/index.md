@@ -12,3 +12,4 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Draft World Splitter Settings](draft-world-splitter-settings.md)
 - [Global App Storage](global-app-storage.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
+- [World Splitter Settings Storage](world-splitter-settings-storage.md)
