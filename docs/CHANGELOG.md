@@ -6,6 +6,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added world-level splitter settings storage in each world database.
+- Added a World Splitter Settings Storage concept page.
 - Added per-world SQLite bootstrap for committed world databases.
 - Added a World Database Bootstrap concept page.
 - Added UUID-based committed world folder bootstrap under user-owned storage.
