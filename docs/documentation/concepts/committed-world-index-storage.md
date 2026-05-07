@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 VySol needs a durable app-level index of committed worlds before deeper world storage exists. The index lets the backend remember which worlds exist, what display name users chose, optional descriptive text, which background and font asset references belong to the world card or future hub view, and when each committed world was last used.
 
-The index is intentionally separate from future per-world storage. It can point to a committed world and preserve user-facing metadata, but it must not become the place where world content, source text, chunks, graph nodes, graph edges, or ingestion state are stored.
+The index is intentionally separate from per-world storage. It can point to a committed world and preserve user-facing metadata, but it must not become the place where world content, source text, chunks, graph nodes, graph edges, or ingestion state are stored.
 
 ## Ownership Boundary
 
@@ -63,9 +63,10 @@ Committed World Index Storage currently interacts with:
 - Global App Storage, which opens `app.sqlite`, applies migrations, and provides the shared database connection.
 - Asset Metadata Storage by storing background and font asset IDs that refer to known asset records.
 - Committed World Folder Bootstrap by producing UUID world IDs that can be used for committed world folder paths.
+- World Database Bootstrap by producing UUID world IDs that callers can use to open per-world databases.
 - The central logger, which records committed world creation, update, last-used updates, duplicate rejection, missing world IDs, and database failures.
 
-Future World Hub, Customize, Ingestion, chat instance, per-world database, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
+Future World Hub, Customize, Ingestion, chat instance, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
 
 ## Current Edge Cases
 
@@ -119,7 +120,7 @@ Cross-system edge cases:
 
 Before editing Committed World Index Storage, check:
 
-- Whether the change belongs in committed world index metadata or future per-world storage.
+- Whether the change belongs in committed world index metadata or per-world storage.
 - Whether schema changes need a new handwritten migration and `PRAGMA user_version` advance.
 - Whether draft-world behavior is being accidentally persisted here.
 - Whether display-name uniqueness still matches the case-insensitive committed-world rule.

@@ -6,9 +6,9 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs a small global database for app-level state before world-specific storage exists. The global database gives startup a known place to create, open, version, and migrate app-wide data without mixing per-world content into future per-world databases.
+VySol needs a small global database for app-level state that stays separate from world-specific storage. The global database gives startup a known place to create, open, version, and migrate app-wide data without mixing per-world content into world databases.
 
-This boundary matters because later worlds should be easier to export, inspect, recover, and ingest independently. New tables should be added intentionally through accepted feature work instead of reusing `app.sqlite` just because a SQLite connection already exists.
+This boundary matters because worlds should be easier to export, inspect, recover, and ingest independently. New global tables should be added intentionally through accepted feature work instead of reusing `app.sqlite` just because a SQLite connection already exists.
 
 ## Ownership Boundary
 
@@ -48,11 +48,12 @@ Global App Storage currently interacts with:
 - Backend startup, which initializes storage before the app is considered ready.
 - Asset Metadata Storage, which receives its built-in default asset seeding trigger after migrations complete.
 - Committed World Index Storage, which stores committed world metadata in the global database.
+- World Database Bootstrap, which keeps world-scoped content in per-world databases instead of `app.sqlite`.
 - The health endpoint indirectly, because startup must complete before the backend can serve normally.
 - The launcher, which starts the backend and waits for its health check.
 - Future global app systems, such as settings or additional hub metadata.
 
-It must stay separate from future per-world storage. The global database may point to committed worlds or store app-level metadata about them, but it should not become the storage location for world content itself.
+It must stay separate from per-world storage. The global database may point to committed worlds or store app-level metadata about them, but it should not become the storage location for world content itself.
 
 ## Current Edge Cases
 
@@ -72,7 +73,7 @@ Cross-system edge cases:
 - Backend startup treats unrecoverable database bootstrap failure as a startup failure.
 - Default data seeding must run only after migrations create the tables it depends on.
 - The launcher can report backend readiness only after database bootstrap succeeds.
-- Committed world indexes may live in the global database, but future per-world content must not silently reuse it.
+- Committed world indexes may live in the global database, but per-world content must not silently reuse it.
 
 ## Invariants
 
@@ -97,7 +98,7 @@ Cross-system edge cases:
 
 Before editing Global App Storage, check:
 
-- Whether the change belongs in global app storage or future per-world storage.
+- Whether the change belongs in global app storage or per-world storage.
 - Whether a new migration is needed and whether it advances `PRAGMA user_version`.
 - Whether new default data belongs in idempotent seed logic after migrations rather than in a schema migration.
 - Whether startup still fails loudly on unrecoverable database setup problems.

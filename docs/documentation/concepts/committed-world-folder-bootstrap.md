@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 Committed worlds need a stable storage location that does not change when a user renames a world. Display names are user-facing metadata, while world IDs are stable storage identifiers. Keeping folder paths based on UUID world IDs lets future systems add source files, per-world databases, chunks, and graph state without coupling stored files to mutable display names.
 
-The folder bootstrap is intentionally small. It creates only the committed world's root folder and its `sources/` child folder so later world-scoped storage can build on a stable boundary without creating per-world content early.
+The folder bootstrap is intentionally small. It creates only the committed world's root folder and its `sources/` child folder so world-scoped systems can build on a stable boundary without making folder bootstrap responsible for their content.
 
 ## Ownership Boundary
 
@@ -53,10 +53,11 @@ Committed World Folder Bootstrap currently interacts with:
 
 - Global App Storage path helpers, which define the repo-local `user/` storage root.
 - Committed World Index Storage, which creates and stores UUID world IDs that can be used by folder helpers.
+- World Database Bootstrap, which uses committed world folders as the location for `world.sqlite`.
 - Draft World Splitter Settings, which must remain in-memory and must not create committed world folders.
 - The central logger, which records successful folder creation and filesystem failures.
 
-Future ingestion, source storage, per-world database, graph, and retrieval systems may use these helpers to find world-scoped storage, but they should keep their own file and database responsibilities separate.
+Ingestion, source storage, per-world database, graph, and retrieval systems may use these helpers to find world-scoped storage, but they should keep their own file and database responsibilities separate.
 
 ## Current Edge Cases
 
@@ -74,7 +75,7 @@ Cross-system edge cases:
 - Draft world creation must not create `user/worlds/`.
 - Committed World Index Storage owns world record creation; this system only uses world IDs.
 - Future rename flows must update display-name metadata without moving folders.
-- Future source-copy and ingestion flows must use `sources/` without creating `world.sqlite`, chunks, graph records, or other per-world state as part of this bootstrap.
+- Source-copy and ingestion flows must use `sources/` without creating `world.sqlite`, chunks, graph records, or other per-world state as part of folder bootstrap.
 - Future code must not pass user-provided display names into path helpers.
 
 ## Invariants
