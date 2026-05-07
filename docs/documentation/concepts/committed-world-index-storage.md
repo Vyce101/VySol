@@ -1,6 +1,6 @@
 # Committed World Index Storage
 
-Committed World Index Storage is VySol's app-level record system for worlds that have been committed by the backend. It stores world index metadata in `user/data/app.sqlite` so backend systems can create, read, update, mark as used, and list committed worlds without creating world folders, per-world databases, source records, chunk records, graph records, or UI state.
+Committed World Index Storage is VySol's app-level record system for worlds that have been committed by the backend. It stores world index metadata in `user/data/app.sqlite` so backend systems can create, read, update, mark as used, and list committed worlds without owning world folders, per-world databases, source records, chunk records, graph records, or UI state.
 
 This page is for developers, power users, and AI coding agents that need to understand the committed-world index contract before changing world creation, storage migrations, asset selection, future World Hub behavior, or per-world storage boundaries.
 
@@ -31,7 +31,7 @@ Committed World Index Storage owns:
 Committed World Index Storage does not own:
 
 - Draft world persistence.
-- World folders.
+- World folder creation or path resolution.
 - Per-world databases.
 - Source records, chunk records, graph records, or ingestion state.
 - Asset metadata creation, upload handling, file copying, or physical asset validation.
@@ -62,9 +62,10 @@ Committed World Index Storage currently interacts with:
 
 - Global App Storage, which opens `app.sqlite`, applies migrations, and provides the shared database connection.
 - Asset Metadata Storage by storing background and font asset IDs that refer to known asset records.
+- Committed World Folder Bootstrap by producing UUID world IDs that can be used for committed world folder paths.
 - The central logger, which records committed world creation, update, last-used updates, duplicate rejection, missing world IDs, and database failures.
 
-Future World Hub, Customize, Ingestion, chat instance, world folder, per-world database, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
+Future World Hub, Customize, Ingestion, chat instance, per-world database, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
 
 ## Current Edge Cases
 
@@ -89,6 +90,7 @@ Cross-system edge cases:
 
 - Draft worlds must not be written to the committed world index.
 - Asset references are stored as IDs only; this system must not assume a physical asset file exists.
+- Committed world folder paths must be handled by Committed World Folder Bootstrap, not by display-name logic in this system.
 - Logs must not include sensitive local paths.
 - Last-used logs must keep world IDs and timestamps at `DEBUG` when those details are useful.
 - Future Customize, Ingestion, and chat instance flows should use the shared mark-used behavior instead of duplicating timestamp SQL.

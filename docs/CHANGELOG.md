@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added UUID-based committed world folder bootstrap under user-owned storage.
 - Added splitter version metadata to draft world splitter settings.
 - Added backend checks that reject invalid draft world splitter settings before future ingestion uses them.
 - Added in-memory draft world splitter defaults for uncommitted ingestion setup.
