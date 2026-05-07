@@ -46,7 +46,7 @@ class WorldDatabaseBootstrapTests(unittest.TestCase):
     def test_bootstrap_applies_world_schema_version(self) -> None:
         with patched_repo_root():
             with close_after_test(bootstrap_world_database(str(uuid4()))) as connection:
-                self.assertEqual(get_world_schema_version(connection), 1)
+                self.assertEqual(get_world_schema_version(connection), 2)
 
     def test_bootstrap_returns_usable_row_connection(self) -> None:
         with patched_repo_root():
@@ -65,7 +65,7 @@ class WorldDatabaseBootstrapTests(unittest.TestCase):
     def test_open_world_database_uses_world_id_helper(self) -> None:
         with patched_repo_root():
             with close_after_test(open_world_database(str(uuid4()))) as connection:
-                self.assertEqual(get_world_schema_version(connection), 1)
+                self.assertEqual(get_world_schema_version(connection), 2)
 
     def test_existing_world_database_opens_without_reapplying_migration(self) -> None:
         with patched_repo_root():
@@ -84,7 +84,7 @@ class WorldDatabaseBootstrapTests(unittest.TestCase):
                 ).fetchone()
 
                 self.assertEqual(row["value"], "kept")
-                self.assertEqual(get_world_schema_version(connection), 1)
+                self.assertEqual(get_world_schema_version(connection), 2)
 
     def test_helpers_accept_only_world_id_argument(self) -> None:
         helper_functions = (
