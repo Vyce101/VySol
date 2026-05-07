@@ -16,6 +16,7 @@ Draft World Splitter Settings owns:
 
 - Creating default splitter settings for a new draft world.
 - Treating splitter values as character counts.
+- Attaching the current splitter version metadata to default splitter settings.
 - Holding draft splitter settings in process memory.
 - Reading an in-memory draft world by draft ID.
 - Updating in-memory draft splitter settings without forcing validation at update time.
@@ -37,11 +38,11 @@ Draft World Splitter Settings does not own:
 
 Backend code creates a new draft world through the draft-world registry. The registry creates default splitter settings, generates a draft ID, stores the draft world in memory, and returns it to the caller.
 
-The default settings are `chunk_size` `4000`, `max_lookback_size` `1000`, and `overlap_size` `400`. These values are plain integer character counts. No byte counting, token counting, source parsing, or splitter execution happens in this system.
+The default settings are `chunk_size` `4000`, `max_lookback_size` `1000`, `overlap_size` `400`, and `splitter_version` `"1"`. The size values are plain integer character counts. The splitter version is string metadata that identifies the current splitter behavior for future locked settings or chunk metadata. No byte counting, token counting, source parsing, or splitter execution happens in this system.
 
 Before a future successful commit, backend code may replace the draft splitter settings in memory. Updates still store replacement values exactly as provided so draft editing can stay separate from use-time validation. When a future Start or Resume flow is ready to process staged ingestion work, it should validate the current settings first and reject invalid settings before any parsing, splitting, source copying, or commit work begins.
 
-Validation accepts whole-number character counts only. `chunk_size` must be at least `1`, `max_lookback_size` must be at least `0` and less than `chunk_size`, and `overlap_size` must be at least `0`. Overlap can be larger than chunk size because future splitting behavior may use it independently from the fixed chunk priority.
+Validation accepts whole-number character counts only. `chunk_size` must be at least `1`, `max_lookback_size` must be at least `0` and less than `chunk_size`, and `overlap_size` must be at least `0`. `splitter_version` must be a non-empty string. Overlap can be larger than chunk size because future splitting behavior may use it independently from the fixed chunk priority.
 
 After a future commit or discard action, the draft-world registry can remove the draft so the temporary settings are no longer available.
 
@@ -73,8 +74,9 @@ Internal edge cases:
 - Discarding a missing draft ID returns no draft world.
 - Replacement splitter settings are stored without correction.
 - Validation rejects non-integer, boolean, negative, too-small, and incompatible lookback settings.
+- Validation rejects missing, empty, or non-string splitter versions.
 - Validation allows overlap to be larger than chunk size.
-- Expected validation rejections are logged at `WARNING`, with numeric setting values logged only at `DEBUG`.
+- Expected validation rejections are logged at `WARNING`, with setting values and splitter version logged only at `DEBUG`.
 - Unexpected validation failures are logged at `ERROR` and re-raised.
 - Default initialization failures are logged at `ERROR` and re-raised.
 - Failed default initialization must not leave a partial draft world in memory.
@@ -92,6 +94,7 @@ Cross-system edge cases:
 
 - New draft worlds must start with the agreed splitter defaults.
 - Splitter values must be treated as character counts.
+- The splitter version must remain string metadata, not a numeric setting.
 - Draft-world state must remain in memory and outside `app/storage`.
 - No database migration is required for uncommitted draft splitter settings.
 - The system must not run the splitter.
