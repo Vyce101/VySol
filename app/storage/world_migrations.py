@@ -25,11 +25,32 @@ def apply_world_metadata_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def apply_world_splitter_settings_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS world_splitter_settings (
+            settings_id INTEGER PRIMARY KEY CHECK (settings_id = 1),
+            chunk_size INTEGER NOT NULL CHECK (chunk_size >= 1),
+            max_lookback_size INTEGER NOT NULL CHECK (max_lookback_size >= 0),
+            overlap_size INTEGER NOT NULL CHECK (overlap_size >= 0),
+            splitter_version TEXT NOT NULL CHECK (length(trim(splitter_version)) > 0),
+            is_locked INTEGER NOT NULL CHECK (is_locked IN (0, 1)),
+            CHECK (max_lookback_size < chunk_size)
+        )
+        """
+    )
+
+
 WORLD_MIGRATIONS = (
     WorldMigration(
         version=1,
         name="bootstrap_world_metadata",
         apply=apply_world_metadata_schema,
+    ),
+    WorldMigration(
+        version=2,
+        name="create_world_splitter_settings",
+        apply=apply_world_splitter_settings_schema,
     ),
 )
 
