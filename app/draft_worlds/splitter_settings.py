@@ -6,6 +6,7 @@ from app.logger import get_logger
 DEFAULT_CHUNK_SIZE = 4000
 DEFAULT_MAX_LOOKBACK_SIZE = 1000
 DEFAULT_OVERLAP_SIZE = 400
+CURRENT_SPLITTER_VERSION = "1"
 
 logger = get_logger()
 
@@ -19,6 +20,7 @@ class SplitterSettings:
     chunk_size: int
     max_lookback_size: int
     overlap_size: int
+    splitter_version: str
 
 
 def create_default_splitter_settings() -> SplitterSettings:
@@ -26,6 +28,7 @@ def create_default_splitter_settings() -> SplitterSettings:
         chunk_size=DEFAULT_CHUNK_SIZE,
         max_lookback_size=DEFAULT_MAX_LOOKBACK_SIZE,
         overlap_size=DEFAULT_OVERLAP_SIZE,
+        splitter_version=CURRENT_SPLITTER_VERSION,
     )
 
 
@@ -33,12 +36,14 @@ def validate_splitter_settings(
     splitter_settings: SplitterSettings,
 ) -> SplitterSettings:
     try:
+        splitter_version = getattr(splitter_settings, "splitter_version", None)
         logger.debug(
             "Validating splitter settings: chunk_size=%s max_lookback_size=%s "
-            "overlap_size=%s",
+            "overlap_size=%s splitter_version=%s",
             splitter_settings.chunk_size,
             splitter_settings.max_lookback_size,
             splitter_settings.overlap_size,
+            splitter_version,
         )
         require_whole_number(splitter_settings.chunk_size, "Chunk size")
         require_whole_number(
@@ -46,6 +51,7 @@ def validate_splitter_settings(
             "Max lookback size",
         )
         require_whole_number(splitter_settings.overlap_size, "Overlap size")
+        require_non_empty_text(splitter_version, "Splitter version")
         require_minimum_chunk_size(splitter_settings.chunk_size)
         require_minimum_max_lookback_size(splitter_settings.max_lookback_size)
         require_max_lookback_less_than_chunk_size(
@@ -67,6 +73,13 @@ def require_whole_number(value: int, field_name: str) -> None:
         return
 
     reject_invalid_splitter_settings(f"{field_name} must be a whole number.")
+
+
+def require_non_empty_text(value: str | None, field_name: str) -> None:
+    if type(value) is str and value.strip():
+        return
+
+    reject_invalid_splitter_settings(f"{field_name} is required.")
 
 
 def require_minimum_chunk_size(chunk_size: int) -> None:
