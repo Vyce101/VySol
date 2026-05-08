@@ -4,6 +4,10 @@ All notable changes to VySol will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Hardened world splitter settings storage so locked settings stay unchanged and splitter version stays backend-controlled.
+
 ### Added
 
 - Added world-level splitter settings storage in each world database.
