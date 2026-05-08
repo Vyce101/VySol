@@ -2,7 +2,12 @@ from dataclasses import dataclass
 import sqlite3
 from typing import Any
 
-from app.draft_worlds.splitter_settings import create_default_splitter_settings
+from app.draft_worlds.splitter_settings import (
+    CURRENT_SPLITTER_VERSION,
+    SplitterSettings,
+    create_default_splitter_settings,
+    validate_splitter_settings,
+)
 from app.logger import get_logger
 
 logger = get_logger()
@@ -68,8 +73,67 @@ def create_default_world_splitter_settings(
 def get_world_splitter_settings(
     connection: sqlite3.Connection,
 ) -> StoredWorldSplitterSettings | None:
+    rows = get_world_splitter_setting_rows(connection)
+
+    if not rows:
+        logger.error("Missing world splitter settings.")
+        return None
+
+    return stored_world_splitter_settings_from_rows(rows)
+
+
+def save_world_splitter_settings(
+    connection: sqlite3.Connection,
+    splitter_settings: SplitterSettings,
+) -> StoredWorldSplitterSettings | None:
+    candidate_settings = SplitterSettings(
+        chunk_size=splitter_settings.chunk_size,
+        max_lookback_size=splitter_settings.max_lookback_size,
+        overlap_size=splitter_settings.overlap_size,
+        splitter_version=CURRENT_SPLITTER_VERSION,
+    )
+    validated_settings = validate_splitter_settings(candidate_settings)
+    requested_settings = StoredWorldSplitterSettings(
+        chunk_size=validated_settings.chunk_size,
+        max_lookback_size=validated_settings.max_lookback_size,
+        overlap_size=validated_settings.overlap_size,
+        splitter_version=validated_settings.splitter_version,
+        is_locked=False,
+    )
+    existing_rows = get_world_splitter_setting_rows(connection)
+
+    if not existing_rows:
+        return insert_world_splitter_settings(connection, requested_settings)
+
+    existing_settings = stored_world_splitter_settings_from_rows(existing_rows)
+    if existing_settings is None:
+        return None
+
+    stored_settings = StoredWorldSplitterSettings(
+        chunk_size=requested_settings.chunk_size,
+        max_lookback_size=requested_settings.max_lookback_size,
+        overlap_size=requested_settings.overlap_size,
+        splitter_version=existing_settings.splitter_version,
+        is_locked=False,
+    )
+
+    if not existing_settings.is_locked:
+        return update_world_splitter_settings(connection, stored_settings)
+
+    if has_same_numeric_splitter_setting_values(existing_settings, stored_settings):
+        return existing_settings
+
+    logger.warning("Rejected locked world splitter settings update.")
+    log_splitter_settings_debug(existing_settings)
+    log_splitter_settings_debug(stored_settings)
+    return existing_settings
+
+
+def get_world_splitter_setting_rows(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
     try:
-        rows = connection.execute(
+        return connection.execute(
             """
             SELECT
                 chunk_size,
@@ -84,10 +148,10 @@ def get_world_splitter_settings(
         logger.error("Failed to read world splitter settings.", exc_info=True)
         raise
 
-    if not rows:
-        logger.error("Missing world splitter settings.")
-        return None
 
+def stored_world_splitter_settings_from_rows(
+    rows: list[sqlite3.Row],
+) -> StoredWorldSplitterSettings | None:
     if len(rows) != 1:
         logger.error("Invalid world splitter settings state.")
         return None
@@ -100,12 +164,88 @@ def get_world_splitter_settings(
     return stored_settings
 
 
+def insert_world_splitter_settings(
+    connection: sqlite3.Connection,
+    stored_settings: StoredWorldSplitterSettings,
+) -> StoredWorldSplitterSettings:
+    try:
+        connection.execute(
+            """
+            INSERT INTO world_splitter_settings (
+                settings_id,
+                chunk_size,
+                max_lookback_size,
+                overlap_size,
+                splitter_version,
+                is_locked
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                SETTINGS_ID,
+                stored_settings.chunk_size,
+                stored_settings.max_lookback_size,
+                stored_settings.overlap_size,
+                stored_settings.splitter_version,
+                UNLOCKED,
+            ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        logger.error("Failed to save world splitter settings.", exc_info=True)
+        raise
+
+    log_splitter_settings_debug(stored_settings)
+    return stored_settings
+
+
+def update_world_splitter_settings(
+    connection: sqlite3.Connection,
+    stored_settings: StoredWorldSplitterSettings,
+) -> StoredWorldSplitterSettings | None:
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE world_splitter_settings
+            SET
+                chunk_size = ?,
+                max_lookback_size = ?,
+                overlap_size = ?,
+                splitter_version = ?
+            WHERE settings_id = ?
+            """,
+            (
+                stored_settings.chunk_size,
+                stored_settings.max_lookback_size,
+                stored_settings.overlap_size,
+                stored_settings.splitter_version,
+                SETTINGS_ID,
+            ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        logger.error("Failed to save world splitter settings.", exc_info=True)
+        raise
+
+    if cursor.rowcount != 1:
+        logger.error("Missing world splitter settings.")
+        return None
+
+    log_splitter_settings_debug(stored_settings)
+    return stored_settings
+
+
 def lock_world_splitter_settings(
     connection: sqlite3.Connection,
 ) -> StoredWorldSplitterSettings | None:
     existing_settings = get_world_splitter_settings(connection)
     if existing_settings is None:
         return None
+
+    if existing_settings.is_locked:
+        return existing_settings
 
     try:
         cursor = connection.execute(
@@ -136,6 +276,17 @@ def lock_world_splitter_settings(
     logger.info("Locked world splitter settings.")
     log_splitter_settings_debug(locked_settings)
     return locked_settings
+
+
+def has_same_numeric_splitter_setting_values(
+    first_settings: StoredWorldSplitterSettings,
+    second_settings: StoredWorldSplitterSettings,
+) -> bool:
+    return (
+        first_settings.chunk_size == second_settings.chunk_size
+        and first_settings.max_lookback_size == second_settings.max_lookback_size
+        and first_settings.overlap_size == second_settings.overlap_size
+    )
 
 
 def world_splitter_settings_from_row(
