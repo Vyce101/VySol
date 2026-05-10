@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import sqlite3
 from typing import NoReturn
 from uuid import uuid4
@@ -8,7 +8,7 @@ from app.logger import get_logger
 from app.storage.database import get_global_connection
 
 logger = get_logger()
-LAST_USED_AT_FORMAT = "%d-%m-%Y %H:%M:%S"
+LAST_USED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class CommittedWorldValidationError(ValueError):
@@ -242,10 +242,7 @@ def list_committed_worlds_by_recent_use(
                 last_used_at
             FROM worlds
             ORDER BY
-                substr(last_used_at, 7, 4) DESC,
-                substr(last_used_at, 4, 2) DESC,
-                substr(last_used_at, 1, 2) DESC,
-                substr(last_used_at, 12, 8) DESC,
+                last_used_at DESC,
                 display_name_key,
                 world_id
             """
@@ -388,7 +385,10 @@ def get_display_name_key(display_name: str) -> str:
 
 
 def get_last_used_at_timestamp(used_at: datetime | None = None) -> str:
-    timestamp = used_at if used_at is not None else datetime.now()
+    timestamp = used_at if used_at is not None else datetime.now(timezone.utc)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+
     return timestamp.strftime(LAST_USED_AT_FORMAT)
 
 
