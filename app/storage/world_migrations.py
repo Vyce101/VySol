@@ -41,6 +41,22 @@ def apply_world_splitter_settings_schema(connection: sqlite3.Connection) -> None
     )
 
 
+def apply_committed_sources_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS committed_sources (
+            source_id TEXT PRIMARY KEY CHECK (length(trim(source_id)) > 0),
+            original_filename TEXT NOT NULL CHECK (length(trim(original_filename)) > 0),
+            stored_path TEXT NOT NULL CHECK (length(trim(stored_path)) > 0),
+            source_file_type TEXT NOT NULL CHECK (length(trim(source_file_type)) > 0),
+            source_hash TEXT NOT NULL CHECK (length(trim(source_hash)) > 0),
+            book_number INTEGER NOT NULL UNIQUE CHECK (book_number >= 1),
+            committed_at TEXT NOT NULL CHECK (length(trim(committed_at)) > 0)
+        )
+        """
+    )
+
+
 WORLD_MIGRATIONS = (
     WorldMigration(
         version=1,
@@ -51,6 +67,11 @@ WORLD_MIGRATIONS = (
         version=2,
         name="create_world_splitter_settings",
         apply=apply_world_splitter_settings_schema,
+    ),
+    WorldMigration(
+        version=3,
+        name="create_committed_sources",
+        apply=apply_committed_sources_schema,
     ),
 )
 
