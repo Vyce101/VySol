@@ -22,7 +22,7 @@ from app.storage.worlds import (
     update_committed_world,
 )
 
-LAST_USED_AT_FORMAT = "%d-%m-%Y %H:%M:%S"
+LAST_USED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class CommittedWorldStorageTests(unittest.TestCase):
@@ -168,7 +168,7 @@ class CommittedWorldStorageTests(unittest.TestCase):
         with bootstrap_test_database() as connection:
             with patch(
                 "app.storage.worlds.get_last_used_at_timestamp",
-                side_effect=("01-01-2026 10:00:00", "02-01-2026 11:00:00"),
+                side_effect=("2026-01-01 10:00:00", "2026-01-02 11:00:00"),
             ):
                 created_world = create_committed_world(
                     NewCommittedWorld(
@@ -188,8 +188,8 @@ class CommittedWorldStorageTests(unittest.TestCase):
                     connection,
                 )
 
-            self.assertEqual(created_world.last_used_at, "01-01-2026 10:00:00")
-            self.assertEqual(updated_world.last_used_at, "02-01-2026 11:00:00")
+            self.assertEqual(created_world.last_used_at, "2026-01-01 10:00:00")
+            self.assertEqual(updated_world.last_used_at, "2026-01-02 11:00:00")
 
     def test_marks_committed_world_as_used(self) -> None:
         with bootstrap_test_database() as connection:
@@ -209,7 +209,7 @@ class CommittedWorldStorageTests(unittest.TestCase):
             )
 
             self.assertEqual(updated_world.world_id, created_world.world_id)
-            self.assertEqual(updated_world.last_used_at, "03-02-2026 04:05:06")
+            self.assertEqual(updated_world.last_used_at, "2026-02-03 04:05:06")
             self.assertEqual(
                 get_committed_world(created_world.world_id, connection),
                 updated_world,
