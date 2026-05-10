@@ -33,7 +33,7 @@ class WorldSplitterSettingsStorageTests(unittest.TestCase):
             ).fetchone()
 
             self.assertIsNotNone(table)
-            self.assertEqual(get_world_schema_version(connection), 2)
+            self.assertEqual(get_world_schema_version(connection), 3)
         finally:
             connection.close()
 
