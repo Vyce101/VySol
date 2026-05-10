@@ -25,7 +25,7 @@ Committed World Index Storage owns:
 - Rejecting case-insensitive duplicate display names.
 - Storing optional descriptions.
 - Storing selected background and font asset references as asset ID strings.
-- Storing `last_used_at` timestamps in `DD-MM-YYYY HH:MM:SS` format.
+- Storing `last_used_at` timestamps in UTC ISO `YYYY-MM-DD HH:MM:SS` format.
 - Logging committed world creation, update, last-used updates, duplicate-name rejection, missing world IDs, and database failures.
 
 Committed World Index Storage does not own:
@@ -80,7 +80,7 @@ Internal edge cases:
 - Created committed worlds receive a `last_used_at` timestamp before insert.
 - Committed world metadata updates refresh `last_used_at`.
 - Explicit mark-used calls update only `last_used_at`.
-- Recent-use listing sorts `DD-MM-YYYY HH:MM:SS` timestamps chronologically instead of relying on naive text ordering.
+- Recent-use listing sorts UTC ISO timestamps by natural SQLite text order.
 - Missing world IDs return no record instead of creating one.
 - Updating a missing world ID returns no record before duplicate-name checks.
 - Marking a missing world ID as used returns no record and logs an error.
@@ -104,8 +104,8 @@ Cross-system edge cases:
 - Display-name uniqueness must be enforced case-insensitively through the normalized key.
 - `description` must remain optional.
 - Background and font asset references must be non-empty asset ID strings.
-- `last_used_at` must be stored as a zero-padded `DD-MM-YYYY HH:MM:SS` string.
-- Recent-use ordering must sort by chronological meaning of `last_used_at`, not by raw text order.
+- `last_used_at` must be stored as a zero-padded UTC ISO `YYYY-MM-DD HH:MM:SS` string.
+- Recent-use ordering must sort by the natural text order of the UTC ISO timestamp.
 - Draft worlds must remain outside this storage system.
 - Per-world content must remain outside `app.sqlite`.
 - Feature modules must use the central database helper instead of opening separate app database connections ad hoc.
@@ -125,7 +125,7 @@ Before editing Committed World Index Storage, check:
 - Whether draft-world behavior is being accidentally persisted here.
 - Whether display-name uniqueness still matches the case-insensitive committed-world rule.
 - Whether `last_used_at` is refreshed only for committed-world use signals and not for unrelated storage reads.
-- Whether recent-use sorting still handles the day-month-year timestamp format correctly.
+- Whether recent-use sorting still relies on UTC ISO timestamp text order correctly.
 - Whether logs avoid sensitive local paths and other user-owned details.
 - Whether database failures are logged and re-raised without swallowing the original error.
 - Whether tests cover create, read, update, list, mark-used behavior, recent-use ordering, duplicate rejection, migration backfill, and database failure behavior.

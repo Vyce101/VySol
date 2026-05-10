@@ -60,10 +60,11 @@ World Database Bootstrap currently interacts with:
 - Committed World Folder Bootstrap, which validates UUID world IDs and resolves committed world folders.
 - Global App Storage by following the same SQLite and handwritten migration strategy while keeping world content out of `app.sqlite`.
 - Committed World Index Storage, which produces stable committed world IDs that callers can pass into world database helpers.
+- Committed Source Storage, which owns the committed source metadata table created by a world database migration.
 - World Splitter Settings Storage, which owns the splitter settings table created by a world database migration.
 - The central logger, which records world database lifecycle and failure events.
 
-Future ingestion, graph, retrieval, and chat systems may use this bootstrap to reach their world-scoped storage, but each system should own its table behavior and add schema through world database migrations instead of mixing world content into the global app database.
+Committed source, future ingestion, graph, retrieval, and chat systems may use this bootstrap to reach their world-scoped storage, but each system should own its table behavior and add schema through world database migrations instead of mixing world content into the global app database.
 
 ## Current Edge Cases
 
@@ -83,8 +84,9 @@ Cross-system edge cases:
 
 - The global database must not receive world content tables just because it already has SQLite helpers.
 - Committed world renames must not move or rename the UUID folder or `world.sqlite`.
-- Source file storage may use the sibling `sources/` folder, but it must not add source records without a world database migration.
+- Source file storage may use the sibling `sources/` folder, but source metadata rows belong to Committed Source Storage rather than the bootstrap.
 - World Splitter Settings Storage may use a world migration for its table, but the bootstrap must not own settings creation, reading, or locking.
+- Committed Source Storage may use a world migration for its table, but the bootstrap must not own source metadata validation, append, listing, file copy, or source text processing.
 - Future ingestion and graph systems must keep their tables inside the relevant world database, not in `app.sqlite`.
 - Logs must avoid local absolute paths and display names.
 
@@ -110,7 +112,7 @@ Cross-system edge cases:
 
 Before editing World Database Bootstrap, check:
 
-- Whether the change belongs in world database bootstrap or in a future source, ingestion, graph, retrieval, or UI system.
+- Whether the change belongs in world database bootstrap or in committed source, ingestion, graph, retrieval, or UI behavior.
 - Whether new world schema needs a handwritten world database migration.
 - Whether invalid IDs still fail before filesystem or database writes.
 - Whether display names remain out of path resolution and logging.

@@ -6,10 +6,13 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed committed world timestamps to ISO 8601 UTC format for naturally sortable SQLite values.
 - Hardened world splitter settings storage so locked settings stay unchanged and splitter version stays backend-controlled.
 
 ### Added
 
+- Added committed source metadata storage in each world database.
+- Added a Committed Source Storage concept page.
 - Added world-level splitter settings storage in each world database.
 - Added a World Splitter Settings Storage concept page.
 - Added per-world SQLite bootstrap for committed world databases.
