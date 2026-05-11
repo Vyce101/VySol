@@ -9,7 +9,11 @@ from unittest.mock import patch
 from uuid import UUID
 
 from app.storage.database import bootstrap_global_database, close_global_connection
-from app.storage.migrations import apply_migrations, get_schema_version
+from app.storage.migrations import (
+    apply_assets_schema,
+    apply_migrations,
+    get_schema_version,
+)
 from app.storage.worlds import (
     CommittedWorldUpdate,
     DuplicateCommittedWorldDisplayNameError,
@@ -43,7 +47,7 @@ class CommittedWorldStorageTests(unittest.TestCase):
             ).fetchone()
 
             self.assertIsNotNone(table)
-            self.assertEqual(get_schema_version(connection), 4)
+            self.assertEqual(get_schema_version(connection), 5)
         finally:
             connection.close()
 
@@ -51,6 +55,7 @@ class CommittedWorldStorageTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
 
         try:
+            apply_assets_schema(connection)
             connection.execute(
                 """
                 CREATE TABLE worlds (
@@ -97,7 +102,7 @@ class CommittedWorldStorageTests(unittest.TestCase):
                 ("legacy-world-id",),
             ).fetchone()
 
-            self.assertEqual(get_schema_version(connection), 4)
+            self.assertEqual(get_schema_version(connection), 5)
             datetime.strptime(row[0], LAST_USED_AT_FORMAT)
         finally:
             connection.close()

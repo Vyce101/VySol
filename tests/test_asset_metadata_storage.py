@@ -48,7 +48,16 @@ class AssetMetadataStorageTests(unittest.TestCase):
             ).fetchone()
 
             self.assertIsNotNone(table)
-            self.assertEqual(get_schema_version(connection), 4)
+            column = connection.execute(
+                """
+                SELECT name
+                FROM pragma_table_info('assets')
+                WHERE name = 'original_filename'
+                """
+            ).fetchone()
+
+            self.assertIsNotNone(column)
+            self.assertEqual(get_schema_version(connection), 5)
         finally:
             connection.close()
 
@@ -68,6 +77,7 @@ class AssetMetadataStorageTests(unittest.TestCase):
             UUID(created_asset.asset_id)
             self.assertEqual(read_asset, created_asset)
             self.assertIsNone(created_asset.file_hash)
+            self.assertIsNone(created_asset.original_filename)
             self.assertFalse(created_asset.is_user_uploaded)
             self.assertFalse(created_asset.is_deletable)
 
@@ -80,12 +90,14 @@ class AssetMetadataStorageTests(unittest.TestCase):
                     stored_path="user/assets/uploaded_portrait.png",
                     is_built_in=False,
                     file_hash="sha256:example-hash",
+                    original_filename="uploaded_portrait.png",
                 ),
                 connection,
             )
 
             self.assertFalse(created_asset.is_built_in)
             self.assertEqual(created_asset.file_hash, "sha256:example-hash")
+            self.assertEqual(created_asset.original_filename, "uploaded_portrait.png")
             self.assertTrue(created_asset.is_user_uploaded)
             self.assertTrue(created_asset.is_deletable)
 

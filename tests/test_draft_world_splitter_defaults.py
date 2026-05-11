@@ -115,7 +115,7 @@ class DraftWorldSplitterDefaultsTests(unittest.TestCase):
                     """
                 ).fetchone()
 
-                self.assertEqual(get_schema_version(connection), 4)
+                self.assertEqual(get_schema_version(connection), 5)
                 self.assertIsNone(draft_table)
             finally:
                 close_global_connection()
