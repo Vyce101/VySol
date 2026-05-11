@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a backend source parser router for staged TXT, EPUB, and PDF sources.
+- Added a Source Parser Router concept page.
 - Added a backend PDF parser for extracting in-memory text from text-based PDF files.
 - Added a PDF Parser concept page.
 - Added a backend EPUB parser for extracting in-memory text from EPUB files in reading order.
