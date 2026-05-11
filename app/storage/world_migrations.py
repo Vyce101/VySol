@@ -57,6 +57,33 @@ def apply_committed_sources_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def apply_chunks_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            chunk_id TEXT PRIMARY KEY CHECK (length(trim(chunk_id)) > 0),
+            source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+            book_number INTEGER NOT NULL CHECK (book_number >= 1),
+            chunk_number INTEGER NOT NULL CHECK (chunk_number >= 1),
+            chunk_text TEXT NOT NULL CHECK (length(trim(chunk_text)) > 0),
+            overlap_text TEXT NOT NULL,
+            character_start_offset INTEGER CHECK (
+                character_start_offset IS NULL OR character_start_offset >= 0
+            ),
+            character_end_offset INTEGER CHECK (
+                character_end_offset IS NULL OR character_end_offset >= 0
+            ),
+            UNIQUE (book_number, chunk_number),
+            CHECK (
+                character_start_offset IS NULL
+                OR character_end_offset IS NULL
+                OR character_end_offset >= character_start_offset
+            )
+        )
+        """
+    )
+
+
 WORLD_MIGRATIONS = (
     WorldMigration(
         version=1,
@@ -72,6 +99,11 @@ WORLD_MIGRATIONS = (
         version=3,
         name="create_committed_sources",
         apply=apply_committed_sources_schema,
+    ),
+    WorldMigration(
+        version=4,
+        name="create_chunks",
+        apply=apply_chunks_schema,
     ),
 )
 
