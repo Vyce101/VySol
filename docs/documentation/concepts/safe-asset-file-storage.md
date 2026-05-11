@@ -74,6 +74,7 @@ Unsupported original filename path patterns, unusable display names, or unsuppor
 
 Safe Asset File Storage currently interacts with:
 
+- Asset Deletion, which reuses stored path resolution before deleting allowed unused uploaded files.
 - Asset Metadata Storage, by creating uploaded asset metadata and resolving metadata by asset ID.
 - Asset Hash Deduplication, by reusing its SHA-256 hash calculation helper without performing duplicate lookup.
 - Image Upload Validation, by calling it before storing image uploads.
@@ -82,7 +83,7 @@ Safe Asset File Storage currently interacts with:
 - User-owned storage paths, by writing files under the repo-local `user/assets/` area.
 - The central logger, by recording storage success, unsafe path rejection, copy failures, and unsupported filename patterns without exposing raw local paths.
 
-Future deletion and UI systems may call or wrap this system while keeping their own responsibilities separate.
+Future UI systems may call or wrap this system while keeping their own responsibilities separate.
 
 ## Current Edge Cases
 

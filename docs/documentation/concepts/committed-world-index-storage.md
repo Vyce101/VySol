@@ -60,6 +60,7 @@ The system writes committed world index rows into `app.sqlite` and returns commi
 
 Committed World Index Storage currently interacts with:
 
+- Asset Deletion by exposing whether any committed world uses a candidate asset ID before uploaded asset cleanup.
 - Global App Storage, which opens `app.sqlite`, applies migrations, and provides the shared database connection.
 - Asset Metadata Storage by storing background and font asset IDs that refer to known asset records.
 - Committed World Folder Bootstrap by producing UUID world IDs that can be used for committed world folder paths.

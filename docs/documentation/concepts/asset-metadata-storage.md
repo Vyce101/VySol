@@ -61,6 +61,7 @@ The system writes asset metadata rows into `app.sqlite` and returns asset metada
 
 Asset Metadata Storage currently interacts with:
 
+- Asset Deletion, which can remove uploaded asset metadata after checking built-in policy and committed world usage.
 - Asset Hash Deduplication, which can calculate an exact file hash and look for an existing asset ID before callers decide whether to create new metadata.
 - Safe Asset File Storage, which copies uploaded files and creates matching uploaded asset metadata.
 - Global App Storage, which opens `app.sqlite`, applies migrations, and triggers default asset seeding.

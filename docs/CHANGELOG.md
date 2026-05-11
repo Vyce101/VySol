@@ -11,6 +11,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend deletion for unused uploaded assets while protecting built-in and in-use assets.
 - Added backend validation for uploaded font files before they are stored.
 - Added a Font Upload Validation concept page.
 - Added backend validation for uploaded image files before they are stored.
