@@ -14,5 +14,6 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Committed World Index Storage](committed-world-index-storage.md)
 - [Draft World Splitter Settings](draft-world-splitter-settings.md)
 - [Global App Storage](global-app-storage.md)
+- [Safe Asset File Storage](safe-asset-file-storage.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
 - [World Splitter Settings Storage](world-splitter-settings-storage.md)

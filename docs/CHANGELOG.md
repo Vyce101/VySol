@@ -11,6 +11,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added safe backend storage for uploaded image and font asset files.
+- Added a Safe Asset File Storage concept page.
 - Added a backend asset deduplication helper that can identify already-known files before future upload storage creates another asset record.
 - Added an Asset Hash Deduplication concept page.
 - Added chunk storage in each world database with separate book numbers, chunk numbers, and overlap text.

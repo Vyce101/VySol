@@ -6,7 +6,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs a small, reusable way to recognize exact duplicate asset files before future upload storage creates new physical files or new metadata records. The helper keeps hash calculation and duplicate lookup separate from upload validation, file copying, and metadata creation, so those future systems can call it without inheriting extra responsibilities.
+VySol needs a small, reusable way to recognize exact duplicate asset files before callers decide whether to create new physical files or new metadata records. The helper keeps hash calculation and duplicate lookup separate from upload validation, file copying, and metadata creation, so those systems can call it without inheriting extra responsibilities.
 
 This system only compares exact file contents through a cryptographic hash. It does not compare display names, visual similarity, font metadata, or world ownership.
 
@@ -34,7 +34,7 @@ Asset Hash Deduplication does not own:
 
 ## Normal Flow
 
-A future upload or storage system passes a candidate file path to the deduplication helper before final asset acceptance. The helper reads the file in fixed-size chunks, updates a SHA-256 hasher, and formats the result with the `sha256:` prefix used by asset metadata.
+An upload or storage system can pass a candidate file path to the deduplication helper before final asset acceptance. The helper reads the file in fixed-size chunks, updates a SHA-256 hasher, and formats the result with the `sha256:` prefix used by asset metadata.
 
 After hashing succeeds, the helper queries the global `assets` table for a row whose `file_hash` exactly matches the calculated value. If a row exists, the helper logs a deduplication hit at `INFO`, logs the matched asset ID and a short hash prefix at `DEBUG`, and returns the asset ID. If no row exists, it returns `None` so the caller can continue its own storage and metadata flow.
 
@@ -65,10 +65,11 @@ File read or hash failures are logged at `ERROR` and re-raised so the caller can
 Asset Hash Deduplication currently interacts with:
 
 - Asset Metadata Storage, by reading `assets.file_hash` values and returning existing asset IDs.
+- Safe Asset File Storage, which reuses the hash calculation helper when creating uploaded asset metadata but does not perform duplicate lookup.
 - Global App Storage, by using the global database connection when a caller does not provide one.
 - The central logger, by recording deduplication hits and failures without exposing full file contents.
 
-Future upload validation and safe asset file storage systems may call this helper before copying files or creating metadata records.
+Upload validation and file storage systems may call the duplicate lookup helper before copying files or creating metadata records when they need deduplication behavior.
 
 ## Current Edge Cases
 
@@ -81,9 +82,10 @@ Internal edge cases:
 
 Cross-system edge cases:
 
-- Existing built-in assets with no stored file hash are ignored by the lookup until a future system stores hashes for them.
-- Future upload systems must call this helper before creating duplicate files or metadata records if they want deduplication behavior.
-- Future metadata creation must still provide a non-empty file hash for uploaded assets, because this helper does not create metadata rows.
+- Existing built-in assets with no stored file hash are ignored by the lookup unless another system stores hashes for them.
+- Upload systems must call the duplicate lookup helper before creating duplicate files or metadata records if they want deduplication behavior.
+- Uploaded metadata creation must still provide a non-empty file hash, because this helper does not create metadata rows.
+- Safe Asset File Storage calculates hashes for metadata but intentionally does not deduplicate hashes.
 
 ## Invariants
 
@@ -105,7 +107,7 @@ Cross-system edge cases:
 
 Before editing Asset Hash Deduplication, check:
 
-- Whether the requested change belongs in deduplication or in upload validation, safe file storage, metadata creation, font extraction, or UI.
+- Whether the requested change belongs in deduplication or in upload validation, Safe Asset File Storage, metadata creation, font extraction, or UI.
 - Whether the change preserves global hash-based deduplication.
 - Whether the helper still avoids writing files or metadata records.
 - Whether hash and database failures are logged and re-raised.
