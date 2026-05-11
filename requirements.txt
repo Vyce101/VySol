@@ -4,4 +4,5 @@ beautifulsoup4==4.14.3
 EbookLib==0.20
 fonttools==4.62.1
 Pillow==12.2.0
+PyMuPDF==1.27.2.3
 uvicorn==0.42.0
