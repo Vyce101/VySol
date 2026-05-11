@@ -77,6 +77,15 @@ def apply_world_last_used_at_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def apply_asset_original_filename_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        ALTER TABLE assets
+        ADD COLUMN original_filename TEXT
+        """
+    )
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -97,6 +106,11 @@ MIGRATIONS = (
         version=4,
         name="add_world_last_used_at",
         apply=apply_world_last_used_at_schema,
+    ),
+    Migration(
+        version=5,
+        name="add_asset_original_filename",
+        apply=apply_asset_original_filename_schema,
     ),
 )
 

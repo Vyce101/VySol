@@ -26,6 +26,7 @@ class AssetMetadata:
     file_hash: str | None
     is_built_in: bool
     full_font_name: str | None = None
+    original_filename: str | None = None
 
     @property
     def is_user_uploaded(self) -> bool:
@@ -44,6 +45,8 @@ class NewAssetMetadata:
     is_built_in: bool
     file_hash: str | None = None
     full_font_name: str | None = None
+    original_filename: str | None = None
+    asset_id: str | None = None
 
 
 def create_asset_metadata(
@@ -52,13 +55,14 @@ def create_asset_metadata(
 ) -> AssetMetadata:
     validated_metadata = validate_new_asset_metadata(metadata)
     asset_metadata = AssetMetadata(
-        asset_id=str(uuid4()),
+        asset_id=validated_metadata.asset_id or str(uuid4()),
         asset_type=validated_metadata.asset_type,
         display_name=validated_metadata.display_name,
         stored_path=validated_metadata.stored_path,
         file_hash=validated_metadata.file_hash,
         is_built_in=validated_metadata.is_built_in,
         full_font_name=validated_metadata.full_font_name,
+        original_filename=validated_metadata.original_filename,
     )
     database_connection = connection if connection is not None else get_global_connection()
 
@@ -72,9 +76,10 @@ def create_asset_metadata(
                 stored_path,
                 file_hash,
                 is_built_in,
-                full_font_name
+                full_font_name,
+                original_filename
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 asset_metadata.asset_id,
@@ -84,6 +89,7 @@ def create_asset_metadata(
                 asset_metadata.file_hash,
                 int(asset_metadata.is_built_in),
                 asset_metadata.full_font_name,
+                asset_metadata.original_filename,
             ),
         )
         database_connection.commit()
@@ -112,7 +118,8 @@ def get_asset_metadata(
                 stored_path,
                 file_hash,
                 is_built_in,
-                full_font_name
+                full_font_name,
+                original_filename
             FROM assets
             WHERE asset_id = ?
             """,
@@ -143,7 +150,8 @@ def list_asset_metadata(
                 stored_path,
                 file_hash,
                 is_built_in,
-                full_font_name
+                full_font_name,
+                original_filename
             FROM assets
             ORDER BY lower(display_name), asset_id
             """
@@ -164,6 +172,9 @@ def validate_new_asset_metadata(metadata: NewAssetMetadata) -> NewAssetMetadata:
 
     if not metadata.stored_path.strip():
         return reject_invalid_asset_metadata("Asset metadata stored path is required.")
+
+    if metadata.asset_id is not None and not metadata.asset_id.strip():
+        return reject_invalid_asset_metadata("Asset metadata ID is required when provided.")
 
     if not metadata.is_built_in and not has_text_value(metadata.file_hash):
         return reject_invalid_asset_metadata("Uploaded asset metadata requires a file hash.")
@@ -189,4 +200,5 @@ def asset_metadata_from_row(row: sqlite3.Row) -> AssetMetadata:
         file_hash=row["file_hash"],
         is_built_in=bool(row["is_built_in"]),
         full_font_name=row["full_font_name"],
+        original_filename=row["original_filename"],
     )
