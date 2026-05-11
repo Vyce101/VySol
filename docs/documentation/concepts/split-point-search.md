@@ -6,9 +6,9 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs a deterministic first step toward ingestion splitting before full chunk generation exists. The helper lets future ingestion code ask, "Where should this one chunk boundary land?" using plain Python string operations and character-based settings.
+VySol needs a deterministic boundary chooser beneath ingestion splitting. The helper lets chunk generation code ask, "Where should this one chunk boundary land?" using plain Python string operations and character-based settings.
 
-Keeping this small matters because choosing one boundary is easier to test and reason about than complete chunk generation. Later systems can use this boundary choice while still owning their own parsing, chunk assembly, overlap, offsets, source metadata, and database writes.
+Keeping this small matters because choosing one boundary is easier to test and reason about than complete chunk generation. Main Chunk Generation can use this boundary choice while other systems still own parsing, overlap, offsets, source metadata, and database writes.
 
 ## Ownership Boundary
 
@@ -53,7 +53,8 @@ Split Point Search currently interacts with:
 
 - Draft World Splitter Settings, which defines in-memory splitter settings before future ingestion starts.
 - World Splitter Settings Storage, which persists committed-world splitter settings that future ingestion code can validate and pass to this helper.
-- Future parser and ingestion systems, which can call this helper after text extraction and before final chunk records are prepared.
+- Main Chunk Generation, which repeatedly calls this helper after text extraction and before final chunk records are prepared.
+- Future parser and ingestion systems, which can pass extracted text into main chunk generation rather than calling this helper for complete chunk lists.
 - Chunk Storage, which should receive final caller-prepared chunk records after a future chunking system uses split boundaries.
 
 It must stay separate from storage repositories and parser logic. This helper can inform future chunk generation, but it does not persist or inspect chunk records itself.
@@ -76,7 +77,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Callers must validate splitter settings before passing them into the helper.
-- Future chunk generation must not treat this helper as proof that all chunks, overlap, or offsets have been calculated.
+- Main Chunk Generation must not treat this helper as proof that overlap, offsets, source metadata, or storage records have been calculated.
 - Future parser work must pass extracted text into this helper rather than making this helper read files.
 - Future storage work must save final chunk records through Chunk Storage rather than adding database behavior here.
 - Logs must never include source text if defensive error handling is added later.

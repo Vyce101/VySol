@@ -11,6 +11,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added main chunk generation for ordered in-memory chunks from parsed text.
 - Added backend split-point search for choosing one character-based ingestion boundary.
 - Added a Split Point Search concept page.
 - Added backend fallback deletion for uploaded assets used by committed worlds after affected worlds are confirmed.
