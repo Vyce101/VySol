@@ -11,6 +11,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend split-point search for choosing one character-based ingestion boundary.
+- Added a Split Point Search concept page.
 - Added backend fallback deletion for uploaded assets used by committed worlds after affected worlds are confirmed.
 - Added backend deletion for unused uploaded assets while protecting built-in and in-use assets.
 - Added backend validation for uploaded font files before they are stored.

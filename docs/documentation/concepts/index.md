@@ -18,5 +18,6 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Global App Storage](global-app-storage.md)
 - [Image Upload Validation](image-upload-validation.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)
+- [Split Point Search](split-point-search.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
 - [World Splitter Settings Storage](world-splitter-settings-storage.md)
