@@ -117,20 +117,66 @@ class SourceStagingStateRegistry:
         if state is None:
             return None
 
-        updated_entries = tuple(
-            entry
-            for entry in state.entries
-            if entry.staging_entry_id != staging_entry_id
+        return self._remove_staging_entry_from_state(
+            staging_context_id,
+            state,
+            staging_entry_id,
         )
-        updated_state = SourceStagingState(
-            staging_context_id=state.staging_context_id,
-            entries=updated_entries,
+
+    def remove_existing_world_source_item(
+        self,
+        staging_context_id: str,
+        source_item: SourceOrderItem,
+    ) -> SourceStagingState | None:
+        state = self.get_staging_state(staging_context_id)
+        if state is None:
+            return None
+
+        if type(source_item) is not SourceOrderItem:
+            log_invalid_source_removal("Source removal item is invalid.")
+            return state
+
+        if source_item.source_kind == SOURCE_ORDER_KIND_COMMITTED:
+            log_invalid_source_removal("Committed sources cannot be removed before commit.")
+            return state
+
+        if source_item.source_kind != SOURCE_ORDER_KIND_STAGED:
+            log_invalid_source_removal("Source removal item kind is invalid.")
+            return state
+
+        return self._remove_staging_entry_from_state(
+            staging_context_id,
+            state,
+            source_item.source_id,
         )
-        self._staging_states[staging_context_id] = updated_state
+
+    def _remove_staging_entry_from_state(
+        self,
+        staging_context_id: str,
+        state: SourceStagingState,
+        staging_entry_id: str,
+    ) -> SourceStagingState:
+        try:
+            updated_entries = tuple(
+                entry
+                for entry in state.entries
+                if entry.staging_entry_id != staging_entry_id
+            )
+            updated_state = SourceStagingState(
+                staging_context_id=state.staging_context_id,
+                entries=updated_entries,
+            )
+            self._staging_states[staging_context_id] = updated_state
+        except Exception as error:
+            logger.error("Failed to remove temporary source staging entry.", exc_info=True)
+            raise RuntimeError("Failed to remove temporary source staging entry.") from error
+
         removed_count = len(state.entries) - len(updated_entries)
         logger.debug(
-            "Removed temporary source staging entries: staging_context_id=%s count=%s",
+            "Removed temporary source staging entry: staging_context_id=%s "
+            "staging_entry_id=%s count=%s",
             staging_context_id,
+            staging_entry_id,
             removed_count,
         )
         return updated_state
@@ -299,6 +345,10 @@ def log_staged_reorder(entries: Sequence[TemporarySourceStagingEntry]) -> None:
     logger.debug("Reordered temporary source staging entries: %s", staged_order)
 
 
+def log_invalid_source_removal(message: str) -> None:
+    logger.warning("Invalid temporary source removal request: %s", message)
+
+
 def reject_invalid_reorder(message: str) -> NoReturn:
     logger.warning("Invalid temporary source reorder request: %s", message)
     raise SourceReorderValidationError(message)
@@ -347,6 +397,16 @@ def remove_staging_entry(
     return _source_staging_state_registry.remove_staging_entry(
         staging_context_id,
         staging_entry_id,
+    )
+
+
+def remove_existing_world_source_item(
+    staging_context_id: str,
+    source_item: SourceOrderItem,
+) -> SourceStagingState | None:
+    return _source_staging_state_registry.remove_existing_world_source_item(
+        staging_context_id,
+        source_item,
     )
 
 
