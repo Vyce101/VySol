@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.logger import get_logger
 from app.storage.asset_deduplication import calculate_asset_file_hash
+from app.storage.image_upload_validation import validate_uploaded_image_file
 from app.storage.assets import (
     ASSET_TYPE_FONT,
     ASSET_TYPE_IMAGE,
@@ -43,6 +44,7 @@ def store_uploaded_asset_file(
     connection: sqlite3.Connection | None = None,
 ) -> AssetMetadata:
     asset_directory = get_asset_storage_directory(asset_type)
+    validate_asset_file_upload(asset_type, source_file_path, original_filename)
     asset_id = str(uuid4())
     safe_suffix = get_safe_filename_suffix(original_filename)
     destination_path = asset_directory / f"{asset_id}{safe_suffix}"
@@ -72,6 +74,17 @@ def store_uploaded_asset_file(
     )
     logger.info("Stored uploaded asset file: %s", asset_metadata.asset_id)
     return asset_metadata
+
+
+def validate_asset_file_upload(
+    asset_type: str,
+    source_file_path: Path,
+    original_filename: str,
+) -> None:
+    if asset_type != ASSET_TYPE_IMAGE:
+        return
+
+    validate_uploaded_image_file(source_file_path, original_filename)
 
 
 def resolve_asset_file_path(
