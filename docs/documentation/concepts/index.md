@@ -19,6 +19,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Global App Storage](global-app-storage.md)
 - [Image Upload Validation](image-upload-validation.md)
 - [Main Chunk Generation](main-chunk-generation.md)
+- [PDF Parser](pdf-parser.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)
 - [Split Point Search](split-point-search.md)
 - [TXT Parser](txt-parser.md)
