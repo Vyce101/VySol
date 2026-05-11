@@ -1,0 +1,79 @@
+from dataclasses import dataclass
+
+from app.draft_worlds.splitter_settings import SplitterSettings
+from app.ingestion.splitting.split_points import find_next_split_index
+from app.logger import get_logger
+
+logger = get_logger()
+
+
+class MainChunkGenerationError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class MainChunk:
+    chunk_number: int
+    chunk_text: str
+
+
+def generate_main_chunks(
+    parsed_text: str,
+    splitter_settings: SplitterSettings,
+) -> list[MainChunk]:
+    chunks: list[MainChunk] = []
+    remaining_text = parsed_text
+
+    while remaining_text:
+        split_index = find_safe_split_index(
+            remaining_text,
+            splitter_settings,
+            len(chunks),
+        )
+        chunk_text = remaining_text[:split_index]
+
+        if chunk_text != "":
+            chunks.append(
+                MainChunk(
+                    chunk_number=len(chunks) + 1,
+                    chunk_text=chunk_text,
+                )
+            )
+
+        remaining_text = remaining_text[split_index:]
+
+    logger.debug("Generated main chunks: count=%s", len(chunks))
+    return chunks
+
+
+def find_safe_split_index(
+    text: str,
+    splitter_settings: SplitterSettings,
+    completed_chunk_count: int,
+) -> int:
+    try:
+        split_index = find_next_split_index(
+            text,
+            splitter_settings.chunk_size,
+            splitter_settings.max_lookback_size,
+        )
+    except Exception as error:
+        logger.error(
+            "Unexpected splitter failure during main chunk generation.",
+            exc_info=True,
+        )
+        raise MainChunkGenerationError(
+            "Unexpected splitter failure during main chunk generation."
+        ) from error
+
+    if 0 < split_index <= len(text):
+        return split_index
+
+    logger.error(
+        "Invalid split index during main chunk generation: "
+        "split_index=%s remaining_length=%s completed_chunk_count=%s",
+        split_index,
+        len(text),
+        completed_chunk_count,
+    )
+    raise MainChunkGenerationError("Invalid split index during main chunk generation.")
