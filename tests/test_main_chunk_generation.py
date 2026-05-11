@@ -24,6 +24,7 @@ class MainChunkGenerationTests(unittest.TestCase):
                 MainChunk(
                     chunk_number=1,
                     chunk_text=parsed_text,
+                    overlap_text="",
                     character_start_offset=0,
                     character_end_offset=len(parsed_text),
                 )
@@ -47,18 +48,21 @@ class MainChunkGenerationTests(unittest.TestCase):
                 MainChunk(
                     chunk_number=1,
                     chunk_text="First paragraph.\n\n",
+                    overlap_text="",
                     character_start_offset=0,
                     character_end_offset=18,
                 ),
                 MainChunk(
                     chunk_number=2,
                     chunk_text="Second sentence.",
+                    overlap_text="",
                     character_start_offset=18,
                     character_end_offset=34,
                 ),
                 MainChunk(
                     chunk_number=3,
                     chunk_text=" Third sentence.",
+                    overlap_text="",
                     character_start_offset=34,
                     character_end_offset=50,
                 ),
@@ -81,18 +85,21 @@ class MainChunkGenerationTests(unittest.TestCase):
                 MainChunk(
                     chunk_number=1,
                     chunk_text="abcdefghij",
+                    overlap_text="",
                     character_start_offset=0,
                     character_end_offset=10,
                 ),
                 MainChunk(
                     chunk_number=2,
                     chunk_text="klmnopqrst",
+                    overlap_text="",
                     character_start_offset=10,
                     character_end_offset=20,
                 ),
                 MainChunk(
                     chunk_number=3,
                     chunk_text="uvwxyz",
+                    overlap_text="",
                     character_start_offset=20,
                     character_end_offset=26,
                 ),
@@ -129,18 +136,21 @@ class MainChunkGenerationTests(unittest.TestCase):
                 MainChunk(
                     chunk_number=1,
                     chunk_text="\n\n",
+                    overlap_text="",
                     character_start_offset=0,
                     character_end_offset=2,
                 ),
                 MainChunk(
                     chunk_number=2,
                     chunk_text="  ",
+                    overlap_text="",
                     character_start_offset=2,
                     character_end_offset=4,
                 ),
                 MainChunk(
                     chunk_number=3,
                     chunk_text=" \n",
+                    overlap_text="",
                     character_start_offset=4,
                     character_end_offset=6,
                 ),
@@ -162,6 +172,67 @@ class MainChunkGenerationTests(unittest.TestCase):
         )
 
         self.assertEqual([chunk.chunk_number for chunk in chunks], [1, 2, 3, 4])
+
+    def test_generates_previous_context_overlap_separate_from_chunk_text(self) -> None:
+        parsed_text = "abcdefghijklmnopqrst"
+
+        chunks = generate_main_chunks(
+            parsed_text,
+            make_splitter_settings(
+                chunk_size=5,
+                max_lookback_size=0,
+                overlap_size=3,
+            ),
+        )
+
+        self.assertEqual(join_chunk_text(chunks), parsed_text)
+        self.assertEqual(chunk_overlap_texts(chunks), ["", "cde", "hij", "mno"])
+        self.assertEqual(
+            [chunk.chunk_text for chunk in chunks],
+            ["abcde", "fghij", "klmno", "pqrst"],
+        )
+
+    def test_overlap_size_larger_than_chunk_size_can_span_prior_chunks(self) -> None:
+        parsed_text = "abcdefghijklmnopqrstuvwxyz"
+
+        chunks = generate_main_chunks(
+            parsed_text,
+            make_splitter_settings(
+                chunk_size=5,
+                max_lookback_size=0,
+                overlap_size=12,
+            ),
+        )
+
+        self.assertEqual(chunks[0].overlap_text, "")
+        self.assertEqual(chunks[1].overlap_text, "abcde")
+        self.assertEqual(chunks[2].overlap_text, "abcdefghij")
+        self.assertEqual(chunks[3].overlap_text, "defghijklmno")
+
+    def test_zero_overlap_size_returns_empty_overlap_for_all_chunks(self) -> None:
+        chunks = generate_main_chunks(
+            "abcdefghijklmnopqrst",
+            make_splitter_settings(
+                chunk_size=5,
+                max_lookback_size=0,
+                overlap_size=0,
+            ),
+        )
+
+        self.assertEqual(chunk_overlap_texts(chunks), ["", "", "", ""])
+
+    def test_separate_generation_calls_do_not_share_overlap_state(self) -> None:
+        splitter_settings = make_splitter_settings(
+            chunk_size=5,
+            max_lookback_size=0,
+            overlap_size=5,
+        )
+
+        first_source_chunks = generate_main_chunks("abcdefghij", splitter_settings)
+        second_source_chunks = generate_main_chunks("klmnopqrst", splitter_settings)
+
+        self.assertEqual(chunk_overlap_texts(first_source_chunks), ["", "abcde"])
+        self.assertEqual(chunk_overlap_texts(second_source_chunks), ["", "klmno"])
 
     def test_logs_and_raises_when_splitter_raises_unexpectedly(self) -> None:
         parsed_text = "Do not log this source text."
@@ -228,11 +299,12 @@ def make_splitter_settings(
     *,
     chunk_size: int,
     max_lookback_size: int,
+    overlap_size: int = 0,
 ) -> SplitterSettings:
     return SplitterSettings(
         chunk_size=chunk_size,
         max_lookback_size=max_lookback_size,
-        overlap_size=0,
+        overlap_size=overlap_size,
         splitter_version="test",
     )
 
@@ -246,6 +318,10 @@ def chunk_offset_ranges(chunks: list[MainChunk]) -> list[tuple[int, int]]:
         (chunk.character_start_offset, chunk.character_end_offset)
         for chunk in chunks
     ]
+
+
+def chunk_overlap_texts(chunks: list[MainChunk]) -> list[str]:
+    return [chunk.overlap_text for chunk in chunks]
 
 
 if __name__ == "__main__":
