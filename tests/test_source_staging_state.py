@@ -5,8 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.ingestion.staging.source_staging_state import (
+    SOURCE_ORDER_KIND_COMMITTED,
+    SOURCE_ORDER_KIND_STAGED,
+    SourceOrderItem,
+    SourceReorderValidationError,
     SourceStagingState,
-    SourceStagingStateError,
     SourceStagingStateRegistry,
     TemporarySourceStagingEntry,
 )
@@ -90,19 +93,165 @@ class SourceStagingStateTests(unittest.TestCase):
 
     def test_rejects_reorder_that_does_not_match_existing_entries(self) -> None:
         registry = SourceStagingStateRegistry()
-        registry.replace_staging_state(
+        original_state = registry.replace_staging_state(
             "draft-1",
             [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
         )
 
         with patch("app.ingestion.staging.source_staging_state.logger") as logger:
-            with self.assertRaises(SourceStagingStateError):
+            with self.assertRaises(SourceReorderValidationError):
                 registry.reorder_staging_entries(
                     "draft-1",
                     ["entry-1", "entry-3"],
                 )
 
-        logger.error.assert_called_once()
+        self.assertEqual(registry.get_staging_state("draft-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_rejects_reorder_with_duplicate_staged_entries(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "draft-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            with self.assertRaises(SourceReorderValidationError):
+                registry.reorder_staging_entries(
+                    "draft-1",
+                    ["entry-1", "entry-1"],
+                )
+
+        self.assertEqual(registry.get_staging_state("draft-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_reorders_existing_world_staged_entries_after_committed_prefix(self) -> None:
+        registry = SourceStagingStateRegistry()
+        registry.replace_staging_state(
+            "existing-world-1",
+            [
+                make_entry("entry-1", "one.txt"),
+                make_entry("entry-2", "two.txt"),
+                make_entry("entry-3", "three.txt"),
+            ],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            state = registry.reorder_existing_world_staging_entries(
+                "existing-world-1",
+                ["source-1", "source-2"],
+                [
+                    committed_item("source-1"),
+                    committed_item("source-2"),
+                    staged_item("entry-3"),
+                    staged_item("entry-1"),
+                    staged_item("entry-2"),
+                ],
+            )
+
+        self.assertEqual(
+            [entry.staging_entry_id for entry in state.entries],
+            ["entry-3", "entry-1", "entry-2"],
+        )
+        logger.debug.assert_called_once_with(
+            "Reordered temporary source staging entries: %s",
+            ((0, "entry-3"), (1, "entry-1"), (2, "entry-2")),
+        )
+
+    def test_rejects_existing_world_committed_source_reorder(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            with self.assertRaises(SourceReorderValidationError):
+                registry.reorder_existing_world_staging_entries(
+                    "existing-world-1",
+                    ["source-1", "source-2"],
+                    [
+                        committed_item("source-2"),
+                        committed_item("source-1"),
+                        staged_item("entry-1"),
+                        staged_item("entry-2"),
+                    ],
+                )
+
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_rejects_existing_world_staged_entry_before_committed_sources(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            with self.assertRaises(SourceReorderValidationError):
+                registry.reorder_existing_world_staging_entries(
+                    "existing-world-1",
+                    ["source-1", "source-2"],
+                    [
+                        committed_item("source-1"),
+                        staged_item("entry-1"),
+                        committed_item("source-2"),
+                        staged_item("entry-2"),
+                    ],
+                )
+
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_rejects_existing_world_reorder_with_omitted_source(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            with self.assertRaises(SourceReorderValidationError):
+                registry.reorder_existing_world_staging_entries(
+                    "existing-world-1",
+                    ["source-1"],
+                    [
+                        committed_item("source-1"),
+                        staged_item("entry-2"),
+                    ],
+                )
+
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
+
+    def test_rejects_existing_world_reorder_with_unknown_source_id(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            with self.assertRaises(SourceReorderValidationError):
+                registry.reorder_existing_world_staging_entries(
+                    "existing-world-1",
+                    ["source-1"],
+                    [
+                        committed_item("source-1"),
+                        staged_item("entry-1"),
+                        staged_item("entry-3"),
+                    ],
+                )
+
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once()
+        logger.error.assert_not_called()
 
     def test_removes_only_the_requested_entry(self) -> None:
         registry = SourceStagingStateRegistry()
@@ -141,6 +290,13 @@ class SourceStagingStateTests(unittest.TestCase):
         self.assertIsNone(registry.add_source_file_paths("missing", [Path("one.txt")]))
         self.assertIsNone(registry.remove_staging_entry("missing", "entry-1"))
         self.assertIsNone(registry.reorder_staging_entries("missing", ["entry-1"]))
+        self.assertIsNone(
+            registry.reorder_existing_world_staging_entries(
+                "missing",
+                ["source-1"],
+                [committed_item("source-1"), staged_item("entry-1")],
+            )
+        )
         self.assertIsNone(registry.discard_staging_context("missing"))
 
     def test_entries_do_not_assign_book_number(self) -> None:
@@ -237,6 +393,14 @@ def make_entry(
         is_valid=True,
         error_message=None,
     )
+
+
+def committed_item(source_id: str) -> SourceOrderItem:
+    return SourceOrderItem(SOURCE_ORDER_KIND_COMMITTED, source_id)
+
+
+def staged_item(staging_entry_id: str) -> SourceOrderItem:
+    return SourceOrderItem(SOURCE_ORDER_KIND_STAGED, staging_entry_id)
 
 
 if __name__ == "__main__":
