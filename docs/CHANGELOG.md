@@ -13,6 +13,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added graceful staged source removal protection so committed source removal attempts leave world data unchanged.
 - Added backend staged source reorder guards that keep committed sources locked while preserving staged order.
 - Added temporary in-memory source staging state for draft and existing-world add-source flows.
 - Added a backend source type selection filter that keeps every selected source visible while blocking ingestion when unsupported file types are staged.

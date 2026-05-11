@@ -19,11 +19,12 @@ Temporary Source Staging State owns:
 - Adding selected file paths as staging entries.
 - Reusing Source Type Selection Filter for extension-based file type and validity state.
 - Removing staged entries by temporary staging entry ID.
+- Removing staged entries from an existing-world mixed source list while leaving committed sources unchanged.
 - Reordering staged entries by an explicit list of existing staging entry IDs.
 - Reordering staged entries in existing-world flows while keeping committed source IDs in their current prefix order.
 - Replacing or discarding a staging context when the caller's flow no longer needs it.
-- Logging add, remove, and staged reorder summaries at `DEBUG` without raw local paths.
-- Logging invalid reorder attempts at `WARNING` without raw local paths.
+- Logging add, staged removal, and staged reorder summaries at `DEBUG` without raw local paths.
+- Logging invalid reorder and committed-source removal attempts at `WARNING` without raw local paths.
 - Logging staging state failures at `ERROR` without raw local paths.
 
 Temporary Source Staging State does not own:
@@ -37,7 +38,9 @@ Temporary Source Staging State does not own:
 
 A caller creates a staging context with an ID owned by the draft-world or existing-world add-source flow. When the user selects files, the caller adds selected paths to that context. Each selected path becomes a temporary entry with a generated staging entry ID, the original path object, the source type summary from Source Type Selection Filter, validity state, and any invalid-type error message.
 
-The caller can remove individual entries by staging entry ID. Draft-style reorder callers can reorder entries by passing the complete ordered list of existing staging entry IDs. Reorder requests must match the current entries exactly so accidental drops, duplicates, or unknown entry IDs are rejected instead of silently changing the batch.
+The caller can remove individual entries by staging entry ID. Existing-world callers can also request removal from a mixed source list by passing whether the visible item is staged or committed. Staged items are removed from memory by temporary staging entry ID. Committed items are not removed; the system logs the invalid attempt and returns the current staging state unchanged so the future UI can tell the user committed sources cannot be removed before this commit flow.
+
+Draft-style reorder callers can reorder entries by passing the complete ordered list of existing staging entry IDs. Reorder requests must match the current entries exactly so accidental drops, duplicates, or unknown entry IDs are rejected instead of silently changing the batch.
 
 For existing-world add-source flows, the caller can pass the current committed source IDs plus a visible mixed source order. The committed source IDs must remain the locked prefix in their existing order. Only staged entries after that prefix are rewritten in memory, which preserves the staged order a later commit flow can use when it assigns book numbers.
 
@@ -45,7 +48,7 @@ When the user leaves before commit, cancels, or finishes a later successful comm
 
 ## Inputs
 
-Temporary Source Staging State receives staging context IDs from callers, selected source file paths, staging entry IDs for removal, ordered staging entry IDs for draft-style reorder, and mixed committed/staged source order items for existing-world reorder. Existing-world reorder receives committed source IDs as identity/order guards only. It does not receive database connections, source file contents, parser output, splitter output, hashes, book numbers, provider responses, or committed source metadata records.
+Temporary Source Staging State receives staging context IDs from callers, selected source file paths, staging entry IDs for removal, mixed committed/staged source items for existing-world removal, ordered staging entry IDs for draft-style reorder, and mixed committed/staged source order items for existing-world reorder. Existing-world reorder receives committed source IDs as identity/order guards only. It does not receive database connections, source file contents, parser output, splitter output, hashes, book numbers, provider responses, or committed source metadata records.
 
 ## Outputs
 
@@ -63,9 +66,11 @@ It does not create database rows, copy files, parse text, create chunks, call pr
 
 Missing staging contexts return no staging state instead of creating hidden persistent state. Invalid staging context IDs and duplicate replacement entry IDs are logged at `ERROR` and rejected as staging state failures.
 
+Invalid existing-world removal requests are logged at `WARNING` and return the current staging state unchanged. This includes committed-source removal attempts, malformed removal items, and invalid removal item kinds. Committed-source removal attempts are invalid user requests rather than system failures, so they do not raise.
+
 Invalid reorder requests are logged at `WARNING` and rejected without changing the stored staging state. This includes attempts to move committed source IDs, insert staged entries before committed sources, omit entries, duplicate entries, use unknown IDs, or use an invalid source-order item kind.
 
-Unexpected add failures are logged at `ERROR` and raised as temporary source staging failures. Logs must not include raw selected source paths, source text, local machine details, or user data.
+Unexpected add or staged removal failures are logged at `ERROR` and raised as temporary source staging failures. Logs must not include raw selected source paths, source text, local machine details, or user data.
 
 ## System Interactions
 
@@ -87,6 +92,9 @@ Internal edge cases:
 - Adding paths preserves existing entries and appends new entries in selection order.
 - Unsupported or extensionless paths remain visible as invalid entries through Source Type Selection Filter.
 - Removing a missing entry from an existing context leaves the other entries unchanged.
+- Existing-world staged removal removes only the requested staged entry and preserves the remaining staged order.
+- Existing-world committed-source removal attempts return the unchanged staging state.
+- Malformed existing-world removal items and invalid removal item kinds return the unchanged staging state.
 - Reorder requests must include every current staging entry ID exactly once.
 - Existing-world reorder requests must keep committed source IDs as the complete ordered prefix.
 - Existing-world reorder requests may change only the order of staged entries after the committed prefix.
@@ -97,6 +105,7 @@ Cross-system edge cases:
 
 - Draft-world and existing-world add-source flows must discard staging contexts when the user leaves before commit.
 - Staged paths are references only; later commit work must still decide whether and how to parse, copy, hash, order, and persist sources.
+- Existing-world add-source flows may ask to remove visible committed source items, but staging state must treat those requests as invalid and leave committed world data unchanged.
 - Existing-world add-source flows must pass committed source IDs in their current order when validating a mixed committed/staged reorder request.
 - Future commit code must not infer that staging state has already produced committed source IDs, stored paths, source hashes, permanent book numbers, chunks, or database rows.
 - Future book-number assignment must treat committed sources as already ordered and append staged sources using the preserved staged order.
@@ -109,6 +118,7 @@ Cross-system edge cases:
 - Staged entries must preserve caller-visible order until explicitly reordered.
 - Reorder operations must not add, drop, or duplicate entries.
 - Existing-world reorder must not move committed sources or allow staged sources before committed sources.
+- Existing-world removal must not remove committed sources.
 - Removing entries must not delete, move, or modify files.
 - Source type classification must stay delegated to Source Type Selection Filter.
 - The system must not parse, hash, copy, commit, persist, or assign book numbers for staged sources.
