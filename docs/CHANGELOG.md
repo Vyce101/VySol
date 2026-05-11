@@ -13,6 +13,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added temporary in-memory source staging state for draft and existing-world add-source flows.
 - Added a backend source type selection filter that keeps every selected source visible while blocking ingestion when unsupported file types are staged.
 - Added a Source Type Selection Filter concept page.
 - Added a backend source parser router for staged TXT, EPUB, and PDF sources.
