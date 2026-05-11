@@ -15,6 +15,7 @@ class MainChunkGenerationError(RuntimeError):
 class MainChunk:
     chunk_number: int
     chunk_text: str
+    overlap_text: str
     character_start_offset: int
     character_end_offset: int
 
@@ -36,12 +37,18 @@ def generate_main_chunks(
         chunk_text = remaining_text[:split_index]
         character_start_offset = consumed_character_count
         character_end_offset = character_start_offset + len(chunk_text)
+        overlap_text = get_previous_overlap_text(
+            parsed_text,
+            character_start_offset,
+            splitter_settings.overlap_size,
+        )
 
         if chunk_text != "":
             chunks.append(
                 MainChunk(
                     chunk_number=len(chunks) + 1,
                     chunk_text=chunk_text,
+                    overlap_text=overlap_text,
                     character_start_offset=character_start_offset,
                     character_end_offset=character_end_offset,
                 )
@@ -52,6 +59,15 @@ def generate_main_chunks(
 
     logger.debug("Generated main chunks: count=%s", len(chunks))
     return chunks
+
+
+def get_previous_overlap_text(
+    parsed_text: str,
+    character_start_offset: int,
+    overlap_size: int,
+) -> str:
+    overlap_start_offset = max(0, character_start_offset - overlap_size)
+    return parsed_text[overlap_start_offset:character_start_offset]
 
 
 def find_safe_split_index(
