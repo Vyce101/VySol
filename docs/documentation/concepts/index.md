@@ -22,6 +22,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [PDF Parser](pdf-parser.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)
 - [Source Parser Router](source-parser-router.md)
+- [Source Type Selection Filter](source-type-selection-filter.md)
 - [Split Point Search](split-point-search.md)
 - [TXT Parser](txt-parser.md)
 - [World Database Bootstrap](world-database-bootstrap.md)

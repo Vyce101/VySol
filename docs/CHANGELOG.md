@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a backend source type selection filter that keeps every selected source visible while blocking ingestion when unsupported file types are staged.
+- Added a Source Type Selection Filter concept page.
 - Added a backend source parser router for staged TXT, EPUB, and PDF sources.
 - Added a Source Parser Router concept page.
 - Added a backend PDF parser for extracting in-memory text from text-based PDF files.

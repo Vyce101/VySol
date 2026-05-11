@@ -77,7 +77,8 @@ Source Parser Router currently interacts with:
 - TXT Parser, which decodes supported TXT files into in-memory text.
 - EPUB Parser, which extracts readable text from EPUB spine documents.
 - PDF Parser, which extracts text from text-based PDF files.
-- Future source staging code, which supplies the staged source type.
+- Source Type Selection Filter, which can supply valid staged source types derived from selected file suffixes.
+- Future source staging UI, which can display invalid selections before the router is called.
 - Future source commit orchestration, which should call the router before saving source metadata or chunks.
 - Main Chunk Generation, which can receive parsed text only after routing and parsing succeed.
 - The central logger, which records routing and rejection summaries without source text.
@@ -98,7 +99,8 @@ Internal edge cases:
 
 Cross-system edge cases:
 
-- Source type detection remains a staging responsibility, not a router responsibility.
+- Source type detection remains a Source Type Selection Filter responsibility, not a router responsibility.
+- Invalid source selections should be blocked before parser routing rather than passed into the router as normal work.
 - Fake extensions are rejected by parser/open behavior when the staged source type selects a parser but the file content is invalid.
 - Future commit orchestration must not save source metadata or chunks until the router and selected parser have succeeded.
 - Main Chunk Generation must receive parsed text, not staged source records or file paths.
@@ -127,7 +129,8 @@ Before editing Source Parser Router, check:
 - Whether all supported source types still map to exactly one parser.
 - Whether unsupported source types still fail before batch parsing begins.
 - Whether parser failures still propagate and block future commit work.
-- Whether no source type is inferred from a filename, suffix, MIME type, or content unless a later ticket changes the staging contract.
+- Whether no source type is inferred from a filename, suffix, MIME type, or content inside the router.
+- Whether source type inference from selected file suffixes remains owned by Source Type Selection Filter.
 - Whether successful routing still returns only in-memory parsed text.
 - Whether logs avoid parsed text and sensitive local path detail.
 - Whether tests cover routing, normalization, batch rejection, parser failure propagation, and log safety.
