@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 from app.storage.asset_files import (
     ASSET_STORAGE_DIRECTORIES,
     resolve_asset_file_path,
@@ -29,7 +31,7 @@ class AssetFileStorageTests(unittest.TestCase):
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "portrait upload.png"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"image bytes")
+                write_test_image(source_file)
 
                 asset = store_uploaded_asset_file(
                     ASSET_TYPE_IMAGE,
@@ -40,7 +42,7 @@ class AssetFileStorageTests(unittest.TestCase):
 
                 stored_file = storage.image_directory / f"{asset.asset_id}.png"
                 self.assertTrue(stored_file.exists())
-                self.assertEqual(stored_file.read_bytes(), b"image bytes")
+                self.assertEqual(stored_file.read_bytes(), source_file.read_bytes())
                 self.assertEqual(
                     asset.stored_path,
                     f"user/assets/images/{asset.asset_id}.png",
@@ -77,8 +79,8 @@ class AssetFileStorageTests(unittest.TestCase):
                 first_file = storage.repo_root / "uploads" / "duplicate-a.png"
                 second_file = storage.repo_root / "uploads" / "duplicate-b.png"
                 first_file.parent.mkdir(parents=True)
-                first_file.write_bytes(b"first image")
-                second_file.write_bytes(b"second image")
+                write_test_image(first_file, color=(255, 0, 0))
+                write_test_image(second_file, color=(0, 0, 255))
 
                 first_asset = store_uploaded_asset_file(
                     ASSET_TYPE_IMAGE,
@@ -102,7 +104,7 @@ class AssetFileStorageTests(unittest.TestCase):
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "resolved.png"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"resolved image")
+                write_test_image(source_file)
                 asset = store_uploaded_asset_file(
                     ASSET_TYPE_IMAGE,
                     source_file,
@@ -145,7 +147,7 @@ class AssetFileStorageTests(unittest.TestCase):
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "copy-failure.png"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"copy failure image")
+                write_test_image(source_file)
 
                 with (
                     patch("app.storage.asset_files.shutil.copy2", side_effect=OSError),
@@ -166,7 +168,7 @@ class AssetFileStorageTests(unittest.TestCase):
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "portrait.png"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"portrait image")
+                write_test_image(source_file)
 
                 with patch("app.storage.asset_files.logger") as logger:
                     asset = store_uploaded_asset_file(
@@ -184,23 +186,50 @@ class AssetFileStorageTests(unittest.TestCase):
                     f"user/assets/images/{asset.asset_id}.png",
                 )
 
-    def test_missing_display_name_uses_fallback_and_logs_warning(self) -> None:
+    def test_rejects_fake_image_before_copying_or_metadata(self) -> None:
+        with patched_asset_storage() as storage:
+            with bootstrap_test_database(storage.repo_root) as connection:
+                source_file = storage.repo_root / "uploads" / "fake.png"
+                source_file.parent.mkdir(parents=True)
+                source_file.write_bytes(b"not really an image")
+
+                with self.assertRaises(ValueError):
+                    store_uploaded_asset_file(
+                        ASSET_TYPE_IMAGE,
+                        source_file,
+                        "fake.png",
+                        connection,
+                    )
+
+                stored_files = list(storage.image_directory.glob("*"))
+                asset_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS asset_count
+                    FROM assets
+                    WHERE is_built_in = 0
+                    """
+                ).fetchone()["asset_count"]
+
+                self.assertEqual(stored_files, [])
+                self.assertEqual(asset_count, 0)
+
+    def test_missing_font_display_name_uses_fallback_and_logs_warning(self) -> None:
         with patched_asset_storage() as storage:
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "empty-name"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"image bytes")
+                source_file.write_bytes(b"font bytes")
 
                 with patch("app.storage.asset_files.logger") as logger:
                     asset = store_uploaded_asset_file(
-                        ASSET_TYPE_IMAGE,
+                        ASSET_TYPE_FONT,
                         source_file,
                         "",
                         connection,
                     )
 
                 logger.warning.assert_called()
-                self.assertEqual(asset.display_name, "Uploaded image")
+                self.assertEqual(asset.display_name, "Uploaded font")
 
 
 def get_logged_text(logger: object) -> str:
@@ -209,6 +238,14 @@ def get_logged_text(logger: object) -> str:
         for call in logger.method_calls
         for value in call.args
     )
+
+
+def write_test_image(
+    image_path: Path,
+    color: tuple[int, int, int] = (255, 255, 255),
+) -> None:
+    with Image.new("RGB", (2, 2), color=color) as image:
+        image.save(image_path, format="PNG")
 
 
 @contextmanager
