@@ -29,6 +29,7 @@ Asset Metadata Storage does not own:
 
 - Copying uploaded files into local storage.
 - Validating uploaded file types.
+- Calculating file hashes or checking whether a file hash already belongs to another asset record.
 - Deleting asset records or physical files.
 - Extracting font names from font files.
 - Rendering asset pickers or other user interface flows.
@@ -58,6 +59,7 @@ The system writes asset metadata rows into `app.sqlite` and returns asset metada
 
 Asset Metadata Storage currently interacts with:
 
+- Asset Hash Deduplication, which can calculate an exact file hash and look for an existing asset ID before future upload storage creates new metadata.
 - Global App Storage, which opens `app.sqlite`, applies migrations, and triggers default asset seeding.
 - Backend storage modules that need to create, read, or list asset metadata.
 - The central logger, which records creation, default seeding, default lookup, validation, and database failure events.
@@ -83,6 +85,7 @@ Cross-system edge cases:
 
 - Stored paths must not be logged in full, because future upload work may produce local user-owned paths.
 - The metadata layer must not assume the physical file already exists.
+- The metadata layer must not treat duplicate display names as duplicate files; exact file hash lookup belongs to Asset Hash Deduplication.
 - Font metadata must not pretend extraction happened; `full_font_name` is optional until a font extraction system provides it.
 - Global App Storage must seed built-in defaults only after the assets table migration has been applied.
 
@@ -96,11 +99,13 @@ Cross-system edge cases:
 - Built-in asset metadata may omit the file hash.
 - `is_built_in` is the stored source of truth for whether an asset is user-uploaded or deletable.
 - `full_font_name` must remain optional and caller-provided until font extraction exists.
+- Exact file deduplication must be performed by the dedicated deduplication helper before callers create metadata.
 - Asset metadata code must use the central database helper instead of opening a separate app database connection ad hoc.
 - Logs must not include full stored paths.
 
 ## Implementation Landmarks
 
+- `app/storage/asset_deduplication.py` owns exact file hash calculation and duplicate asset lookup.
 - `app/storage/migrations.py` owns the `assets` table migration.
 - `app/storage/assets.py` owns asset metadata validation and create/read/list behavior.
 - `app/storage/default_assets.py` owns known built-in default definitions, seeding, and main default lookup helpers.
@@ -114,6 +119,7 @@ Before editing Asset Metadata Storage, check:
 - Whether schema changes need a new handwritten migration and `PRAGMA user_version` advance.
 - Whether a built-in default needs a stable app-defined ID instead of a generated UUID.
 - Whether invalid metadata is rejected before database writes.
+- Whether duplicate asset checks belong in Asset Hash Deduplication instead of metadata creation.
 - Whether default seeding remains idempotent.
 - Whether database failures are logged and re-raised without swallowing the original error.
 - Whether logs avoid full stored paths and other local user-owned details.

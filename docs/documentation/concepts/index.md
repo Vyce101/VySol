@@ -6,6 +6,7 @@ Concept pages explain system contracts and features: what each system owns, what
 
 ## Pages
 
+- [Asset Hash Deduplication](asset-hash-deduplication.md)
 - [Asset Metadata Storage](asset-metadata-storage.md)
 - [Chunk Storage](chunk-storage.md)
 - [Committed Source Storage](committed-source-storage.md)
