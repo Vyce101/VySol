@@ -6,7 +6,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs a deterministic layer between parsed source text and future persisted chunk records. Split Point Search chooses one boundary at a time, but ingestion callers need a complete ordered list of main chunks before later systems can add overlap, source metadata, offsets, embeddings, graph extraction, or storage.
+VySol needs a deterministic layer between parsed source text and future persisted chunk records. Split Point Search chooses one boundary at a time, but ingestion callers need a complete ordered list of main chunks before later systems can add overlap, source metadata, embeddings, graph extraction, or storage.
 
 Keeping Main Chunk Generation separate from parsing and storage makes the splitter easier to test. It lets backend code prove that parsed text is divided without losing, duplicating, trimming, normalizing, or rewriting valid text before any database or downstream ingestion behavior is added.
 
@@ -18,6 +18,7 @@ Main Chunk Generation owns:
 - Calling Split Point Search repeatedly until all parsed text has been consumed.
 - Preserving chunk text exactly as Python string slices from the parsed input.
 - Assigning in-memory chunk numbers starting at `1` in source text order.
+- Calculating character start and end offsets from the parsed input.
 - Skipping only exact empty string chunks.
 - Preserving whitespace-only chunks when they are produced by valid slicing.
 - Logging generated chunk counts at `DEBUG`.
@@ -28,7 +29,7 @@ Main Chunk Generation does not own:
 - Parsing files or extracting text from source documents.
 - Cleaning, trimming, normalizing, deduplicating, or rewriting text.
 - Calculating overlap text.
-- Creating source records, book numbers, source IDs, chunk IDs, offsets, or saved chunk records.
+- Creating source records, book numbers, source IDs, chunk IDs, or saved chunk records.
 - Writing to SQLite or any other storage.
 - Creating embeddings, graph records, retrieval records, manifests, HTTP responses, or UI state.
 - Adding FastAPI routes or user-facing ingestion controls.
@@ -37,9 +38,9 @@ Main Chunk Generation does not own:
 
 Backend ingestion code passes already-parsed text and validated splitter settings into the main chunk helper. The helper starts with the full parsed text as the remaining text.
 
-For each loop, it asks Split Point Search for the next split index using the configured chunk size and max lookback size. It slices the current remaining text from the start through that split index, appends a main chunk when the slice is not exactly empty, and then continues with the unsliced remainder.
+For each loop, it asks Split Point Search for the next split index using the configured chunk size and max lookback size. It slices the current remaining text from the start through that split index, calculates offsets from the number of parsed characters already consumed, appends a main chunk when the slice is not exactly empty, and then continues with the unsliced remainder.
 
-The returned list preserves source order. Joining all returned `chunk_text` values should reconstruct the parsed input for normal non-empty input, including leading whitespace, trailing whitespace, delimiter characters, and whitespace-only content.
+The returned list preserves source order. Joining all returned `chunk_text` values should reconstruct the parsed input for normal non-empty input, including leading whitespace, trailing whitespace, delimiter characters, and whitespace-only content. Chunk offsets are Python string character indexes into that same parsed input, and `character_end_offset` is exclusive.
 
 ## Inputs
 
@@ -54,9 +55,9 @@ It does not receive source files, file paths, database connections, provider res
 
 ## Outputs
 
-The system returns an in-memory list of main chunk objects. Each object contains an ordered chunk number and exact chunk text.
+The system returns an in-memory list of main chunk objects. Each object contains an ordered chunk number, exact chunk text, character start offset, and exclusive character end offset.
 
-It does not create source records, final storage chunk records, overlap text, chunk IDs, book numbers, character offsets, database rows, files, embeddings, graph records, HTTP responses, UI state, or saved progress.
+It does not create source records, final storage chunk records, overlap text, chunk IDs, book numbers, database rows, files, embeddings, graph records, HTTP responses, UI state, or saved progress.
 
 ## Failure Behavior
 
@@ -74,7 +75,7 @@ Main Chunk Generation currently interacts with:
 - Draft World Splitter Settings, whose validated setting shape supplies chunk size and max lookback size before committed ingestion work exists.
 - World Splitter Settings Storage, whose committed settings can later supply the same values for world ingestion.
 - Future parser systems, which should pass already-extracted text into this helper rather than making it read files.
-- Chunk Storage, which can later receive caller-prepared final chunk records after source metadata, IDs, offsets, and overlap are handled outside this helper.
+- Chunk Storage, which can later receive caller-prepared final chunk records after source metadata, IDs, book numbers, and overlap are handled outside this helper.
 - The central logger, which records count summaries and unexpected splitter failures without text content.
 
 It must stay separate from parser logic, storage repositories, overlap generation, route handlers, embeddings, graph extraction, retrieval, and UI systems.
@@ -91,6 +92,7 @@ Internal edge cases:
 - Whitespace-only parsed text is preserved as content when produced by slicing.
 - Exact empty slices are skipped.
 - Chunk numbers start at `1` and increment in returned order.
+- Character start and end offsets stay contiguous across returned chunks.
 - Non-progressing split indexes are rejected.
 - Out-of-range split indexes are rejected.
 
@@ -99,7 +101,7 @@ Cross-system edge cases:
 - Parser systems must pass parsed text rather than source files or path data.
 - Caller code must validate splitter settings before using this helper.
 - Overlap generation must remain outside this helper so main chunk text stays clean.
-- Storage code must not treat in-memory main chunks as final database records without adding source IDs, book numbers, chunk IDs, overlap text, and offsets through the appropriate caller-owned flow.
+- Storage code must not treat in-memory main chunks as final database records without adding source IDs, book numbers, chunk IDs, and overlap text through the appropriate caller-owned flow.
 - Logs must not include parsed text, source text, chunk text, overlap text, or local path details.
 
 ## Invariants
@@ -110,6 +112,8 @@ Cross-system edge cases:
 - Whitespace-only chunks are valid when produced by slicing.
 - Only exact empty strings are skipped.
 - Chunk numbers are in-memory ordering values, not persisted database identities.
+- Character offsets are Python string indexes into parsed text, not byte or token offsets.
+- Character end offsets are exclusive.
 - Split indexes are character indexes, not token counts or byte counts.
 - This system must remain pure backend string logic with no parser, overlap, database, route, UI, provider, embedding, graph, retrieval, or manifest responsibilities.
 - Logs must never include source text or chunk text.
@@ -117,7 +121,7 @@ Cross-system edge cases:
 ## Implementation Landmarks
 
 - `app/ingestion/splitting` owns Split Point Search and Main Chunk Generation.
-- `tests/test_main_chunk_generation.py` covers ordering, exact text preservation, empty input, whitespace preservation, hard splits, delimiter-based splits, chunk numbering, and defensive splitter failures.
+- `tests/test_main_chunk_generation.py` covers ordering, exact text preservation, empty input, whitespace preservation, hard splits, delimiter-based splits, chunk numbering, character offsets, and defensive splitter failures.
 
 ## What AI/Coders Must Check Before Changing This System
 
@@ -125,6 +129,7 @@ Before editing Main Chunk Generation, check:
 
 - Whether the change belongs to main chunk generation or to parsing, overlap, storage, routing, embeddings, graph extraction, retrieval, or UI behavior.
 - Whether returned chunk text still reconstructs the parsed input when joined.
+- Whether returned offsets still identify each chunk's exact position in the parsed input.
 - Whether whitespace-only content is still preserved.
 - Whether exact empty chunks are the only skipped chunks.
 - Whether Split Point Search remains the only boundary chooser.

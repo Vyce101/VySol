@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed main chunk generation to include character offsets with each returned chunk.
 - Changed committed world timestamps to ISO 8601 UTC format for naturally sortable SQLite values.
 - Hardened world splitter settings storage so locked settings stay unchanged and splitter version stays backend-controlled.
 
