@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a backend TXT parser for clean in-memory text decoding before future source commits.
+- Added a TXT Parser concept page.
 - Added main chunk generation for ordered in-memory chunks from parsed text.
 - Added backend split-point search for choosing one character-based ingestion boundary.
 - Added a Split Point Search concept page.
