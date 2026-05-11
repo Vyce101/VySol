@@ -42,7 +42,7 @@ The default settings are `chunk_size` `4000`, `max_lookback_size` `1000`, `overl
 
 Before a future successful commit, backend code may replace the draft splitter settings in memory. Updates still store replacement values exactly as provided so draft editing can stay separate from use-time validation. When a future Start or Resume flow is ready to process staged ingestion work, it should validate the current settings first and reject invalid settings before any parsing, splitting, source copying, or commit work begins.
 
-Validation accepts whole-number character counts only. `chunk_size` must be at least `1`, `max_lookback_size` must be at least `0` and less than `chunk_size`, and `overlap_size` must be at least `0`. `splitter_version` must be a non-empty string. Overlap can be larger than chunk size because future splitting behavior may use it independently from the fixed chunk priority.
+Validation accepts whole-number character counts only. `chunk_size` must be at least `1`, `max_lookback_size` must be at least `0` and less than `chunk_size`, and `overlap_size` must be at least `0`. `splitter_version` must be a non-empty string. Overlap can be larger than chunk size because previous-context overlap is calculated independently from the main chunk boundary.
 
 After a future commit or discard action, the draft-world registry can remove the draft so the temporary settings are no longer available. Persisting and locking committed-world splitter settings happens outside this draft registry boundary.
 
