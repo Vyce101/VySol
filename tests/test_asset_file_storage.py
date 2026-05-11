@@ -21,6 +21,15 @@ from app.storage.assets import (
 )
 from app.storage.database import bootstrap_global_database, close_global_connection
 
+TEST_FONT_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "app"
+    / "assets"
+    / "fonts"
+    / "Inter"
+    / "Inter-VariableFont_opsz,wght.ttf"
+)
+
 
 class AssetFileStorageTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -56,7 +65,7 @@ class AssetFileStorageTests(unittest.TestCase):
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "title-font.ttf"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"font bytes")
+                write_test_font(source_file)
 
                 asset = store_uploaded_asset_file(
                     ASSET_TYPE_FONT,
@@ -67,7 +76,7 @@ class AssetFileStorageTests(unittest.TestCase):
 
                 stored_file = storage.font_directory / f"{asset.asset_id}.ttf"
                 self.assertTrue(stored_file.exists())
-                self.assertEqual(stored_file.read_bytes(), b"font bytes")
+                self.assertEqual(stored_file.read_bytes(), source_file.read_bytes())
                 self.assertEqual(
                     asset.stored_path,
                     f"user/assets/fonts/{asset.asset_id}.ttf",
@@ -213,18 +222,45 @@ class AssetFileStorageTests(unittest.TestCase):
                 self.assertEqual(stored_files, [])
                 self.assertEqual(asset_count, 0)
 
+    def test_rejects_fake_font_before_copying_or_metadata(self) -> None:
+        with patched_asset_storage() as storage:
+            with bootstrap_test_database(storage.repo_root) as connection:
+                source_file = storage.repo_root / "uploads" / "fake.ttf"
+                source_file.parent.mkdir(parents=True)
+                source_file.write_bytes(b"not really a font")
+
+                with self.assertRaises(ValueError):
+                    store_uploaded_asset_file(
+                        ASSET_TYPE_FONT,
+                        source_file,
+                        "fake.ttf",
+                        connection,
+                    )
+
+                stored_files = list(storage.font_directory.glob("*"))
+                asset_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS asset_count
+                    FROM assets
+                    WHERE is_built_in = 0
+                    """
+                ).fetchone()["asset_count"]
+
+                self.assertEqual(stored_files, [])
+                self.assertEqual(asset_count, 0)
+
     def test_missing_font_display_name_uses_fallback_and_logs_warning(self) -> None:
         with patched_asset_storage() as storage:
             with bootstrap_test_database(storage.repo_root) as connection:
                 source_file = storage.repo_root / "uploads" / "empty-name"
                 source_file.parent.mkdir(parents=True)
-                source_file.write_bytes(b"font bytes")
+                write_test_font(source_file)
 
                 with patch("app.storage.asset_files.logger") as logger:
                     asset = store_uploaded_asset_file(
                         ASSET_TYPE_FONT,
                         source_file,
-                        "",
+                        " .ttf",
                         connection,
                     )
 
@@ -246,6 +282,11 @@ def write_test_image(
 ) -> None:
     with Image.new("RGB", (2, 2), color=color) as image:
         image.save(image_path, format="PNG")
+
+
+def write_test_font(font_path: Path) -> None:
+    font_path.parent.mkdir(parents=True, exist_ok=True)
+    font_path.write_bytes(TEST_FONT_PATH.read_bytes())
 
 
 @contextmanager
