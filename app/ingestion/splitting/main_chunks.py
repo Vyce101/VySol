@@ -15,6 +15,8 @@ class MainChunkGenerationError(RuntimeError):
 class MainChunk:
     chunk_number: int
     chunk_text: str
+    character_start_offset: int
+    character_end_offset: int
 
 
 def generate_main_chunks(
@@ -23,6 +25,7 @@ def generate_main_chunks(
 ) -> list[MainChunk]:
     chunks: list[MainChunk] = []
     remaining_text = parsed_text
+    consumed_character_count = 0
 
     while remaining_text:
         split_index = find_safe_split_index(
@@ -31,15 +34,20 @@ def generate_main_chunks(
             len(chunks),
         )
         chunk_text = remaining_text[:split_index]
+        character_start_offset = consumed_character_count
+        character_end_offset = character_start_offset + len(chunk_text)
 
         if chunk_text != "":
             chunks.append(
                 MainChunk(
                     chunk_number=len(chunks) + 1,
                     chunk_text=chunk_text,
+                    character_start_offset=character_start_offset,
+                    character_end_offset=character_end_offset,
                 )
             )
 
+        consumed_character_count += split_index
         remaining_text = remaining_text[split_index:]
 
     logger.debug("Generated main chunks: count=%s", len(chunks))
