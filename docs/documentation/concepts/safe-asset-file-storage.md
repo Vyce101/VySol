@@ -1,6 +1,6 @@
 # Safe Asset File Storage
 
-Safe Asset File Storage is VySol's backend system for copying uploaded image and font files into repo-local user storage without trusting user-provided filenames for the stored filename. It stores uploaded images under `user/assets/images/`, uploaded fonts under `user/assets/fonts/`, creates matching asset metadata, and resolves stored files later by asset ID.
+Safe Asset File Storage is VySol's backend system for copying accepted uploaded image and font files into repo-local user storage without trusting user-provided filenames for the stored filename. It stores uploaded images under `user/assets/images/`, uploaded fonts under `user/assets/fonts/`, creates matching asset metadata, and resolves stored files later by asset ID.
 
 This page is for developers, power users, and AI coding agents that need to understand the uploaded asset file storage contract before changing uploads, asset metadata, path handling, logging, or future asset UI.
 
@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 Uploaded asset filenames can contain display-friendly names, but they are not safe stable storage keys. VySol needs uploaded assets to have stable internal filenames that cannot collide through duplicate display names, cannot depend on local user paths, and can be resolved later from metadata.
 
-Safe Asset File Storage keeps this responsibility separate from asset metadata, hash deduplication, content validation, font extraction, deletion, and UI. That boundary lets upload-facing code store a file safely without turning file storage into a broader asset-processing system.
+Safe Asset File Storage keeps this responsibility separate from asset metadata, hash deduplication, image validation rules, font extraction, deletion, and UI. That boundary lets upload-facing code store a file safely without turning file storage into a broader asset-processing system.
 
 ## Ownership Boundary
 
@@ -27,7 +27,8 @@ Safe Asset File Storage owns:
 
 Safe Asset File Storage does not own:
 
-- Validating image or font contents.
+- Defining image validation rules.
+- Validating font contents.
 - Detecting or reusing duplicate hashes.
 - Extracting font names from font files.
 - Deleting asset files or metadata.
@@ -36,9 +37,9 @@ Safe Asset File Storage does not own:
 
 ## Normal Flow
 
-A backend caller passes an asset type, a local source file path, and the original filename to the storage helper. The helper chooses the correct user asset directory from the asset type, generates a new asset ID, derives a safe optional suffix from the original filename, and builds a destination filename from the asset ID.
+A backend caller passes an asset type, a local source file path, and the original filename to the storage helper. The helper chooses the correct user asset directory from the asset type and calls Image Upload Validation before storing image uploads. Font uploads continue through this helper without image validation.
 
-Before copying, the helper confirms the destination path stays inside the intended asset storage directory. It calculates a SHA-256 file hash for metadata, copies the source file with Python stdlib file tools, creates the asset metadata record, logs the successful storage event, and returns the saved asset metadata.
+After image validation succeeds, the helper generates a new asset ID, derives a safe optional suffix from the original filename, and builds a destination filename from the asset ID. Before copying, it confirms the destination path stays inside the intended asset storage directory. It calculates a SHA-256 file hash for metadata, copies the source file with Python stdlib file tools, creates the asset metadata record, logs the successful storage event, and returns the saved asset metadata.
 
 Later, a backend caller can resolve an asset ID. The resolver reads asset metadata, treats the stored path as repo-relative metadata, rejects absolute paths or parent-directory traversal, and returns the resolved local file path when the metadata is safe.
 
@@ -62,11 +63,11 @@ Safe Asset File Storage produces:
 - A returned asset metadata object for backend callers.
 - A resolved local file path when an asset ID points to safe stored metadata.
 
-It does not produce UI state, extracted font names, validated media metadata, duplicate decisions, or deletion results.
+It does not produce UI state, extracted font names, validation policy, duplicate decisions, or deletion results.
 
 ## Failure Behavior
 
-Unsupported asset types are rejected before a copy. Unsafe destination or resolver paths are logged at `ERROR` and rejected without logging raw user paths. Copy failures are logged at `ERROR` and re-raised so callers can fail the upload flow explicitly.
+Unsupported asset types are rejected before a copy. Image validation rejections happen before hash calculation, copy, or metadata creation. Unsafe destination or resolver paths are logged at `ERROR` and rejected without logging raw user paths. Copy failures are logged at `ERROR` and re-raised so callers can fail the upload flow explicitly.
 
 Unsupported original filename path patterns, unusable display names, or unsupported suffixes are logged at `WARNING`. The helper still stores the file when it can choose a safe internal filename and display-name fallback.
 
@@ -76,17 +77,19 @@ Safe Asset File Storage currently interacts with:
 
 - Asset Metadata Storage, by creating uploaded asset metadata and resolving metadata by asset ID.
 - Asset Hash Deduplication, by reusing its SHA-256 hash calculation helper without performing duplicate lookup.
+- Image Upload Validation, by calling it before storing image uploads.
 - Global App Storage, by relying on the app database connection path and migrations used by asset metadata.
 - User-owned storage paths, by writing files under the repo-local `user/assets/` area.
 - The central logger, by recording storage success, unsafe path rejection, copy failures, and unsupported filename patterns without exposing raw local paths.
 
-Future upload validation, font extraction, deletion, and UI systems may call or wrap this system while keeping their own responsibilities separate.
+Future font validation, deletion, and UI systems may call or wrap this system while keeping their own responsibilities separate.
 
 ## Current Edge Cases
 
 Internal edge cases:
 
 - Images and fonts are routed to different storage directories.
+- Invalid image uploads are rejected before copy or metadata creation.
 - Duplicate display names are allowed because the stored filename uses the asset ID.
 - Original filenames with path separators keep only the final filename component for display and suffix decisions.
 - Unsupported suffix patterns are ignored instead of becoming part of the stored filename.
@@ -98,6 +101,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Uploaded asset metadata requires a file hash, so storage must calculate one before metadata creation.
+- Image validation must run before hash calculation so rejected images are not treated as accepted asset candidates.
 - Safe storage must not call duplicate lookup because hash deduplication is a separate decision point.
 - Stored paths are metadata and must stay repo-relative so resolvers can reject absolute paths and traversal.
 - Built-in asset references can remain outside `user/assets/` because this system owns uploaded files only.
@@ -112,12 +116,14 @@ Cross-system edge cases:
 - Display names must not be treated as unique file identifiers.
 - Stored paths must be repo-relative metadata.
 - Resolver logic must reject absolute paths and parent-directory traversal.
+- Image validation must happen before image hash calculation, file copy, or metadata creation.
 - File copy must happen before metadata creation.
-- Content validation, hash deduplication, font-name extraction, deletion, and UI must remain separate responsibilities.
+- Image validation rules, hash deduplication, font-name extraction, deletion, and UI must remain separate responsibilities.
 
 ## Implementation Landmarks
 
 - `app/storage/asset_files.py` owns uploaded file copying and asset ID path resolution.
+- `app/storage/image_upload_validation.py` owns image upload validation rules.
 - `app/storage/assets.py` owns asset metadata creation, validation, read, and list behavior.
 - `app/storage/asset_deduplication.py` owns file hash calculation and exact duplicate lookup.
 - `app/storage/paths.py` owns repo-local user asset directory helpers.
@@ -128,6 +134,7 @@ Cross-system edge cases:
 Before editing Safe Asset File Storage, check:
 
 - Whether the requested change belongs in file storage or in validation, deduplication, deletion, font extraction, metadata-only storage, or UI.
+- Whether image validation still happens before hash calculation, file copy, and metadata creation.
 - Whether the stored filename still avoids user-provided filename control.
 - Whether copied files remain under the correct `user/assets/` child directory.
 - Whether metadata creation still happens only after a successful copy.
