@@ -11,6 +11,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added chunk storage in each world database with separate book numbers, chunk numbers, and overlap text.
+- Added a Chunk Storage concept page.
 - Added committed source metadata storage in each world database.
 - Added a Committed Source Storage concept page.
 - Added world-level splitter settings storage in each world database.

@@ -7,6 +7,7 @@ Concept pages explain system contracts and features: what each system owns, what
 ## Pages
 
 - [Asset Metadata Storage](asset-metadata-storage.md)
+- [Chunk Storage](chunk-storage.md)
 - [Committed Source Storage](committed-source-storage.md)
 - [Committed World Folder Bootstrap](committed-world-folder-bootstrap.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
