@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a backend EPUB parser for extracting in-memory text from EPUB files in reading order.
+- Added an EPUB Parser concept page.
 - Added a backend TXT parser for clean in-memory text decoding before future source commits.
 - Added a TXT Parser concept page.
 - Added main chunk generation for ordered in-memory chunks from parsed text.
