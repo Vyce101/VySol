@@ -45,6 +45,12 @@ class CommittedWorldUpdate:
     description: str | None = None
 
 
+@dataclass(frozen=True)
+class CommittedWorldAssetReference:
+    world_id: str
+    display_name: str
+
+
 def create_committed_world(
     world: NewCommittedWorld,
     connection: sqlite3.Connection | None = None,
@@ -333,6 +339,71 @@ def has_committed_world_asset_reference(
     return row is not None
 
 
+def list_committed_world_asset_references(
+    asset_id: str,
+    connection: sqlite3.Connection,
+) -> list[CommittedWorldAssetReference]:
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                world_id,
+                display_name
+            FROM worlds
+            WHERE background_asset_id = ? OR font_asset_id = ?
+            ORDER BY display_name_key, world_id
+            """,
+            (asset_id, asset_id),
+        ).fetchall()
+    except sqlite3.Error:
+        logger.error("Failed to list committed world asset references.", exc_info=True)
+        raise
+
+    return [committed_world_asset_reference_from_row(row) for row in rows]
+
+
+def replace_committed_world_background_asset_references(
+    asset_id: str,
+    fallback_asset_id: str,
+    connection: sqlite3.Connection,
+) -> int:
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE worlds
+            SET background_asset_id = ?
+            WHERE background_asset_id = ?
+            """,
+            (fallback_asset_id, asset_id),
+        )
+    except sqlite3.Error:
+        logger.error("Failed to update committed world background references.", exc_info=True)
+        raise
+
+    return cursor.rowcount
+
+
+def replace_committed_world_font_asset_references(
+    asset_id: str,
+    fallback_asset_id: str,
+    connection: sqlite3.Connection,
+) -> int:
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE worlds
+            SET font_asset_id = ?
+            WHERE font_asset_id = ?
+            """,
+            (fallback_asset_id, asset_id),
+        )
+    except sqlite3.Error:
+        logger.error("Failed to update committed world font references.", exc_info=True)
+        raise
+
+    return cursor.rowcount
+
+
 def validate_new_committed_world(world: NewCommittedWorld) -> NewCommittedWorld:
     validate_committed_world_fields(
         world.display_name,
@@ -421,4 +492,13 @@ def committed_world_from_row(row: sqlite3.Row) -> CommittedWorld:
         background_asset_id=row["background_asset_id"],
         font_asset_id=row["font_asset_id"],
         last_used_at=row["last_used_at"],
+    )
+
+
+def committed_world_asset_reference_from_row(
+    row: sqlite3.Row,
+) -> CommittedWorldAssetReference:
+    return CommittedWorldAssetReference(
+        world_id=row["world_id"],
+        display_name=row["display_name"],
     )
