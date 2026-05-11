@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.logger import get_logger
 from app.storage.asset_deduplication import calculate_asset_file_hash
+from app.storage.font_upload_validation import validate_uploaded_font_file
 from app.storage.image_upload_validation import validate_uploaded_image_file
 from app.storage.assets import (
     ASSET_TYPE_FONT,
@@ -81,10 +82,12 @@ def validate_asset_file_upload(
     source_file_path: Path,
     original_filename: str,
 ) -> None:
-    if asset_type != ASSET_TYPE_IMAGE:
+    if asset_type == ASSET_TYPE_IMAGE:
+        validate_uploaded_image_file(source_file_path, original_filename)
         return
 
-    validate_uploaded_image_file(source_file_path, original_filename)
+    if asset_type == ASSET_TYPE_FONT:
+        validate_uploaded_font_file(source_file_path, original_filename)
 
 
 def resolve_asset_file_path(
