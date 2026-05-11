@@ -18,7 +18,17 @@ class MainChunkGenerationTests(unittest.TestCase):
             make_splitter_settings(chunk_size=100, max_lookback_size=20),
         )
 
-        self.assertEqual(chunks, [MainChunk(chunk_number=1, chunk_text=parsed_text)])
+        self.assertEqual(
+            chunks,
+            [
+                MainChunk(
+                    chunk_number=1,
+                    chunk_text=parsed_text,
+                    character_start_offset=0,
+                    character_end_offset=len(parsed_text),
+                )
+            ],
+        )
 
     def test_generates_ordered_chunks_using_preferred_split_points(self) -> None:
         parsed_text = "First paragraph.\n\nSecond sentence. Third sentence."
@@ -34,12 +44,28 @@ class MainChunkGenerationTests(unittest.TestCase):
         self.assertEqual(
             chunks,
             [
-                MainChunk(chunk_number=1, chunk_text="First paragraph.\n\n"),
-                MainChunk(chunk_number=2, chunk_text="Second sentence."),
-                MainChunk(chunk_number=3, chunk_text=" Third sentence."),
+                MainChunk(
+                    chunk_number=1,
+                    chunk_text="First paragraph.\n\n",
+                    character_start_offset=0,
+                    character_end_offset=18,
+                ),
+                MainChunk(
+                    chunk_number=2,
+                    chunk_text="Second sentence.",
+                    character_start_offset=18,
+                    character_end_offset=34,
+                ),
+                MainChunk(
+                    chunk_number=3,
+                    chunk_text=" Third sentence.",
+                    character_start_offset=34,
+                    character_end_offset=50,
+                ),
             ],
         )
         self.assertEqual(join_chunk_text(chunks), parsed_text)
+        self.assertEqual(chunk_offset_ranges(chunks), [(0, 18), (18, 34), (34, 50)])
 
     def test_hard_splits_when_no_delimiter_is_found(self) -> None:
         parsed_text = "abcdefghijklmnopqrstuvwxyz"
@@ -52,12 +78,28 @@ class MainChunkGenerationTests(unittest.TestCase):
         self.assertEqual(
             chunks,
             [
-                MainChunk(chunk_number=1, chunk_text="abcdefghij"),
-                MainChunk(chunk_number=2, chunk_text="klmnopqrst"),
-                MainChunk(chunk_number=3, chunk_text="uvwxyz"),
+                MainChunk(
+                    chunk_number=1,
+                    chunk_text="abcdefghij",
+                    character_start_offset=0,
+                    character_end_offset=10,
+                ),
+                MainChunk(
+                    chunk_number=2,
+                    chunk_text="klmnopqrst",
+                    character_start_offset=10,
+                    character_end_offset=20,
+                ),
+                MainChunk(
+                    chunk_number=3,
+                    chunk_text="uvwxyz",
+                    character_start_offset=20,
+                    character_end_offset=26,
+                ),
             ],
         )
         self.assertEqual(join_chunk_text(chunks), parsed_text)
+        self.assertEqual(chunk_offset_ranges(chunks), [(0, 10), (10, 20), (20, 26)])
 
     def test_preserves_leading_and_trailing_whitespace(self) -> None:
         parsed_text = "  Leading words. Trailing words.  "
@@ -68,6 +110,7 @@ class MainChunkGenerationTests(unittest.TestCase):
         )
 
         self.assertEqual(join_chunk_text(chunks), parsed_text)
+        self.assertEqual(chunk_offset_ranges(chunks), [(0, 16), (16, 34)])
         self.assertTrue(chunks[0].chunk_text.startswith("  "))
         self.assertTrue(chunks[-1].chunk_text.endswith("  "))
 
@@ -83,9 +126,24 @@ class MainChunkGenerationTests(unittest.TestCase):
         self.assertEqual(
             chunks,
             [
-                MainChunk(chunk_number=1, chunk_text="\n\n"),
-                MainChunk(chunk_number=2, chunk_text="  "),
-                MainChunk(chunk_number=3, chunk_text=" \n"),
+                MainChunk(
+                    chunk_number=1,
+                    chunk_text="\n\n",
+                    character_start_offset=0,
+                    character_end_offset=2,
+                ),
+                MainChunk(
+                    chunk_number=2,
+                    chunk_text="  ",
+                    character_start_offset=2,
+                    character_end_offset=4,
+                ),
+                MainChunk(
+                    chunk_number=3,
+                    chunk_text=" \n",
+                    character_start_offset=4,
+                    character_end_offset=6,
+                ),
             ],
         )
 
@@ -181,6 +239,13 @@ def make_splitter_settings(
 
 def join_chunk_text(chunks: list[MainChunk]) -> str:
     return "".join(chunk.chunk_text for chunk in chunks)
+
+
+def chunk_offset_ranges(chunks: list[MainChunk]) -> list[tuple[int, int]]:
+    return [
+        (chunk.character_start_offset, chunk.character_end_offset)
+        for chunk in chunks
+    ]
 
 
 if __name__ == "__main__":
