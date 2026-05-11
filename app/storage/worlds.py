@@ -312,6 +312,27 @@ def has_committed_world(world_id: str, connection: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def has_committed_world_asset_reference(
+    asset_id: str,
+    connection: sqlite3.Connection,
+) -> bool:
+    try:
+        row = connection.execute(
+            """
+            SELECT world_id
+            FROM worlds
+            WHERE background_asset_id = ? OR font_asset_id = ?
+            LIMIT 1
+            """,
+            (asset_id, asset_id),
+        ).fetchone()
+    except sqlite3.Error:
+        logger.error("Failed to check committed world asset references.", exc_info=True)
+        raise
+
+    return row is not None
+
+
 def validate_new_committed_world(world: NewCommittedWorld) -> NewCommittedWorld:
     validate_committed_world_fields(
         world.display_name,
