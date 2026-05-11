@@ -13,6 +13,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Committed World Folder Bootstrap](committed-world-folder-bootstrap.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
 - [Draft World Splitter Settings](draft-world-splitter-settings.md)
+- [Font Upload Validation](font-upload-validation.md)
 - [Global App Storage](global-app-storage.md)
 - [Image Upload Validation](image-upload-validation.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)

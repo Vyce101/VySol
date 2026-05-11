@@ -11,6 +11,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend validation for uploaded font files before they are stored.
+- Added a Font Upload Validation concept page.
 - Added backend validation for uploaded image files before they are stored.
 - Added safe backend storage for uploaded image and font asset files.
 - Added a Safe Asset File Storage concept page.
