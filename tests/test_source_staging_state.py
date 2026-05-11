@@ -271,6 +271,133 @@ class SourceStagingStateTests(unittest.TestCase):
             ["entry-1", "entry-3"],
         )
 
+    def test_removes_existing_world_staged_source_item_only(self) -> None:
+        registry = SourceStagingStateRegistry()
+        registry.replace_staging_state(
+            "existing-world-1",
+            [
+                make_entry("entry-1", "one.txt"),
+                make_entry("entry-2", "two.txt"),
+                make_entry("entry-3", "three.txt"),
+            ],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            state = registry.remove_existing_world_source_item(
+                "existing-world-1",
+                staged_item("entry-2"),
+            )
+
+        self.assertEqual(
+            [entry.staging_entry_id for entry in state.entries],
+            ["entry-1", "entry-3"],
+        )
+        logger.debug.assert_called_once_with(
+            "Removed temporary source staging entry: staging_context_id=%s "
+            "staging_entry_id=%s count=%s",
+            "existing-world-1",
+            "entry-2",
+            1,
+        )
+        logger.warning.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_committed_source_removal_attempt_returns_unchanged_state(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt"), make_entry("entry-2", "two.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            state = registry.remove_existing_world_source_item(
+                "existing-world-1",
+                committed_item("source-1"),
+            )
+
+        self.assertEqual(state, original_state)
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once_with(
+            "Invalid temporary source removal request: %s",
+            "Committed sources cannot be removed before commit.",
+        )
+        logger.debug.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_invalid_existing_world_source_removal_kind_returns_unchanged_state(
+        self,
+    ) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            state = registry.remove_existing_world_source_item(
+                "existing-world-1",
+                SourceOrderItem("unknown", "entry-1"),
+            )
+
+        self.assertEqual(state, original_state)
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once_with(
+            "Invalid temporary source removal request: %s",
+            "Source removal item kind is invalid.",
+        )
+        logger.debug.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_malformed_existing_world_source_removal_item_returns_unchanged_state(
+        self,
+    ) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt")],
+        )
+
+        with patch("app.ingestion.staging.source_staging_state.logger") as logger:
+            state = registry.remove_existing_world_source_item(
+                "existing-world-1",
+                "entry-1",  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(state, original_state)
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.warning.assert_called_once_with(
+            "Invalid temporary source removal request: %s",
+            "Source removal item is invalid.",
+        )
+        logger.debug.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_staging_removal_failure_logs_error_and_reraises(self) -> None:
+        registry = SourceStagingStateRegistry()
+        original_state = registry.replace_staging_state(
+            "existing-world-1",
+            [make_entry("entry-1", "one.txt")],
+        )
+
+        with (
+            patch(
+                "app.ingestion.staging.source_staging_state.SourceStagingState",
+                side_effect=RuntimeError("remove failed"),
+            ),
+            patch("app.ingestion.staging.source_staging_state.logger") as logger,
+        ):
+            with self.assertRaises(RuntimeError):
+                registry.remove_existing_world_source_item(
+                    "existing-world-1",
+                    staged_item("entry-1"),
+                )
+
+        self.assertEqual(registry.get_staging_state("existing-world-1"), original_state)
+        logger.error.assert_called_once_with(
+            "Failed to remove temporary source staging entry.",
+            exc_info=True,
+        )
+
     def test_discards_context_and_temporary_entries(self) -> None:
         registry = SourceStagingStateRegistry()
         state = registry.replace_staging_state(
@@ -289,6 +416,12 @@ class SourceStagingStateTests(unittest.TestCase):
         self.assertIsNone(registry.get_staging_state("missing"))
         self.assertIsNone(registry.add_source_file_paths("missing", [Path("one.txt")]))
         self.assertIsNone(registry.remove_staging_entry("missing", "entry-1"))
+        self.assertIsNone(
+            registry.remove_existing_world_source_item(
+                "missing",
+                staged_item("entry-1"),
+            )
+        )
         self.assertIsNone(registry.reorder_staging_entries("missing", ["entry-1"]))
         self.assertIsNone(
             registry.reorder_existing_world_staging_entries(
@@ -321,7 +454,11 @@ class SourceStagingStateTests(unittest.TestCase):
 
                 registry = SourceStagingStateRegistry()
                 registry.create_staging_context("draft-1")
-                registry.add_source_file_paths("draft-1", [Path("one.txt")])
+                state = registry.add_source_file_paths("draft-1", [Path("one.txt")])
+                registry.remove_existing_world_source_item(
+                    "draft-1",
+                    staged_item(state.entries[0].staging_entry_id),
+                )
                 registry.discard_staging_context("draft-1")
 
                 self.assertEqual(get_schema_version(connection), 5)
@@ -361,6 +498,13 @@ class SourceStagingStateTests(unittest.TestCase):
                 registry.add_source_file_paths("draft-1", [source_path])
                 registry.remove_staging_entry("draft-1", "entry-1")
 
+        logger.debug.assert_any_call(
+            "Removed temporary source staging entry: staging_context_id=%s "
+            "staging_entry_id=%s count=%s",
+            "draft-1",
+            "entry-1",
+            1,
+        )
         self.assertNotIn(str(source_path), str(logger.method_calls))
 
     def test_error_logging_omits_raw_local_paths(self) -> None:
