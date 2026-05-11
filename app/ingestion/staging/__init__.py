@@ -1,4 +1,8 @@
 from app.ingestion.staging.source_staging_state import (
+    SOURCE_ORDER_KIND_COMMITTED,
+    SOURCE_ORDER_KIND_STAGED,
+    SourceOrderItem,
+    SourceReorderValidationError,
     SourceStagingState,
     SourceStagingStateError,
     SourceStagingStateRegistry,
@@ -8,6 +12,7 @@ from app.ingestion.staging.source_staging_state import (
     discard_staging_context,
     get_staging_state,
     remove_staging_entry,
+    reorder_existing_world_staging_entries,
     reorder_staging_entries,
     replace_staging_state,
 )
@@ -18,6 +23,10 @@ from app.ingestion.staging.source_type_filter import (
 )
 
 __all__ = [
+    "SOURCE_ORDER_KIND_COMMITTED",
+    "SOURCE_ORDER_KIND_STAGED",
+    "SourceOrderItem",
+    "SourceReorderValidationError",
     "SourceStagingState",
     "SourceStagingStateError",
     "SourceStagingStateRegistry",
@@ -30,6 +39,7 @@ __all__ = [
     "discard_staging_context",
     "get_staging_state",
     "remove_staging_entry",
+    "reorder_existing_world_staging_entries",
     "reorder_staging_entries",
     "replace_staging_state",
 ]

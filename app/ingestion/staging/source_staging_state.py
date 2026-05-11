@@ -9,9 +9,22 @@ from app.logger import get_logger
 
 logger = get_logger()
 
+SOURCE_ORDER_KIND_COMMITTED = "committed"
+SOURCE_ORDER_KIND_STAGED = "staged"
+
 
 class SourceStagingStateError(ValueError):
     pass
+
+
+class SourceReorderValidationError(SourceStagingStateError):
+    pass
+
+
+@dataclass(frozen=True)
+class SourceOrderItem:
+    source_kind: str
+    source_id: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +153,34 @@ class SourceStagingStateRegistry:
             entries=reordered_entries,
         )
         self._staging_states[staging_context_id] = updated_state
+        log_staged_reorder(reordered_entries)
+        return updated_state
+
+    def reorder_existing_world_staging_entries(
+        self,
+        staging_context_id: str,
+        committed_source_ids: Sequence[str],
+        ordered_source_items: Sequence[SourceOrderItem],
+    ) -> SourceStagingState | None:
+        state = self.get_staging_state(staging_context_id)
+        if state is None:
+            return None
+
+        ordered_staging_entry_ids = get_ordered_existing_world_staging_entry_ids(
+            state.entries,
+            committed_source_ids,
+            ordered_source_items,
+        )
+        reordered_entries = reorder_entries(
+            state.entries,
+            ordered_staging_entry_ids,
+        )
+        updated_state = SourceStagingState(
+            staging_context_id=state.staging_context_id,
+            entries=reordered_entries,
+        )
+        self._staging_states[staging_context_id] = updated_state
+        log_staged_reorder(reordered_entries)
         return updated_state
 
     def discard_staging_context(
@@ -175,13 +216,92 @@ def reorder_entries(
     entries_by_id = {entry.staging_entry_id: entry for entry in entries}
     ordered_entry_ids = tuple(ordered_staging_entry_ids)
 
+    if len(entries_by_id) != len(tuple(entries)):
+        reject_staging_state("Temporary source staging entry IDs must be unique.")
+
     if set(ordered_entry_ids) != set(entries_by_id):
-        reject_staging_state("Temporary source staging reorder IDs must match entries.")
+        reject_invalid_reorder("Temporary source staging reorder IDs must match entries.")
 
     if len(ordered_entry_ids) != len(entries_by_id):
-        reject_staging_state("Temporary source staging reorder IDs must be unique.")
+        reject_invalid_reorder("Temporary source staging reorder IDs must be unique.")
 
     return tuple(entries_by_id[entry_id] for entry_id in ordered_entry_ids)
+
+
+def get_ordered_existing_world_staging_entry_ids(
+    entries: Sequence[TemporarySourceStagingEntry],
+    committed_source_ids: Sequence[str],
+    ordered_source_items: Sequence[SourceOrderItem],
+) -> tuple[str, ...]:
+    committed_ids = tuple(committed_source_ids)
+    source_items = validate_source_order_items(ordered_source_items)
+    ordered_committed_ids = tuple(
+        item.source_id
+        for item in source_items
+        if item.source_kind == SOURCE_ORDER_KIND_COMMITTED
+    )
+
+    if ordered_committed_ids != committed_ids:
+        reject_invalid_reorder("Committed source order cannot be changed.")
+
+    if source_items[: len(committed_ids)] != tuple(
+        SourceOrderItem(SOURCE_ORDER_KIND_COMMITTED, source_id)
+        for source_id in committed_ids
+    ):
+        reject_invalid_reorder("Staged sources cannot be inserted before committed sources.")
+
+    ordered_staging_entry_ids = tuple(
+        item.source_id
+        for item in source_items
+        if item.source_kind == SOURCE_ORDER_KIND_STAGED
+    )
+    known_source_ids = set(committed_ids) | {
+        entry.staging_entry_id for entry in entries
+    }
+
+    for item in source_items:
+        if item.source_kind not in {
+            SOURCE_ORDER_KIND_COMMITTED,
+            SOURCE_ORDER_KIND_STAGED,
+        }:
+            reject_invalid_reorder("Source reorder item kind is invalid.")
+
+        if item.source_id not in known_source_ids:
+            reject_invalid_reorder("Source reorder item ID is unknown.")
+
+    expected_item_count = len(committed_ids) + len(entries)
+    if len(source_items) != expected_item_count:
+        reject_invalid_reorder("Source reorder request must include every source once.")
+
+    if len(set(source_items)) != len(source_items):
+        reject_invalid_reorder("Source reorder request source IDs must be unique.")
+
+    return ordered_staging_entry_ids
+
+
+def validate_source_order_items(
+    ordered_source_items: Sequence[SourceOrderItem],
+) -> tuple[SourceOrderItem, ...]:
+    source_items = tuple(ordered_source_items)
+
+    for item in source_items:
+        if type(item) is not SourceOrderItem:
+            reject_invalid_reorder("Source reorder item is invalid.")
+
+    return source_items
+
+
+def log_staged_reorder(entries: Sequence[TemporarySourceStagingEntry]) -> None:
+    staged_order = tuple(
+        (order_index, entry.staging_entry_id)
+        for order_index, entry in enumerate(entries)
+    )
+    logger.debug("Reordered temporary source staging entries: %s", staged_order)
+
+
+def reject_invalid_reorder(message: str) -> NoReturn:
+    logger.warning("Invalid temporary source reorder request: %s", message)
+    raise SourceReorderValidationError(message)
 
 
 def reject_staging_state(message: str) -> NoReturn:
@@ -237,6 +357,18 @@ def reorder_staging_entries(
     return _source_staging_state_registry.reorder_staging_entries(
         staging_context_id,
         ordered_staging_entry_ids,
+    )
+
+
+def reorder_existing_world_staging_entries(
+    staging_context_id: str,
+    committed_source_ids: Sequence[str],
+    ordered_source_items: Sequence[SourceOrderItem],
+) -> SourceStagingState | None:
+    return _source_staging_state_registry.reorder_existing_world_staging_entries(
+        staging_context_id,
+        committed_source_ids,
+        ordered_source_items,
     )
 
 
