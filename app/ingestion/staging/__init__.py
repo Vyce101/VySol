@@ -21,6 +21,10 @@ from app.ingestion.staging.source_file_access import (
     StagedSourceFileAccessError,
     validate_staged_source_file_access,
 )
+from app.ingestion.staging.source_duplicate_preflight import (
+    DuplicateStagedSourceError,
+    validate_no_duplicate_staged_source_hashes,
+)
 from app.ingestion.staging.source_hash_preflight import (
     HashedStagedSource,
     hash_staged_source_files,
@@ -39,6 +43,7 @@ __all__ = [
     "SourceStagingState",
     "SourceStagingStateError",
     "StagedSourceFileAccessError",
+    "DuplicateStagedSourceError",
     "SourceStagingStateRegistry",
     "SourceStagingItem",
     "TemporarySourceStagingEntry",
@@ -55,5 +60,6 @@ __all__ = [
     "reorder_existing_world_staging_entries",
     "reorder_staging_entries",
     "replace_staging_state",
+    "validate_no_duplicate_staged_source_hashes",
     "validate_staged_source_file_access",
 ]
