@@ -3,6 +3,12 @@ from enum import StrEnum
 from typing import NoReturn
 from uuid import uuid4
 
+from app.ingestion.attempt_workspace import (
+    IngestionAttemptWorkspaceError,
+    IngestionAttemptWorkspaceRegistry,
+    TemporaryIngestionWorkspace,
+    get_ingestion_attempt_workspace_registry,
+)
 from app.logger import get_logger
 
 logger = get_logger()
@@ -36,11 +42,21 @@ class IngestionAttemptState:
 
 
 class IngestionAttemptStateRegistry:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_registry: IngestionAttemptWorkspaceRegistry | None = None,
+    ) -> None:
         self._state = build_idle_state()
+        self._workspace_registry = workspace_registry or IngestionAttemptWorkspaceRegistry()
 
     def get_state(self) -> IngestionAttemptState:
         return self._state
+
+    def get_attempt_workspace(
+        self,
+        attempt_id: str,
+    ) -> TemporaryIngestionWorkspace | None:
+        return self._workspace_registry.get_attempt_workspace(attempt_id)
 
     def start_attempt(self) -> IngestionAttemptState:
         if self._state.status not in {
@@ -49,13 +65,19 @@ class IngestionAttemptStateRegistry:
         }:
             reject_invalid_transition("Cannot start ingestion from current state.")
 
-        return self._set_state(
-            IngestionAttemptState(
-                status=IngestionAttemptStatus.RUNNING,
-                attempt_id=str(uuid4()),
-                staged_work_remaining=True,
+        attempt_id = str(uuid4())
+        self._workspace_registry.create_attempt_workspace(attempt_id)
+        try:
+            return self._set_state(
+                IngestionAttemptState(
+                    status=IngestionAttemptStatus.RUNNING,
+                    attempt_id=attempt_id,
+                    staged_work_remaining=True,
+                )
             )
-        )
+        except Exception:
+            self._workspace_registry.remove_attempt_workspace(attempt_id)
+            raise
 
     def request_stop(self) -> IngestionAttemptState:
         if self._state.status != IngestionAttemptStatus.RUNNING:
@@ -96,6 +118,15 @@ class IngestionAttemptStateRegistry:
 
         if not self._state.staged_work_remaining:
             reject_invalid_transition("Cannot resume ingestion without staged work.")
+
+        if self._state.attempt_id is None:
+            reject_invalid_transition("Cannot resume ingestion without an attempt ID.")
+
+        if self.get_attempt_workspace(self._state.attempt_id) is None:
+            logger.error("Missing temporary ingestion workspace for paused attempt.")
+            raise IngestionAttemptWorkspaceError(
+                "Temporary ingestion workspace is missing."
+            )
 
         return self._set_state(
             IngestionAttemptState(
@@ -190,11 +221,18 @@ def reject_invalid_transition(message: str) -> NoReturn:
     raise InvalidIngestionAttemptTransitionError(message)
 
 
-_ingestion_attempt_state_registry = IngestionAttemptStateRegistry()
+_ingestion_attempt_workspace_registry = get_ingestion_attempt_workspace_registry()
+_ingestion_attempt_state_registry = IngestionAttemptStateRegistry(
+    _ingestion_attempt_workspace_registry,
+)
 
 
 def get_attempt_state() -> IngestionAttemptState:
     return _ingestion_attempt_state_registry.get_state()
+
+
+def get_attempt_workspace(attempt_id: str) -> TemporaryIngestionWorkspace | None:
+    return _ingestion_attempt_workspace_registry.get_attempt_workspace(attempt_id)
 
 
 def start_attempt() -> IngestionAttemptState:
