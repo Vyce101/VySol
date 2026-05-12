@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added temporary ingestion workspaces so each Start or Resume attempt has isolated non-committed scratch storage.
+- Added a Temporary Ingestion Workspace concept page.
 - Added backend ingestion attempt state tracking for idle, running, stopping, paused, and complete ingestion lifecycles.
 - Added an Ingestion Attempt State concept page.
 - Added backend staged source duplicate preflight so exact duplicate source content is rejected within the same world before book numbers are assigned.
