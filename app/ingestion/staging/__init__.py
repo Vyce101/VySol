@@ -17,6 +17,10 @@ from app.ingestion.staging.source_staging_state import (
     reorder_staging_entries,
     replace_staging_state,
 )
+from app.ingestion.staging.source_file_access import (
+    StagedSourceFileAccessError,
+    validate_staged_source_file_access,
+)
 from app.ingestion.staging.source_type_filter import (
     SourceStagingItem,
     build_source_staging_list,
@@ -30,6 +34,7 @@ __all__ = [
     "SourceReorderValidationError",
     "SourceStagingState",
     "SourceStagingStateError",
+    "StagedSourceFileAccessError",
     "SourceStagingStateRegistry",
     "SourceStagingItem",
     "TemporarySourceStagingEntry",
@@ -44,4 +49,5 @@ __all__ = [
     "reorder_existing_world_staging_entries",
     "reorder_staging_entries",
     "replace_staging_state",
+    "validate_staged_source_file_access",
 ]
