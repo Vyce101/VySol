@@ -23,6 +23,7 @@ Source Parser Router owns:
 - Validating every staged source type in a batch before parsing any file in that batch.
 - Rejecting unsupported or blank staged source types before downstream commit work.
 - Returning parsed in-memory text after the selected parser succeeds.
+- Calling parsers against the current file at the staged path instead of an earlier selected file version.
 - Logging parser routing at `DEBUG` without source text.
 - Logging unsupported source type rejection at `WARNING`.
 - Logging unexpected router failures at `ERROR`.
@@ -39,7 +40,7 @@ Source Parser Router does not own:
 
 Backend ingestion code passes one staged source or a staged source batch into the router. Each staged source contains a source file path and a staged source type string supplied by the staging layer.
 
-For a single source, the router normalizes the staged type, looks up the matching parser, logs the routing decision, calls that parser with the source file path, and returns the normalized source type with the parsed text. The parser remains responsible for rejecting fake extensions, malformed files, unreadable files, and sources without usable text.
+For a single source, the router normalizes the staged type, looks up the matching parser, logs the routing decision, calls that parser with the source file path, and returns the normalized source type with the parsed text. The parser reads whatever file currently exists at that path. The parser remains responsible for rejecting fake extensions, malformed files, unavailable files, unreadable files, and sources without usable text.
 
 For a batch, the router first routes every staged source type before parsing any file. If any source type is unsupported, the batch is rejected before parser calls begin. If all source types are supported, the router parses sources in the batch order and lets parser failures stop the batch before future commit orchestration can continue.
 
@@ -66,7 +67,7 @@ It does not save parsed text, final chunk objects, database rows, files, embeddi
 
 Unsupported or blank staged source types are logged at `WARNING` and rejected before parser calls. This lets a future staged batch fail before any commit-time save behavior starts.
 
-Expected parser failures leave the router unchanged and propagate from the selected parser. This preserves each parser's existing failure contract for malformed EPUBs, broken PDFs, undecodable TXT files, fake extensions, unreadable files, and no-usable-text sources.
+Expected parser failures leave the router unchanged and propagate from the selected parser. This preserves each parser's existing failure contract for malformed EPUBs, broken PDFs, undecodable TXT files, fake extensions, unavailable files, unreadable files, and no-usable-text sources.
 
 Unexpected router failures are logged at `ERROR` and raised as router failures. Logs must not include parsed text, source text, or sensitive local path detail.
 
@@ -95,6 +96,7 @@ Internal edge cases:
 - Blank source types are rejected as unsupported.
 - Unsupported source types are rejected before any parser runs.
 - Batch routing validates every source type before parsing the first file.
+- TXT batches read current file contents at parse time and preserve source order.
 - Parser failures propagate without being converted into successful routed results.
 
 Cross-system edge cases:
@@ -102,6 +104,8 @@ Cross-system edge cases:
 - Source type detection remains a Source Type Selection Filter responsibility, not a router responsibility.
 - Invalid source selections should be blocked before parser routing rather than passed into the router as normal work.
 - Fake extensions are rejected by parser/open behavior when the staged source type selects a parser but the file content is invalid.
+- Staged source paths remain references; parser routing must not preserve the exact file version selected earlier.
+- Missing, replaced, or unreadable current files fail through the selected parser before downstream commit work.
 - Future commit orchestration must not save source metadata or chunks until the router and selected parser have succeeded.
 - Main Chunk Generation must receive parsed text, not staged source records or file paths.
 - Logs must stay safe for public repositories and local machines by avoiding parsed text and full local paths.
@@ -112,6 +116,7 @@ Cross-system edge cases:
 - Batch routing must reject unsupported staged source types before parsing any file in that batch.
 - Parser success means in-memory parsed text was produced, not that source commit or chunk storage has happened.
 - Parser failure must block downstream commit-time ingestion for that source.
+- Parser routing must keep staged sources path-based and must not snapshot or copy source files.
 - The router must not infer source type from filename or file content.
 - The router must not implement parser logic, chunking, storage, UI, provider, embedding, graph, retrieval, or manifest behavior.
 - Logs must never include parsed source text.
@@ -119,7 +124,7 @@ Cross-system edge cases:
 ## Implementation Landmarks
 
 - `app/ingestion/parsing` owns parser routing and individual parser modules.
-- `tests/test_source_parser_router.py` covers parser selection, source type normalization, unsupported type rejection, batch prevalidation, parser failure propagation, and log safety.
+- `tests/test_source_parser_router.py` covers parser selection, source type normalization, unsupported type rejection, batch prevalidation, current-file parsing, parser failure propagation, and log safety.
 
 ## What AI/Coders Must Check Before Changing This System
 

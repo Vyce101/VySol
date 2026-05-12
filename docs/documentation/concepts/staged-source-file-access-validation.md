@@ -20,6 +20,7 @@ Staged Source File Access Validation owns:
 - Rejecting the whole batch if any staged path is not a regular file.
 - Rejecting the whole batch if any staged file cannot be opened for binary reading.
 - Returning the original staged entries unchanged when every staged file is available.
+- Treating staged entries as current path references rather than copied file snapshots.
 - Logging expected missing or unreadable staged files at `WARNING` without raw local paths.
 - Logging unexpected file access failures at `ERROR` without raw local paths.
 
@@ -35,7 +36,7 @@ Staged Source File Access Validation does not own:
 
 A future Start or Resume ingestion flow can read temporary staging entries and call this validator before doing any work that reads content, copies files, assigns permanent ordering, or writes world data.
 
-The validator converts each staged path through `pathlib.Path`, checks that it exists, checks that it is a regular file, then opens it in binary read mode and reads only a tiny probe. The probe proves the app can open the file without treating the bytes as source content.
+The validator converts each staged path through `pathlib.Path`, checks that it exists, checks that it is a regular file, then opens it in binary read mode and reads only a tiny probe. The probe proves the app can open the current file without treating the bytes as source content. If the selected file was edited or replaced by another readable file at the same path, validation succeeds and leaves content decisions to later parser work.
 
 If every staged file passes, the validator returns the same staged entries in the same order. If any staged file fails, the validator logs a safe batch summary and raises a staged source file access error.
 
@@ -80,12 +81,16 @@ Internal edge cases:
 - Missing paths are reported as missing staged files.
 - Directories and other non-file paths are reported as non-file staged entries.
 - Permission or open failures are reported as unreadable staged files.
+- Edited files and replaced readable files at the same staged path remain valid current files.
+- Files replaced by directories are rejected as non-file staged entries.
 - Multiple expected failures are collected before the batch is rejected.
 - Successful validation preserves the caller's staged entry objects and order.
 
 Cross-system edge cases:
 
 - Staging state may contain path references that were valid at selection time but no longer exist at Start or Resume time.
+- Start or Resume work must use the current file contents at the staged path rather than preserving the earlier selected version.
+- Changed-but-still-readable files must not be warned about by this validator.
 - Unsupported source types should still be blocked by Source Type Selection Filter before parser routing.
 - Parser Router may still reject malformed content later; this validator only proves file availability, not parseability.
 - Future hash, copy, book-number, chunk, and commit systems must run only after this validator succeeds.
@@ -96,6 +101,8 @@ Cross-system edge cases:
 - Validation must happen before future parsing, copying, source hashing, book-number assignment, chunk generation, and source commit work.
 - Expected missing or unreadable staged files must block the whole batch.
 - Successful validation must not mutate staged entries or source files.
+- Successful validation must not imply the file is unchanged since selection.
+- The system must not snapshot or copy selected files during staging.
 - The validator must not parse, hash, copy, commit, persist, or assign permanent identity.
 - File access checking must use `pathlib` rather than ad hoc string path handling.
 - Readability probing must not load or retain source content.
@@ -105,7 +112,7 @@ Cross-system edge cases:
 
 - `app/ingestion/staging/source_file_access.py` owns staged source file access validation.
 - `app/ingestion/staging/__init__.py` exports the validator and error for future ingestion callers.
-- `tests/test_staged_source_file_access.py` covers success, missing paths, non-file paths, unreadable files, unexpected access failures, empty input, batch rejection, and path-safe logging.
+- `tests/test_staged_source_file_access.py` covers success, edited current files, replaced current files, missing paths, non-file paths, unreadable files, unexpected access failures, empty input, batch rejection, and path-safe logging.
 
 ## What AI/Coders Must Check Before Changing This System
 

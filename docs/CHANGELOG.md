@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed staged source access and parser read failures so current missing or unreadable source files fail with path-safe warnings.
 - Changed main chunk generation to return separate previous-context overlap for each chunk.
 - Changed main chunk generation to include character offsets with each returned chunk.
 - Changed committed world timestamps to ISO 8601 UTC format for naturally sortable SQLite values.

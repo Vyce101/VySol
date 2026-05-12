@@ -19,10 +19,12 @@ TXT Parser owns:
 - Falling back to strict UTF-8 when no supported byte-order mark is present.
 - Supporting UTF-8, UTF-8 with BOM, UTF-16 with BOM, and obvious UTF-32 BOM-based text.
 - Preserving decoded text structure without trimming, normalizing, or rewriting it.
+- Reading the current file contents at parse time.
+- Rejecting missing or unavailable current files before downstream ingestion commits any source work.
 - Rejecting undecodable text before downstream ingestion commits any source work.
 - Logging successful parse summaries at `INFO` without parsed text.
+- Logging missing or unavailable current files at `WARNING`.
 - Logging unsupported or unreadable decoding at `WARNING`.
-- Logging unexpected file read failures at `ERROR`.
 
 TXT Parser does not own:
 
@@ -34,7 +36,7 @@ TXT Parser does not own:
 
 ## Normal Flow
 
-Backend ingestion code passes a TXT file path to the parser. The parser reads a small byte prefix to identify a supported Unicode byte-order mark. If it finds one, it uses the matching strict Python standard-library decoder. If no supported marker is present, it reads the file as strict UTF-8.
+Backend ingestion code passes a TXT file path to the parser. The parser reads the file that currently exists at that path, starting with a small byte prefix to identify a supported Unicode byte-order mark. If it finds one, it uses the matching strict Python standard-library decoder. If no supported marker is present, it reads the file as strict UTF-8.
 
 The returned string is the only successful output. The parser does not trim whitespace, normalize line endings, remove decoded characters, or save the source text. Later ingestion systems can pass the returned string into Main Chunk Generation only after this parse succeeds.
 
@@ -50,9 +52,9 @@ It does not create saved source text, final chunk objects, database rows, files,
 
 ## Failure Behavior
 
-If a supported decoder cannot produce clean text, TXT Parser logs a `WARNING` and raises a TXT parse error. This blocks later source commit work from treating corrupted text as usable input.
+If the current file is missing or cannot be opened for reading, TXT Parser logs a `WARNING` and raises a TXT parse error. If a supported decoder cannot produce clean text, TXT Parser also logs a `WARNING` and raises a TXT parse error. This blocks later source commit work from treating missing, unavailable, or corrupted text as usable input.
 
-If the file cannot be read because of an unexpected filesystem failure, TXT Parser logs an `ERROR` and lets that failure leave the parser. Logs must never include parsed text.
+Logs must never include parsed text or raw local paths.
 
 ## System Interactions
 
@@ -71,6 +73,9 @@ It must stay separate from storage repositories, splitter internals, route handl
 Internal edge cases:
 
 - Plain UTF-8 TXT files decode through strict UTF-8.
+- Edited files are read from their current contents at parse time.
+- Missing current files are rejected with path-safe warnings.
+- Current files that cannot be opened are rejected with path-safe warnings.
 - UTF-8 BOM files decode without exposing the BOM as parsed content.
 - UTF-16 files with a byte-order mark decode through the standard UTF-16 codec.
 - Obvious UTF-32 BOM files decode through the standard UTF-32 codec.
@@ -81,6 +86,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Future source commit work must parse before saving source metadata or chunks.
+- Source staging may have selected an earlier file version, but TXT Parser must parse the current file at the path it receives.
 - Main Chunk Generation must receive parsed text, not file paths or raw bytes.
 - Chunk Storage must not infer that a parser success has already assigned chunk IDs, book numbers, source IDs, or storage records.
 - Logs must stay safe for public repositories and local machines by avoiding parsed text and full local paths.
@@ -92,13 +98,15 @@ Cross-system edge cases:
 - Valid decoded text must not be trimmed, normalized, cleaned, deduplicated, rewritten, saved, or logged.
 - Parser success means clean in-memory text was produced, not that source commit or chunk storage has happened.
 - Parser failure must block downstream commit-time ingestion for that source.
+- Missing or unavailable current files must fail with path-safe warnings, not path-leaking error logs.
+- TXT Parser must not snapshot, copy, or compare selected source versions.
 - Supported encodings are explicit backend behavior, not user-editable settings in this system.
 - This system must remain parser-only with no splitter, storage, route, UI, provider, embedding, graph, retrieval, or manifest responsibilities.
 
 ## Implementation Landmarks
 
 - `app/ingestion/parsing` owns TXT parsing.
-- `tests/test_txt_parser.py` covers supported Unicode decoding, strict decode failures, file read failures, and log safety.
+- `tests/test_txt_parser.py` covers supported Unicode decoding, strict decode failures, missing current files, unreadable current files, and log safety.
 
 ## What AI/Coders Must Check Before Changing This System
 
@@ -108,6 +116,7 @@ Before editing TXT Parser, check:
 - Whether all decoding still uses strict errors and avoids `replace` or `ignore`.
 - Whether supported encodings remain explicit and standard-library based.
 - Whether successful parsing still returns only in-memory text.
+- Whether missing or unavailable current files still fail safely without raw paths.
 - Whether logs avoid parsed text and sensitive local path detail.
 - Whether parser failures still block downstream source commit work.
 - Whether tests cover BOM handling, strict rejection, text preservation, and log safety.

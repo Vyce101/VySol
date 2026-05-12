@@ -15,12 +15,14 @@ Keeping EPUB parsing separate from chunking and storage lets future commit-time 
 EPUB Parser owns:
 
 - Opening EPUB files through EbookLib.
+- Reading the current file contents at parse time.
 - Reading EPUB document items in spine order.
 - Extracting readable text from spine XHTML and HTML with BeautifulSoup4.
 - Ignoring EPUB images when usable text exists elsewhere in the source.
 - Preserving meaningful paragraph and line structure where practical.
 - Rejecting malformed EPUB files and EPUB files with no usable text before downstream source commit work.
 - Logging successful parse summaries at `INFO` without parsed text.
+- Logging missing or unavailable current EPUB files at `WARNING`.
 - Logging malformed EPUB or no-usable-text rejection at `WARNING`.
 - Logging unexpected EPUB read or HTML extraction failures at `ERROR`.
 
@@ -35,7 +37,7 @@ EPUB Parser does not own:
 
 ## Normal Flow
 
-Backend ingestion code passes an EPUB file path to the parser. The parser opens the file with EbookLib, walks the EPUB spine, resolves each spine item ID to a document item, and skips non-document spine items.
+Backend ingestion code passes an EPUB file path to the parser. The parser opens the current file at that path with EbookLib, walks the EPUB spine, resolves each spine item ID to a document item, and skips non-document spine items.
 
 For each spine document, the parser reads the document content, removes non-readable HTML such as scripts, styles, navigation, metadata, and SVG content, then extracts block-aware text with BeautifulSoup4. Inline text inside a readable block is joined with spaces, readable blocks are joined with line breaks, and separate spine documents are joined with blank lines.
 
@@ -55,7 +57,7 @@ It does not create saved source text, final chunk objects, database rows, files,
 
 ## Failure Behavior
 
-If the EPUB is malformed, unreadable, has an invalid spine entry, or contains no usable text, EPUB Parser logs a `WARNING` and raises an EPUB parse error. This blocks later source commit work from treating a broken or image-only source as usable input.
+If the current file is missing, unavailable, malformed, has an invalid spine entry, or contains no usable text, EPUB Parser logs a `WARNING` and raises an EPUB parse error. This blocks later source commit work from treating a missing, broken, or image-only source as usable input.
 
 If EbookLib, BeautifulSoup4, or HTML extraction fails unexpectedly, EPUB Parser logs an `ERROR` and raises an EPUB parse error. Logs must never include parsed book text.
 
@@ -76,6 +78,7 @@ It must stay separate from storage repositories, splitter internals, route handl
 Internal edge cases:
 
 - Spine order controls parsed output order even when manifest or archive order differs.
+- Missing current files are rejected with path-safe warnings.
 - Non-document spine items are skipped rather than parsed as text.
 - Missing or invalid spine document references are rejected as malformed EPUB structure.
 - Image-only EPUBs are rejected because they provide no usable text.
@@ -89,6 +92,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Future source commit work must parse before saving source metadata or chunks.
+- Source staging may have selected an earlier file version, but EPUB Parser must parse the current file at the path it receives.
 - Main Chunk Generation must receive parsed text, not EPUB paths, archive entries, or raw document bytes.
 - Chunk Storage must not infer that parser success has already assigned chunk IDs, book numbers, source IDs, or storage records.
 - Logs must stay safe for public repositories and local machines by avoiding parsed text and full local paths.
@@ -98,6 +102,8 @@ Cross-system edge cases:
 - EPUB parsing must follow the EPUB spine and must not fall back to random archive, manifest, or filesystem order.
 - Parser success means usable in-memory text was produced, not that source commit or chunk storage has happened.
 - Parser failure must block downstream commit-time ingestion for that source.
+- Missing or unavailable current files must fail with path-safe warnings, not path-leaking error logs.
+- EPUB Parser must not snapshot, copy, or compare selected source versions.
 - Parsed text must not be saved or logged by this parser.
 - Images must not be extracted or treated as text by this parser.
 - Valid extracted text must not be chunked, deduplicated, embedded, stored, or turned into graph records here.
@@ -106,7 +112,7 @@ Cross-system edge cases:
 ## Implementation Landmarks
 
 - `app/ingestion/parsing` owns EPUB parsing.
-- `tests/test_epub_parser.py` covers spine order, text extraction structure, image-only rejection, image-plus-text success, malformed EPUB rejection, and log safety.
+- `tests/test_epub_parser.py` covers spine order, text extraction structure, image-only rejection, image-plus-text success, malformed EPUB rejection, missing current files, and log safety.
 
 ## What AI/Coders Must Check Before Changing This System
 
@@ -116,6 +122,7 @@ Before editing EPUB Parser, check:
 - Whether parsing still follows the EPUB spine only.
 - Whether no fallback order can accidentally parse documents out of reading order.
 - Whether successful parsing still returns only in-memory text.
+- Whether missing or unavailable current files still fail safely without raw paths.
 - Whether no text extraction path logs parsed book text.
 - Whether image-only sources still fail and image-plus-text sources still parse the text.
 - Whether parser failures still block downstream source commit work.
