@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added commit-time book number assignment so staged source batches append after existing world sources.
+- Added a Book Number Assignment concept page.
 - Added a reusable commit rollback and cleanup helper for future source commit storage.
 - Added a Commit Rollback and Cleanup Helper concept page.
 - Added automatic cleanup for temporary ingestion workspaces after terminal attempts and app startup.

@@ -70,6 +70,7 @@ Chunk Storage currently interacts with:
 
 - World Database Bootstrap, which opens `world.sqlite` and applies the chunk table migration.
 - Committed Source Storage, whose source IDs and book numbers can be referenced by future ingestion code before chunks are stored.
+- Book Number Assignment, whose returned book numbers must be reused by final chunk records for the same staged sources.
 - Future parser and splitter systems, which must prepare final chunk records before this repository saves them.
 - Future embedding, graph, retrieval, provenance, and inspection systems, which can read chunk records but must keep their own storage responsibilities separate.
 - The central logger, which records chunk batch summaries, validation rejections, and database failures.

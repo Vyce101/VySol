@@ -9,6 +9,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Asset Deletion](asset-deletion.md)
 - [Asset Hash Deduplication](asset-hash-deduplication.md)
 - [Asset Metadata Storage](asset-metadata-storage.md)
+- [Book Number Assignment](book-number-assignment.md)
 - [Chunk Storage](chunk-storage.md)
 - [Commit Rollback and Cleanup Helper](commit-rollback-and-cleanup-helper.md)
 - [Committed Source Storage](committed-source-storage.md)
