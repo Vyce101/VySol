@@ -14,6 +14,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added automatic cleanup for temporary ingestion workspaces after terminal attempts and app startup.
 - Added temporary split chunk output preparation so parsed staged sources can be split into attempt-local SQLite rows before future commit work.
 - Added a Temporary Split Chunk Outputs concept page.
 - Added temporary parsed source output preparation so staged sources parse in order before future commit work.

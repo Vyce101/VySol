@@ -20,6 +20,7 @@ Ingestion Attempt State owns:
 - Coordinating fresh attempt workspace creation before entering `RUNNING`.
 - Preserving the same attempt ID while a paused attempt resumes.
 - Verifying that a paused attempt still has its temporary workspace before resume.
+- Coordinating temporary workspace cleanup after successful completion and terminal cancellation to `IDLE`.
 - Rejecting stale completion or cancellation results from old attempt IDs.
 - Representing whether staged work remains when cooperative cancellation finishes.
 - Logging valid state transitions at `INFO`.
@@ -41,9 +42,9 @@ Before ingestion starts, the registry reports `IDLE` with no attempt ID and no s
 
 If the user asks to stop while ingestion is running, the state moves to `STOPPING`. This tells future UI code that cancellation has been requested but cooperative cancellation has not finished yet.
 
-When cancellation finishes, the caller reports whether staged work remains. If work remains, the state moves to `PAUSED` and keeps the same attempt ID so the same attempt can resume later. If no work remains, the state moves back to `IDLE`.
+When cancellation finishes, the caller reports whether staged work remains. If work remains, the state moves to `PAUSED` and keeps the same attempt ID so the same attempt can resume later. If no work remains, the state moves back to `IDLE` and the temporary workspace is removed.
 
-Resuming a paused attempt first verifies that the same attempt ID still has its temporary workspace, then moves `PAUSED` back to `RUNNING` with that same attempt ID. Completing a running attempt with the current attempt ID moves the state to `COMPLETE`, allowing the UI to distinguish successful completion from a never-started idle state.
+Resuming a paused attempt first verifies that the same attempt ID still has its temporary workspace, then moves `PAUSED` back to `RUNNING` with that same attempt ID. Completing a running attempt with the current attempt ID moves the state to `COMPLETE`, removes the temporary workspace, and allows the UI to distinguish successful completion from a never-started idle state.
 
 ## Inputs
 
@@ -66,13 +67,13 @@ It does not produce database rows, files, committed source metadata, chunks, pro
 
 Attempt state is in memory only. It is intended to represent the currently running app process, not crash recovery or durable saved progress.
 
-`PAUSED` means cancellation finished while staged work still exists and the same attempt can resume with its existing temporary workspace. `IDLE` means no current attempt is resumable. `COMPLETE` means an attempt finished successfully and can be shown separately from `IDLE` until a new attempt starts.
+`PAUSED` means cancellation finished while staged work still exists and the same attempt can resume with its existing temporary workspace. `IDLE` means no current attempt is resumable. `COMPLETE` means an attempt finished successfully, its temporary workspace has been cleaned, and the completed state can be shown separately from `IDLE` until a new attempt starts.
 
 ## Retry, Pause, And Abort Behavior
 
 This model supports cooperative cancellation state, but it does not perform cancellation itself. The future ingestion runner must request a stop, finish its own cancellation work, and then report whether staged work remains.
 
-Fresh starts from `IDLE` or `COMPLETE` create new attempt IDs and new temporary workspaces. Resume from `PAUSED` keeps the existing attempt ID and workspace. Late completion or cancellation results for older attempt IDs are rejected and leave the current state unchanged.
+Fresh starts from `IDLE` or `COMPLETE` create new attempt IDs and new temporary workspaces. Resume from `PAUSED` keeps the existing attempt ID and workspace. Terminal cancellation and successful completion remove the temporary workspace. Late completion or cancellation results for older attempt IDs are rejected and leave the current state unchanged.
 
 ## Failure Behavior
 
@@ -106,9 +107,9 @@ Internal edge cases:
 - Stopping is allowed only from `RUNNING`.
 - Cancellation completion is accepted only from `STOPPING` and only for the current attempt ID.
 - Cancellation with staged work moves to `PAUSED`.
-- Cancellation without staged work moves to `IDLE`.
+- Cancellation without staged work moves to `IDLE` and cleans the temporary workspace.
 - Resume is allowed only from `PAUSED` with staged work remaining and the existing temporary workspace available.
-- Completion is accepted only from `RUNNING` and only for the current attempt ID.
+- Completion is accepted only from `RUNNING` and only for the current attempt ID, then cleans the temporary workspace.
 - `COMPLETE` and `IDLE` remain distinct statuses.
 - Stale attempt IDs cannot complete or cancel a newer attempt.
 
@@ -118,6 +119,7 @@ Cross-system edge cases:
 - Future ingestion orchestration must use the current attempt ID when asking for a temporary workspace.
 - Future cancellation code must report whether staged work remains instead of guessing from status alone.
 - Future resume code must not create a new workspace for the paused attempt.
+- Future cleanup code must preserve `PAUSED` workspaces during the same process and clean only terminal attempt workspaces.
 - Future UI code must treat `STOPPING` as an in-progress cancellation state, not as already paused.
 - Future UI code must treat `PAUSED` as resumable work and `IDLE` as ready for a fresh start.
 - Future source commit work must not infer that attempt state has committed, parsed, copied, hashed, or chunked any source.
@@ -135,6 +137,7 @@ Cross-system edge cases:
 - Resume must keep the paused attempt ID.
 - Fresh starts must create new temporary workspaces.
 - Resume must keep the paused attempt's existing temporary workspace.
+- Completion and terminal cancellation must clean the attempt workspace without changing the meaning of `COMPLETE`, `IDLE`, or `PAUSED`.
 - Stale attempt results must never mutate current state.
 - Invalid transitions must leave current state unchanged.
 - The system must not parse, hash, copy, commit, persist, or assign book numbers for sources.
@@ -142,7 +145,7 @@ Cross-system edge cases:
 
 ## Implementation Landmarks
 
-- `app/ingestion/attempt_state.py` owns the in-memory attempt state model, registry, transitions, stale-result rejection, workspace coordination, and logging.
+- `app/ingestion/attempt_state.py` owns the in-memory attempt state model, registry, transitions, stale-result rejection, terminal workspace cleanup coordination, and logging.
 - `app/ingestion/attempt_workspace.py` owns temporary workspace creation, lookup, current-attempt scoping, and cleanup.
 - `app/ingestion/__init__.py` exports the public attempt-state and workspace API for backend callers.
 - `tests/test_ingestion_attempt_state.py` covers lifecycle transitions, workspace creation and reuse, stale attempt rejection, invalid transition logging, unexpected failure logging, and database non-persistence.
@@ -155,6 +158,7 @@ Before editing Ingestion Attempt State, check:
 - Whether `IDLE`, `PAUSED`, and `COMPLETE` remain semantically distinct.
 - Whether stale attempt IDs still cannot mutate current state.
 - Whether cancellation completion still chooses `PAUSED` only when staged work remains.
+- Whether cancellation to `IDLE` and successful completion still clean the temporary workspace.
 - Whether Start and Resume still preserve the Temporary Ingestion Workspace contract.
 - Whether logs avoid source paths, full temporary workspace paths, source text, provider output, local machine details, and user data.
 - Whether attempt state remains independent of database schema, source commits, parser work, chunk storage, embeddings, graph extraction, and durable failed statuses.
