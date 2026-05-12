@@ -74,8 +74,8 @@ Temporary Parsed Source Outputs currently interacts with:
 - Temporary Ingestion Workspace, which supplies the active attempt ID and temporary workspace boundary.
 - Temporary Source Staging State, which supplies staged source entries and their temporary IDs.
 - Source Parser Router, which dispatches each source to the matching TXT, EPUB, or PDF parser.
-- Future ingestion orchestration, which can call this boundary before source hashing, duplicate checks, chunking, source copy, book-number assignment, or committed source storage.
-- Main Chunk Generation, which can later receive parsed text only after every source in the staged batch has prepared successfully.
+- Temporary Split Chunk Outputs, which can receive parsed outputs only after every source in the staged batch has prepared successfully.
+- Future ingestion orchestration, which can call this boundary before source hashing, duplicate checks, source copy, book-number assignment, or committed source storage.
 - The central logger, which records safe parse preparation summaries and failures.
 
 It must stay separate from parser internals, source-type selection, file access validation, hash preflight, duplicate preflight, committed source storage, chunk storage, embeddings, graph extraction, retrieval, and UI rendering.
@@ -99,7 +99,7 @@ Cross-system edge cases:
 - Staged source paths remain current file references; parser routing reads whatever file exists at parse time.
 - Staged Source File Access Validation can prove a file is readable before this boundary, but parser preparation still owns parseability and usable-text failure.
 - Future source hashing and duplicate checks must not treat parsed output preparation as committed source metadata.
-- Future book-number assignment, chunk generation, source copy, and committed storage must run only after all staged sources parse successfully.
+- Future split-output preparation, book-number assignment, source copy, and committed storage must run only after all staged sources parse successfully.
 - Paused or resumed ingestion must use the current attempt workspace so prepared outputs stay tied to the active attempt.
 
 ## Invariants

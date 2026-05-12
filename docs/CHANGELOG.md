@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added temporary split chunk output preparation so parsed staged sources can be split into attempt-local SQLite rows before future commit work.
+- Added a Temporary Split Chunk Outputs concept page.
 - Added temporary parsed source output preparation so staged sources parse in order before future commit work.
 - Added a Temporary Parsed Source Outputs concept page.
 - Added temporary ingestion workspaces so each Start or Resume attempt has isolated non-committed scratch storage.

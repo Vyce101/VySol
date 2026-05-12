@@ -1,6 +1,6 @@
 # Main Chunk Generation
 
-Main Chunk Generation is VySol's in-memory ingestion splitting layer for turning already-parsed text into ordered main chunks with separate previous-context overlap. It repeatedly uses Split Point Search to choose boundaries, slices the parsed text at those boundaries, and returns chunk objects for backend callers.
+Main Chunk Generation is VySol's in-memory ingestion splitting layer for turning already-parsed text into ordered main chunks with separate previous-context overlap. It repeatedly uses Split Point Search to choose boundaries, slices the parsed text at those boundaries, and returns or streams chunk objects for backend callers.
 
 This page is for developers, power users, and AI coding agents that need to understand the main chunk contract before changing ingestion splitting, parser integration, chunk storage integration, or later graph extraction work.
 
@@ -14,7 +14,7 @@ Keeping Main Chunk Generation separate from parsing and storage makes the splitt
 
 Main Chunk Generation owns:
 
-- Producing an ordered in-memory list of main chunks from already-parsed text.
+- Producing ordered in-memory main chunks from already-parsed text.
 - Calling Split Point Search repeatedly until all parsed text has been consumed.
 - Preserving chunk text exactly as Python string slices from the parsed input.
 - Calculating previous-context overlap from already-consumed text in the same parsed input.
@@ -42,7 +42,7 @@ Backend ingestion code passes already-parsed text and validated splitter setting
 
 For each loop, it asks Split Point Search for the next split index using the configured chunk size and max lookback size. It slices the current remaining text from the start through that split index, calculates offsets from the number of parsed characters already consumed, calculates previous-context overlap from the same parsed input, appends a main chunk when the slice is not exactly empty, and then continues with the unsliced remainder.
 
-The returned list preserves source order. Joining all returned `chunk_text` values should reconstruct the parsed input for normal non-empty input, including leading whitespace, trailing whitespace, delimiter characters, and whitespace-only content. Overlap is never merged into `chunk_text`. Chunk offsets are Python string character indexes into that same parsed input, and `character_end_offset` is exclusive.
+The returned or streamed chunks preserve source order. Joining all returned `chunk_text` values should reconstruct the parsed input for normal non-empty input, including leading whitespace, trailing whitespace, delimiter characters, and whitespace-only content. Overlap is never merged into `chunk_text`. Chunk offsets are Python string character indexes into that same parsed input, and `character_end_offset` is exclusive.
 
 ## Inputs
 
@@ -57,7 +57,7 @@ It does not receive source files, file paths, database connections, provider res
 
 ## Outputs
 
-The system returns an in-memory list of main chunk objects. Each object contains an ordered chunk number, exact chunk text, separate overlap text, character start offset, and exclusive character end offset.
+The system returns or streams main chunk objects. Each object contains an ordered chunk number, exact chunk text, separate overlap text, character start offset, and exclusive character end offset.
 
 It does not create source records, final storage chunk records, chunk IDs, book numbers, database rows, files, embeddings, graph records, HTTP responses, UI state, or saved progress.
 
@@ -77,6 +77,7 @@ Main Chunk Generation currently interacts with:
 - Draft World Splitter Settings, whose validated setting shape supplies chunk size and max lookback size before committed ingestion work exists.
 - World Splitter Settings Storage, whose committed settings can later supply chunk size, max lookback size, and overlap size for world ingestion.
 - Future parser systems, which should pass already-extracted text into this helper rather than making it read files.
+- Temporary Split Chunk Outputs, which can stream generated chunks into an attempt-local SQLite file without first collecting every chunk in a list.
 - Chunk Storage, which can later receive caller-prepared final chunk records after source metadata, IDs, and book numbers are handled outside this helper.
 - The central logger, which records count summaries and unexpected splitter failures without text content.
 
