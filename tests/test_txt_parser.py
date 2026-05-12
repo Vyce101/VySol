@@ -65,15 +65,39 @@ class TxtParserTests(unittest.TestCase):
             logger.warning.assert_called_once()
             self.assertNotIn(parsed_text, str(logger.method_calls))
 
-    def test_unexpected_file_read_failure_logs_error(self) -> None:
+    def test_missing_current_file_logs_warning_without_raw_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
             source_file_path = Path(temp_directory) / "missing.txt"
 
             with patch("app.ingestion.parsing.txt.logger") as logger:
-                with self.assertRaises(OSError):
+                with self.assertRaises(TxtParseError):
                     parse_txt_file(source_file_path)
 
-            logger.error.assert_called_once()
+            logger.warning.assert_called_once_with(
+                "Rejected unavailable TXT source: error_type=%s",
+                "FileNotFoundError",
+            )
+            logger.error.assert_not_called()
+            self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
+    def test_unreadable_current_file_logs_warning_without_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "source.txt"
+            source_file_path.write_text("Source text.", encoding="utf-8")
+
+            with (
+                patch.object(Path, "open", side_effect=PermissionError("denied")),
+                patch("app.ingestion.parsing.txt.logger") as logger,
+            ):
+                with self.assertRaises(TxtParseError):
+                    parse_txt_file(source_file_path)
+
+            logger.warning.assert_called_once_with(
+                "Rejected unavailable TXT source: error_type=%s",
+                "PermissionError",
+            )
+            logger.error.assert_not_called()
+            self.assertNotIn(str(source_file_path), str(logger.method_calls))
 
     def test_success_logs_info_without_parsed_text(self) -> None:
         parsed_text = "Do not log this source text."

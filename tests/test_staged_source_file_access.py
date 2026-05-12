@@ -26,6 +26,37 @@ class StagedSourceFileAccessTests(unittest.TestCase):
 
         self.assertEqual(validated_entries, entries)
 
+    def test_edited_file_at_same_path_still_passes_without_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_path = Path(temp_directory) / "source.txt"
+            source_path.write_text("Original source.", encoding="utf-8")
+            entries = (make_entry("entry-1", source_path, "txt"),)
+            source_path.write_text("Edited current source.", encoding="utf-8")
+
+            with patch("app.ingestion.staging.source_file_access.logger") as logger:
+                validated_entries = validate_staged_source_file_access(entries)
+
+        self.assertEqual(validated_entries, entries)
+        logger.warning.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_replaced_readable_file_at_same_path_still_passes_without_warning(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_path = Path(temp_directory) / "source.txt"
+            source_path.write_text("Original source.", encoding="utf-8")
+            entries = (make_entry("entry-1", source_path, "txt"),)
+            source_path.unlink()
+            source_path.write_text("Replacement source.", encoding="utf-8")
+
+            with patch("app.ingestion.staging.source_file_access.logger") as logger:
+                validated_entries = validate_staged_source_file_access(entries)
+
+        self.assertEqual(validated_entries, entries)
+        logger.warning.assert_not_called()
+        logger.error.assert_not_called()
+
     def test_empty_batch_succeeds_without_creating_startup_policy(self) -> None:
         self.assertEqual(validate_staged_source_file_access([]), ())
 
@@ -71,6 +102,26 @@ class StagedSourceFileAccessTests(unittest.TestCase):
         )
         logger.error.assert_not_called()
         self.assertNotIn(str(source_directory), str(logger.method_calls))
+
+    def test_file_replaced_by_directory_blocks_current_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_path = Path(temp_directory) / "source.txt"
+            source_path.write_text("Original source.", encoding="utf-8")
+            entries = (make_entry("entry-1", source_path, "txt"),)
+            source_path.unlink()
+            source_path.mkdir()
+
+            with patch("app.ingestion.staging.source_file_access.logger") as logger:
+                with self.assertRaises(StagedSourceFileAccessError):
+                    validate_staged_source_file_access(entries)
+
+        logger.warning.assert_called_once_with(
+            "Unavailable staged source files block ingestion: count=%s failures=%s",
+            1,
+            (("entry-1", "txt", "not_file"),),
+        )
+        logger.error.assert_not_called()
+        self.assertNotIn(str(source_path), str(logger.method_calls))
 
     def test_open_denied_blocks_batch_and_logs_warning_without_raw_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:

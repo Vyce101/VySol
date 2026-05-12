@@ -152,6 +152,21 @@ class EpubParserTests(unittest.TestCase):
             logger.warning.assert_called_once()
             self.assertNotIn(parsed_text, str(logger.method_calls))
 
+    def test_missing_current_file_logs_warning_without_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "missing.epub"
+
+            with patch("app.ingestion.parsing.epub.logger") as logger:
+                with self.assertRaises(EpubParseError):
+                    parse_epub_file(source_file_path)
+
+            logger.warning.assert_called_once_with(
+                "Rejected unavailable EPUB source: error_type=%s",
+                "FileNotFoundError",
+            )
+            logger.error.assert_not_called()
+            self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
     def test_success_logs_info_without_parsed_text(self) -> None:
         parsed_text = "Do not log this source text."
 

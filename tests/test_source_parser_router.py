@@ -107,6 +107,76 @@ class SourceParserRouterTests(unittest.TestCase):
             with self.assertRaises(TxtParseError):
                 parse_staged_source(source)
 
+    def test_real_txt_parser_reads_current_edited_contents_at_parse_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "source.txt"
+            source_file_path.write_text("Original text.", encoding="utf-8")
+            source = StagedSource(source_file_path, "txt")
+            source_file_path.write_text("Current edited text.", encoding="utf-8")
+
+            parsed_source = parse_staged_source(source)
+
+        self.assertEqual(parsed_source.parsed_text, "Current edited text.")
+
+    def test_real_batch_parser_reads_current_contents_and_preserves_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            first_path = Path(temp_directory) / "first.txt"
+            second_path = Path(temp_directory) / "second.txt"
+            first_path.write_text("Original first.", encoding="utf-8")
+            second_path.write_text("Original second.", encoding="utf-8")
+            sources = [
+                StagedSource(first_path, "txt"),
+                StagedSource(second_path, "txt"),
+            ]
+            first_path.write_text("Current first.", encoding="utf-8")
+            second_path.write_text("Current second.", encoding="utf-8")
+
+            parsed_sources = parse_staged_source_batch(sources)
+
+        self.assertEqual(
+            parsed_sources,
+            [
+                ParsedStagedSource(first_path, "txt", "Current first."),
+                ParsedStagedSource(second_path, "txt", "Current second."),
+            ],
+        )
+
+    def test_missing_current_txt_file_fails_with_path_safe_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "missing.txt"
+            source = StagedSource(source_file_path, "txt")
+
+            with patch("app.ingestion.parsing.txt.logger") as logger:
+                with self.assertRaises(TxtParseError):
+                    parse_staged_source(source)
+
+        logger.warning.assert_called_once_with(
+            "Rejected unavailable TXT source: error_type=%s",
+            "FileNotFoundError",
+        )
+        logger.error.assert_not_called()
+        self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
+    def test_unreadable_current_txt_file_fails_with_path_safe_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "source.txt"
+            source_file_path.write_text("Source text.", encoding="utf-8")
+            source = StagedSource(source_file_path, "txt")
+
+            with (
+                patch.object(Path, "open", side_effect=PermissionError("denied")),
+                patch("app.ingestion.parsing.txt.logger") as logger,
+            ):
+                with self.assertRaises(TxtParseError):
+                    parse_staged_source(source)
+
+        logger.warning.assert_called_once_with(
+            "Rejected unavailable TXT source: error_type=%s",
+            "PermissionError",
+        )
+        logger.error.assert_not_called()
+        self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
     def test_logs_routing_debug_without_source_text(self) -> None:
         source_text = "Do not log this source text."
         source = StagedSource(Path("source.txt"), "txt")

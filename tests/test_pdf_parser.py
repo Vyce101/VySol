@@ -71,6 +71,37 @@ class PdfParserTests(unittest.TestCase):
             logger.error.assert_called_once()
             self.assertNotIn(parsed_text, str(logger.method_calls))
 
+    def test_missing_current_file_logs_warning_without_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "missing.pdf"
+
+            with patch("app.ingestion.parsing.pdf.logger") as logger:
+                with self.assertRaises(PdfParseError):
+                    parse_pdf_file(source_file_path)
+
+            logger.warning.assert_called_once_with(
+                "Rejected unavailable PDF source: reason=%s",
+                "missing",
+            )
+            logger.error.assert_not_called()
+            self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
+    def test_directory_current_path_logs_warning_without_raw_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            source_file_path = Path(temp_directory) / "source.pdf"
+            source_file_path.mkdir()
+
+            with patch("app.ingestion.parsing.pdf.logger") as logger:
+                with self.assertRaises(PdfParseError):
+                    parse_pdf_file(source_file_path)
+
+            logger.warning.assert_called_once_with(
+                "Rejected unavailable PDF source: reason=%s",
+                "not_file",
+            )
+            logger.error.assert_not_called()
+            self.assertNotIn(str(source_file_path), str(logger.method_calls))
+
     def test_unexpected_text_extraction_failure_logs_error_without_text(self) -> None:
         parsed_text = "Do not log this source text."
 
