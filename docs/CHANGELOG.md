@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend staged source hash preflight so readable staged source files can receive temporary SHA-256 hashes before future duplicate checks and commit logic.
+- Added a Staged Source Hash Preflight concept page.
 - Added backend staged source file access validation so missing or unreadable selected files can block future ingestion before parsing or commit work starts.
 - Added a Staged Source File Access Validation concept page.
 - Added graceful staged source removal protection so committed source removal attempts leave world data unchanged.

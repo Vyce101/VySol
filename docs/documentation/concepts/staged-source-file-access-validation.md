@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 VySol's staging state stores selected file paths as references. It does not copy source files when the user selects them, so a file can be moved, deleted, replaced by a folder, or become unreadable before a future Start or Resume action tries to ingest it.
 
-This validation layer gives future ingestion startup code one reusable gate that can fail the whole staged batch before parser, copy, numbering, chunk, or commit work starts.
+This validation layer gives future ingestion startup code one reusable gate that can fail the whole staged batch before parser, hash, copy, numbering, chunk, or commit work starts.
 
 ## Ownership Boundary
 
@@ -65,8 +65,9 @@ Staged Source File Access Validation currently interacts with:
 
 - Temporary Source Staging State, which owns temporary entries and selected path references.
 - Source Type Selection Filter, which marks unsupported source types before this validator is useful for ingestion startup.
+- Staged Source Hash Preflight, which can hash staged source contents after file access has already been validated.
 - Source Parser Router, which should only receive staged sources after type validity and file access preflight pass.
-- Future Start and Resume ingestion orchestration, which can call this gate before parsing, copying, numbering, chunking, or committing.
+- Future Start and Resume ingestion orchestration, which can call this gate before hashing, parsing, copying, numbering, chunking, or committing.
 - The central logger, which records path-safe access failure summaries.
 
 It must stay separate from parser internals, storage repositories, route handlers, source copy behavior, embeddings, graph extraction, retrieval, and UI rendering.
@@ -87,7 +88,7 @@ Cross-system edge cases:
 - Staging state may contain path references that were valid at selection time but no longer exist at Start or Resume time.
 - Unsupported source types should still be blocked by Source Type Selection Filter before parser routing.
 - Parser Router may still reject malformed content later; this validator only proves file availability, not parseability.
-- Future copy, hash, book-number, chunk, and commit systems must run only after this validator succeeds.
+- Future hash, copy, book-number, chunk, and commit systems must run only after this validator succeeds.
 - Logs must remain safe for public repositories and local machines by avoiding full selected paths.
 
 ## Invariants
