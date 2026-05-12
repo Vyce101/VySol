@@ -19,6 +19,13 @@ from app.ingestion.attempt_workspace import (
     TemporaryIngestionWorkspace,
     cleanup_abandoned_attempt_workspaces,
 )
+from app.ingestion.commit_cleanup import (
+    CommitFileCopy,
+    CommitFilePreparationError,
+    PreparedCommitFile,
+    cleanup_commit_files,
+    run_commit_with_rollback,
+)
 from app.ingestion.parsed_source_outputs import (
     ParsedSourcePreparationError,
     TemporaryParsedSourceOutput,
@@ -45,6 +52,9 @@ __all__ = [
     "IngestionAttemptWorkspaceRegistry",
     "InvalidIngestionAttemptTransitionError",
     "ParsedSourcePreparationError",
+    "CommitFileCopy",
+    "CommitFilePreparationError",
+    "PreparedCommitFile",
     "SplitChunkOutputPreparationError",
     "SplitChunkOutputReadError",
     "StaleIngestionAttemptResultError",
@@ -55,6 +65,7 @@ __all__ = [
     "TemporarySplitChunkSourceSummary",
     "UnusableParsedSourceTextError",
     "cleanup_abandoned_attempt_workspaces",
+    "cleanup_commit_files",
     "complete_attempt",
     "finish_cancellation",
     "get_attempt_workspace",
@@ -65,5 +76,6 @@ __all__ = [
     "request_stop",
     "resolve_split_chunk_database_path",
     "resume_attempt",
+    "run_commit_with_rollback",
     "start_attempt",
 ]
