@@ -29,6 +29,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Staged Source File Access Validation](staged-source-file-access-validation.md)
 - [Staged Source Hash Preflight](staged-source-hash-preflight.md)
 - [Temporary Ingestion Workspace](temporary-ingestion-workspace.md)
+- [Temporary Parsed Source Outputs](temporary-parsed-source-outputs.md)
 - [Temporary Source Staging State](temporary-source-staging-state.md)
 - [TXT Parser](txt-parser.md)
 - [World Database Bootstrap](world-database-bootstrap.md)

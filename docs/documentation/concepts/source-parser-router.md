@@ -40,7 +40,7 @@ Source Parser Router does not own:
 
 Backend ingestion code passes one staged source or a staged source batch into the router. Each staged source contains a source file path and a staged source type string supplied by the staging layer.
 
-For a single source, the router normalizes the staged type, looks up the matching parser, logs the routing decision, calls that parser with the source file path, and returns the normalized source type with the parsed text. The parser reads whatever file currently exists at that path. The parser remains responsible for rejecting fake extensions, malformed files, unavailable files, unreadable files, and sources without usable text.
+For a single source, the router normalizes the staged type, looks up the matching parser, logs the routing decision, calls that parser with the source file path, and returns the normalized source type with the parsed text. The parser reads whatever file currently exists at that path. Parsers remain responsible for rejecting fake extensions, malformed files, unavailable files, and unreadable files. Temporary Parsed Source Outputs performs the batch-level usable-text check before later commit work.
 
 For a batch, the router first routes every staged source type before parsing any file. If any source type is unsupported, the batch is rejected before parser calls begin. If all source types are supported, the router parses sources in the batch order and lets parser failures stop the batch before future commit orchestration can continue.
 
@@ -67,7 +67,7 @@ It does not save parsed text, final chunk objects, database rows, files, embeddi
 
 Unsupported or blank staged source types are logged at `WARNING` and rejected before parser calls. This lets a future staged batch fail before any commit-time save behavior starts.
 
-Expected parser failures leave the router unchanged and propagate from the selected parser. This preserves each parser's existing failure contract for malformed EPUBs, broken PDFs, undecodable TXT files, fake extensions, unavailable files, unreadable files, and no-usable-text sources.
+Expected parser failures leave the router unchanged and propagate from the selected parser. This preserves each parser's existing failure contract for malformed EPUBs, broken PDFs, undecodable TXT files, fake extensions, unavailable files, unreadable files, and parser-owned no-usable-text rejection.
 
 Unexpected router failures are logged at `ERROR` and raised as router failures. Logs must not include parsed text, source text, or sensitive local path detail.
 
@@ -79,8 +79,9 @@ Source Parser Router currently interacts with:
 - EPUB Parser, which extracts readable text from EPUB spine documents.
 - PDF Parser, which extracts text from text-based PDF files.
 - Source Type Selection Filter, which can supply valid staged source types derived from selected file suffixes.
+- Temporary Parsed Source Outputs, which calls the router per staged source before later commit work can continue.
 - Future source staging UI, which can display invalid selections before the router is called.
-- Future source commit orchestration, which should call the router before saving source metadata or chunks.
+- Future source commit orchestration, which can use Temporary Parsed Source Outputs to call the router before saving source metadata or chunks.
 - Main Chunk Generation, which can receive parsed text only after routing and parsing succeed.
 - The central logger, which records routing and rejection summaries without source text.
 
@@ -106,6 +107,7 @@ Cross-system edge cases:
 - Fake extensions are rejected by parser/open behavior when the staged source type selects a parser but the file content is invalid.
 - Staged source paths remain references; parser routing must not preserve the exact file version selected earlier.
 - Missing, replaced, or unreadable current files fail through the selected parser before downstream commit work.
+- Temporary Parsed Source Outputs may reject parser-returned text that is empty or whitespace-only before future chunk or commit work.
 - Future commit orchestration must not save source metadata or chunks until the router and selected parser have succeeded.
 - Main Chunk Generation must receive parsed text, not staged source records or file paths.
 - Logs must stay safe for public repositories and local machines by avoiding parsed text and full local paths.

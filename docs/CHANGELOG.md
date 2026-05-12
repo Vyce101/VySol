@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added temporary parsed source output preparation so staged sources parse in order before future commit work.
+- Added a Temporary Parsed Source Outputs concept page.
 - Added temporary ingestion workspaces so each Start or Resume attempt has isolated non-committed scratch storage.
 - Added a Temporary Ingestion Workspace concept page.
 - Added backend ingestion attempt state tracking for idle, running, stopping, paused, and complete ingestion lifecycles.

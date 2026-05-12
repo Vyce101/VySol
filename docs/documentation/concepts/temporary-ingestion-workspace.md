@@ -75,6 +75,7 @@ Temporary Ingestion Workspace currently interacts with:
 
 - Ingestion Attempt State, which generates attempt IDs, starts fresh attempts, pauses attempts, and verifies workspace availability before resume.
 - Temporary Source Staging State, whose staged-work signal can keep an attempt paused and therefore keep the workspace associated with that attempt.
+- Temporary Parsed Source Outputs, which uses the active attempt workspace identity while keeping parsed text in memory.
 - Future ingestion orchestration, which may use the workspace for attempt-specific temporary files before later parsing, chunking, hashing, provider, or commit systems run.
 - Committed World Folder Bootstrap and Committed Source Storage, which must remain separate from this temporary scratch area.
 - The central logger, which records workspace creation and creation failures without local path details.
@@ -96,6 +97,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Future ingestion orchestration must use the current attempt ID when requesting the workspace.
+- Temporary parsed output preparation may use the workspace identity, but must not write parsed source text into the workspace.
 - Future resume code must not create a new workspace for the same paused attempt.
 - Future source commit work must not treat workspace files as committed source files.
 - Future failed-attempt handling must not expose workspace contents as durable world data.
