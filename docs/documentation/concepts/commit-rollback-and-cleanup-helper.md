@@ -71,7 +71,8 @@ Commit Rollback and Cleanup Helper currently interacts with:
 
 - Temporary Split Chunk Outputs, whose temporary rows can later feed commit orchestration.
 - Temporary Source Staging State, Source Type Selection Filter, staged source file access validation, staged source hash preflight, and duplicate preflight, which prepare inputs before commit work reaches this helper.
-- Committed Source Storage and Chunk Storage, which can later receive caller-prepared records when future transaction-safe write paths are available.
+- Committed Source File Storage, which prepares source file copy pairs and uses this helper to keep copied files aligned with the wider commit.
+- Committed Source Storage and Chunk Storage, which can receive caller-prepared records when transaction-safe commit orchestration writes them.
 - World Database Bootstrap, which supplies the world database connection.
 - Committed World Folder Bootstrap, whose source folder can become the final file destination area.
 - The central logger, which records rollback and cleanup failures without local path details.

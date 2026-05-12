@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added committed source file copy preparation so accepted source files can be safely copied into a world's `sources/` folder during commit.
+- Added a Committed Source File Storage concept page.
 - Added commit-time book number assignment so staged source batches append after existing world sources.
 - Added a Book Number Assignment concept page.
 - Added a reusable commit rollback and cleanup helper for future source commit storage.

@@ -63,9 +63,10 @@ SQLite duplicate checks, inserts, and reads are logged at `ERROR` and re-raised 
 Committed Source Storage currently interacts with:
 
 - World Database Bootstrap, which opens `world.sqlite` and applies the committed source table migration.
-- Committed World Folder Bootstrap, whose `sources/` folder is where separate file-copy behavior stores source files.
+- Committed Source File Storage, which prepares safe stored source paths and copies accepted files into the world `sources/` folder during the wider commit.
+- Committed World Folder Bootstrap, whose `sources/` folder is where committed source file copies are stored.
 - Book Number Assignment, which reads existing committed source rows before future commit orchestration saves new source metadata.
-- Future commit-time file copy, hashing, and file-type detection systems, which prepare metadata before this repository saves it.
+- Commit-time hashing and file-type detection systems, which prepare metadata before this repository saves it.
 - Future ingestion, chunk, graph, and retrieval systems, which can read committed source metadata but must keep their own storage responsibilities separate.
 - The central logger, which records source metadata append, rejection, and database failure events.
 
