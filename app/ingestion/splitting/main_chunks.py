@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from app.draft_worlds.splitter_settings import SplitterSettings
@@ -24,15 +25,22 @@ def generate_main_chunks(
     parsed_text: str,
     splitter_settings: SplitterSettings,
 ) -> list[MainChunk]:
-    chunks: list[MainChunk] = []
+    return list(iter_main_chunks(parsed_text, splitter_settings))
+
+
+def iter_main_chunks(
+    parsed_text: str,
+    splitter_settings: SplitterSettings,
+) -> Iterator[MainChunk]:
     remaining_text = parsed_text
     consumed_character_count = 0
+    completed_chunk_count = 0
 
     while remaining_text:
         split_index = find_safe_split_index(
             remaining_text,
             splitter_settings,
-            len(chunks),
+            completed_chunk_count,
         )
         chunk_text = remaining_text[:split_index]
         character_start_offset = consumed_character_count
@@ -44,21 +52,19 @@ def generate_main_chunks(
         )
 
         if chunk_text != "":
-            chunks.append(
-                MainChunk(
-                    chunk_number=len(chunks) + 1,
-                    chunk_text=chunk_text,
-                    overlap_text=overlap_text,
-                    character_start_offset=character_start_offset,
-                    character_end_offset=character_end_offset,
-                )
+            completed_chunk_count += 1
+            yield MainChunk(
+                chunk_number=completed_chunk_count,
+                chunk_text=chunk_text,
+                overlap_text=overlap_text,
+                character_start_offset=character_start_offset,
+                character_end_offset=character_end_offset,
             )
 
         consumed_character_count += split_index
         remaining_text = remaining_text[split_index:]
 
-    logger.debug("Generated main chunks: count=%s", len(chunks))
-    return chunks
+    logger.debug("Generated main chunks: count=%s", completed_chunk_count)
 
 
 def get_previous_overlap_text(

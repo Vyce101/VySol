@@ -24,6 +24,16 @@ from app.ingestion.parsed_source_outputs import (
     UnusableParsedSourceTextError,
     prepare_parsed_source_outputs,
 )
+from app.ingestion.split_chunk_outputs import (
+    SplitChunkOutputPreparationError,
+    SplitChunkOutputReadError,
+    TemporarySplitChunkOutput,
+    TemporarySplitChunkOutputSummary,
+    TemporarySplitChunkSourceSummary,
+    iter_split_chunk_outputs,
+    prepare_split_chunk_outputs,
+    resolve_split_chunk_database_path,
+)
 
 __all__ = [
     "IngestionAttemptState",
@@ -34,16 +44,24 @@ __all__ = [
     "IngestionAttemptWorkspaceRegistry",
     "InvalidIngestionAttemptTransitionError",
     "ParsedSourcePreparationError",
+    "SplitChunkOutputPreparationError",
+    "SplitChunkOutputReadError",
     "StaleIngestionAttemptResultError",
     "TemporaryIngestionWorkspace",
     "TemporaryParsedSourceOutput",
+    "TemporarySplitChunkOutput",
+    "TemporarySplitChunkOutputSummary",
+    "TemporarySplitChunkSourceSummary",
     "UnusableParsedSourceTextError",
     "complete_attempt",
     "finish_cancellation",
     "get_attempt_workspace",
     "get_attempt_state",
+    "iter_split_chunk_outputs",
     "prepare_parsed_source_outputs",
+    "prepare_split_chunk_outputs",
     "request_stop",
+    "resolve_split_chunk_database_path",
     "resume_attempt",
     "start_attempt",
 ]
