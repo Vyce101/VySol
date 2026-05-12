@@ -18,6 +18,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Font Upload Validation](font-upload-validation.md)
 - [Global App Storage](global-app-storage.md)
 - [Image Upload Validation](image-upload-validation.md)
+- [Ingestion Attempt State](ingestion-attempt-state.md)
 - [Main Chunk Generation](main-chunk-generation.md)
 - [PDF Parser](pdf-parser.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)

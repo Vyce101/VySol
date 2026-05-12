@@ -1,0 +1,147 @@
+# Ingestion Attempt State
+
+Ingestion Attempt State is VySol's in-memory backend contract for representing one active source-ingestion attempt. It gives backend callers a truthful state model for whether ingestion has not started, is running, is stopping, is paused with resumable staged work, or has completed successfully.
+
+This page is for developers, power users, and AI coding agents that need to understand ingestion attempt state before changing ingestion orchestration, cancellation handling, source staging integration, future route handlers, one-button UI behavior, or logging.
+
+## Why It Exists
+
+VySol's future ingestion UI is expected to use one primary control for start, pause or stop, resume, and complete feedback. That control needs backend state that does not pretend cancellation is instant and does not confuse a never-started flow with a successful finish.
+
+The attempt state model keeps that lifecycle separate from parsing, chunking, source commits, and UI rendering. It also carries attempt IDs so late results from an older attempt can be rejected instead of mutating a newer attempt.
+
+## Ownership Boundary
+
+Ingestion Attempt State owns:
+
+- Representing the single active backend ingestion attempt in process memory.
+- Distinguishing `IDLE`, `RUNNING`, `STOPPING`, `PAUSED`, and `COMPLETE` attempt statuses.
+- Creating a new attempt ID when a fresh attempt starts from `IDLE` or `COMPLETE`.
+- Preserving the same attempt ID while a paused attempt resumes.
+- Rejecting stale completion or cancellation results from old attempt IDs.
+- Representing whether staged work remains when cooperative cancellation finishes.
+- Logging valid state transitions at `INFO`.
+- Logging invalid transitions and stale attempt results at `WARNING`.
+- Logging unexpected state-model failures at `ERROR`.
+
+Ingestion Attempt State does not own:
+
+- Rendering the one-button UI or choosing button labels.
+- Running parsers, source access checks, source hashing, duplicate checks, chunk generation, embeddings, graph extraction, provider calls, or source commits.
+- Persisting attempt state to `app.sqlite`, `world.sqlite`, files, manifests, or saved-world data.
+- Creating durable failed source, failed world, or failed attempt statuses.
+- Managing external job queues, worker processes, or background task scheduling.
+
+## Normal Flow
+
+Before ingestion starts, the registry reports `IDLE` with no attempt ID and no staged work remaining. When a caller starts a fresh attempt, the state moves to `RUNNING`, a new attempt ID is generated, and staged work is considered present.
+
+If the user asks to stop while ingestion is running, the state moves to `STOPPING`. This tells future UI code that cancellation has been requested but cooperative cancellation has not finished yet.
+
+When cancellation finishes, the caller reports whether staged work remains. If work remains, the state moves to `PAUSED` and keeps the same attempt ID so the same attempt can resume later. If no work remains, the state moves back to `IDLE`.
+
+Resuming a paused attempt moves `PAUSED` back to `RUNNING` with the same attempt ID. Completing a running attempt with the current attempt ID moves the state to `COMPLETE`, allowing the UI to distinguish successful completion from a never-started idle state.
+
+## Inputs
+
+Ingestion Attempt State receives caller intent to start, stop, resume, finish cancellation, or complete an attempt. Cancellation and completion calls must include the attempt ID they belong to. Cancellation completion also receives a boolean staged-work signal so it can choose between `PAUSED` and `IDLE`.
+
+It does not receive source file paths, source text, parser output, chunks, hashes, provider responses, database connections, or UI request objects.
+
+## Outputs
+
+The system returns immutable in-memory attempt state objects containing:
+
+- The current attempt status.
+- The current attempt ID, when an attempt exists.
+- Whether staged work remains available for resume.
+
+It does not produce database rows, files, committed source metadata, chunks, provider calls, HTTP responses, or visible UI directly.
+
+## Saved State And Resume Behavior
+
+Attempt state is in memory only. It is intended to represent the currently running app process, not crash recovery or durable saved progress.
+
+`PAUSED` means cancellation finished while staged work still exists and the same attempt can resume. `IDLE` means no current attempt is resumable. `COMPLETE` means an attempt finished successfully and can be shown separately from `IDLE` until a new attempt starts.
+
+## Retry, Pause, And Abort Behavior
+
+This model supports cooperative cancellation state, but it does not perform cancellation itself. The future ingestion runner must request a stop, finish its own cancellation work, and then report whether staged work remains.
+
+Fresh starts from `IDLE` or `COMPLETE` create new attempt IDs. Resume from `PAUSED` keeps the existing attempt ID. Late completion or cancellation results for older attempt IDs are rejected and leave the current state unchanged.
+
+## Failure Behavior
+
+Invalid transitions are logged at `WARNING` and rejected without changing state. Examples include stopping while idle, resuming while not paused, starting while already running, or completing an attempt while it is not running.
+
+Stale attempt results are logged at `WARNING` and rejected without changing state. Unexpected state-model failures are logged at `ERROR` and raised so callers do not continue with an unknown lifecycle state.
+
+Logs must not include raw source paths, source text, local machine details, provider output, or user data.
+
+## System Interactions
+
+Ingestion Attempt State currently interacts with:
+
+- Future ingestion orchestration, which will use it before and after cooperative cancellation, resume, and completion.
+- Temporary Source Staging State, whose remaining staged work determines whether cancellation ends in `PAUSED` or `IDLE`.
+- Future one-button UI state, which can map the backend lifecycle to start, stopping, resume, and completion feedback.
+- The central logger, which records transition summaries and rejected transitions without source data.
+
+It must stay separate from parser internals, source preflight checks, committed source storage, chunk storage, embeddings, graph extraction, retrieval, and UI rendering.
+
+## Current Edge Cases
+
+Internal edge cases:
+
+- The initial state is `IDLE` with no attempt ID.
+- Starting from `IDLE` creates a new attempt ID.
+- Starting from `COMPLETE` creates a new attempt ID.
+- Starting from `RUNNING`, `STOPPING`, or `PAUSED` is rejected.
+- Stopping is allowed only from `RUNNING`.
+- Cancellation completion is accepted only from `STOPPING` and only for the current attempt ID.
+- Cancellation with staged work moves to `PAUSED`.
+- Cancellation without staged work moves to `IDLE`.
+- Resume is allowed only from `PAUSED` with staged work remaining.
+- Completion is accepted only from `RUNNING` and only for the current attempt ID.
+- `COMPLETE` and `IDLE` remain distinct statuses.
+- Stale attempt IDs cannot complete or cancel a newer attempt.
+
+Cross-system edge cases:
+
+- Future ingestion orchestration must pass the current attempt ID into completion and cancellation-finished calls.
+- Future cancellation code must report whether staged work remains instead of guessing from status alone.
+- Future UI code must treat `STOPPING` as an in-progress cancellation state, not as already paused.
+- Future UI code must treat `PAUSED` as resumable work and `IDLE` as ready for a fresh start.
+- Future source commit work must not infer that attempt state has committed, parsed, copied, hashed, or chunked any source.
+- Attempt state must not create or migrate app-global or per-world database tables.
+
+## Invariants
+
+- Attempt state must remain in memory for this system.
+- Only one active attempt may exist in the registry.
+- `IDLE` must not have an attempt ID or staged work remaining.
+- `PAUSED` must mean staged work remains.
+- `COMPLETE` must stay distinct from `IDLE`.
+- Fresh starts must create new attempt IDs.
+- Resume must keep the paused attempt ID.
+- Stale attempt results must never mutate current state.
+- Invalid transitions must leave current state unchanged.
+- The system must not parse, hash, copy, commit, persist, or assign book numbers for sources.
+- No database migration is required for ingestion attempt state.
+
+## Implementation Landmarks
+
+- `app/ingestion/attempt_state.py` owns the in-memory attempt state model, registry, transitions, stale-result rejection, and logging.
+- `app/ingestion/__init__.py` exports the public attempt-state API for backend callers.
+- `tests/test_ingestion_attempt_state.py` covers lifecycle transitions, stale attempt rejection, invalid transition logging, unexpected failure logging, and database non-persistence.
+
+## What AI/Coders Must Check Before Changing This System
+
+Before editing Ingestion Attempt State, check:
+
+- Whether the change belongs in attempt state or in ingestion orchestration, source staging, parser routing, commit logic, routes, or UI behavior.
+- Whether `IDLE`, `PAUSED`, and `COMPLETE` remain semantically distinct.
+- Whether stale attempt IDs still cannot mutate current state.
+- Whether cancellation completion still chooses `PAUSED` only when staged work remains.
+- Whether logs avoid source paths, source text, provider output, local machine details, and user data.
+- Whether attempt state remains independent of database schema, source commits, parser work, chunk storage, embeddings, graph extraction, and durable failed statuses.

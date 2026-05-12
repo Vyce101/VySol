@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend ingestion attempt state tracking for idle, running, stopping, paused, and complete ingestion lifecycles.
+- Added an Ingestion Attempt State concept page.
 - Added backend staged source duplicate preflight so exact duplicate source content is rejected within the same world before book numbers are assigned.
 - Added backend staged source hash preflight so readable staged source files can receive temporary SHA-256 hashes before future duplicate checks and commit logic.
 - Added a Staged Source Hash Preflight concept page.
