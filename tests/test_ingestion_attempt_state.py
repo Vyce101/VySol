@@ -12,6 +12,11 @@ from app.ingestion.attempt_state import (
     InvalidIngestionAttemptTransitionError,
     StaleIngestionAttemptResultError,
 )
+from app.ingestion.attempt_workspace import (
+    IngestionAttemptWorkspaceRegistry,
+    WORKSPACE_DIRECTORY_PREFIX,
+    cleanup_abandoned_attempt_workspaces,
+)
 from app.storage.database import bootstrap_global_database, close_global_connection
 from app.storage.migrations import get_schema_version
 from app.storage.paths import get_worlds_directory
@@ -85,7 +90,8 @@ class IngestionAttemptStateTests(unittest.TestCase):
             first_workspace.workspace_path,
             second_workspace.workspace_path,
         )
-        self.assertTrue(first_workspace.workspace_path.exists())
+        self.assertFalse(first_workspace.workspace_path.exists())
+        self.assertIsNone(registry.get_attempt_workspace(first_state.attempt_id))
         self.assertTrue(second_workspace.workspace_path.exists())
 
     def test_attempt_workspace_is_outside_committed_world_source_storage(self) -> None:
@@ -141,6 +147,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
     def test_finish_cancellation_without_remaining_work_moves_to_idle(self) -> None:
         registry = IngestionAttemptStateRegistry()
         running_state = registry.start_attempt()
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
         registry.request_stop()
 
         state = registry.finish_cancellation(
@@ -156,6 +163,9 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=False,
             ),
         )
+        self.assertIsNotNone(workspace)
+        self.assertFalse(workspace.workspace_path.exists())
+        self.assertIsNone(registry.get_attempt_workspace(running_state.attempt_id))
 
     def test_resume_paused_attempt_returns_to_running_with_same_attempt_id(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -183,6 +193,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
     def test_complete_running_attempt_moves_to_complete(self) -> None:
         registry = IngestionAttemptStateRegistry()
         running_state = registry.start_attempt()
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
 
         state = registry.complete_attempt(running_state.attempt_id)
 
@@ -194,6 +205,9 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=False,
             ),
         )
+        self.assertIsNotNone(workspace)
+        self.assertFalse(workspace.workspace_path.exists())
+        self.assertIsNone(registry.get_attempt_workspace(running_state.attempt_id))
 
     def test_stale_attempt_id_cannot_complete_newer_attempt(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -292,7 +306,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
 
         with (
             patch(
-                "app.ingestion.attempt_workspace.tempfile.TemporaryDirectory",
+                "app.ingestion.attempt_workspace.Path.mkdir",
                 side_effect=OSError(private_path),
             ),
             patch("app.ingestion.attempt_workspace.logger") as logger,
@@ -305,6 +319,65 @@ class IngestionAttemptStateTests(unittest.TestCase):
             "Failed to create temporary ingestion workspace."
         )
         self.assertNotIn(private_path, str(logger.method_calls))
+
+    def test_missing_workspace_cleanup_logs_debug_and_does_not_raise(self) -> None:
+        registry = IngestionAttemptWorkspaceRegistry()
+
+        with patch("app.ingestion.attempt_workspace.logger") as logger:
+            registry.remove_attempt_workspace("attempt-1")
+
+        logger.debug.assert_called_once_with(
+            "Temporary ingestion workspace already cleaned: attempt_id=%s",
+            "attempt-1",
+        )
+        logger.error.assert_not_called()
+
+    def test_workspace_cleanup_failure_logs_error_without_raw_path(self) -> None:
+        private_path = str(Path("private") / "workspace")
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            registry = IngestionAttemptWorkspaceRegistry(Path(temp_directory))
+            workspace = registry.create_attempt_workspace("attempt-1")
+
+            with (
+                patch(
+                    "app.ingestion.attempt_workspace.shutil.rmtree",
+                    side_effect=OSError(private_path),
+                ),
+                patch("app.ingestion.attempt_workspace.logger") as logger,
+            ):
+                registry.remove_attempt_workspace("attempt-1")
+
+            self.assertTrue(workspace.workspace_path.exists())
+
+        logger.error.assert_called_once()
+        self.assertNotIn(private_path, str(logger.method_calls))
+
+    def test_startup_cleanup_deletes_only_abandoned_ingestion_workspaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            workspace_parent = root / "user" / "data" / "ingestion-workspaces"
+            abandoned_workspace = workspace_parent / f"{WORKSPACE_DIRECTORY_PREFIX}old"
+            unrelated_directory = workspace_parent / "manual-folder"
+            committed_sources = (
+                root
+                / "user"
+                / "worlds"
+                / "12345678-1234-5678-1234-567812345678"
+                / "sources"
+            )
+            abandoned_workspace.mkdir(parents=True)
+            unrelated_directory.mkdir()
+            committed_sources.mkdir(parents=True)
+            (committed_sources / "source.txt").write_text("committed", encoding="utf-8")
+
+            cleanup_count = cleanup_abandoned_attempt_workspaces(workspace_parent)
+
+            self.assertEqual(cleanup_count, 1)
+            self.assertFalse(abandoned_workspace.exists())
+            self.assertTrue(unrelated_directory.exists())
+            self.assertTrue(committed_sources.exists())
+            self.assertTrue((committed_sources / "source.txt").exists())
 
     def test_attempt_state_does_not_change_global_or_world_database_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
