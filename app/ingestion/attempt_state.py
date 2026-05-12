@@ -1,0 +1,223 @@
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import NoReturn
+from uuid import uuid4
+
+from app.logger import get_logger
+
+logger = get_logger()
+
+
+class IngestionAttemptStatus(StrEnum):
+    IDLE = "idle"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+
+
+class IngestionAttemptStateError(ValueError):
+    pass
+
+
+class StaleIngestionAttemptResultError(IngestionAttemptStateError):
+    pass
+
+
+class InvalidIngestionAttemptTransitionError(IngestionAttemptStateError):
+    pass
+
+
+@dataclass(frozen=True)
+class IngestionAttemptState:
+    status: IngestionAttemptStatus
+    attempt_id: str | None
+    staged_work_remaining: bool
+
+
+class IngestionAttemptStateRegistry:
+    def __init__(self) -> None:
+        self._state = build_idle_state()
+
+    def get_state(self) -> IngestionAttemptState:
+        return self._state
+
+    def start_attempt(self) -> IngestionAttemptState:
+        if self._state.status not in {
+            IngestionAttemptStatus.IDLE,
+            IngestionAttemptStatus.COMPLETE,
+        }:
+            reject_invalid_transition("Cannot start ingestion from current state.")
+
+        return self._set_state(
+            IngestionAttemptState(
+                status=IngestionAttemptStatus.RUNNING,
+                attempt_id=str(uuid4()),
+                staged_work_remaining=True,
+            )
+        )
+
+    def request_stop(self) -> IngestionAttemptState:
+        if self._state.status != IngestionAttemptStatus.RUNNING:
+            reject_invalid_transition("Cannot stop ingestion from current state.")
+
+        return self._set_state(
+            IngestionAttemptState(
+                status=IngestionAttemptStatus.STOPPING,
+                attempt_id=self._state.attempt_id,
+                staged_work_remaining=self._state.staged_work_remaining,
+            )
+        )
+
+    def finish_cancellation(
+        self,
+        attempt_id: str,
+        staged_work_remaining: bool,
+    ) -> IngestionAttemptState:
+        self._validate_current_attempt_result(
+            attempt_id,
+            IngestionAttemptStatus.STOPPING,
+        )
+
+        if staged_work_remaining:
+            return self._set_state(
+                IngestionAttemptState(
+                    status=IngestionAttemptStatus.PAUSED,
+                    attempt_id=self._state.attempt_id,
+                    staged_work_remaining=True,
+                )
+            )
+
+        return self._set_state(build_idle_state())
+
+    def resume_attempt(self) -> IngestionAttemptState:
+        if self._state.status != IngestionAttemptStatus.PAUSED:
+            reject_invalid_transition("Cannot resume ingestion from current state.")
+
+        if not self._state.staged_work_remaining:
+            reject_invalid_transition("Cannot resume ingestion without staged work.")
+
+        return self._set_state(
+            IngestionAttemptState(
+                status=IngestionAttemptStatus.RUNNING,
+                attempt_id=self._state.attempt_id,
+                staged_work_remaining=True,
+            )
+        )
+
+    def complete_attempt(self, attempt_id: str) -> IngestionAttemptState:
+        self._validate_current_attempt_result(
+            attempt_id,
+            IngestionAttemptStatus.RUNNING,
+        )
+
+        return self._set_state(
+            IngestionAttemptState(
+                status=IngestionAttemptStatus.COMPLETE,
+                attempt_id=self._state.attempt_id,
+                staged_work_remaining=False,
+            )
+        )
+
+    def _validate_current_attempt_result(
+        self,
+        attempt_id: str,
+        required_status: IngestionAttemptStatus,
+    ) -> None:
+        if self._state.attempt_id != attempt_id:
+            reject_stale_result()
+
+        if self._state.status != required_status:
+            reject_invalid_transition("Attempt result does not match current state.")
+
+    def _set_state(self, updated_state: IngestionAttemptState) -> IngestionAttemptState:
+        try:
+            previous_status = self._state.status
+            self._state = validate_attempt_state(updated_state)
+        except Exception as error:
+            logger.error("Unexpected ingestion attempt state failure.", exc_info=True)
+            raise RuntimeError("Unexpected ingestion attempt state failure.") from error
+
+        logger.info(
+            "Ingestion attempt state changed: from_status=%s to_status=%s attempt_id=%s",
+            previous_status,
+            self._state.status,
+            self._state.attempt_id,
+        )
+        return self._state
+
+
+def build_idle_state() -> IngestionAttemptState:
+    return IngestionAttemptState(
+        status=IngestionAttemptStatus.IDLE,
+        attempt_id=None,
+        staged_work_remaining=False,
+    )
+
+
+def validate_attempt_state(state: IngestionAttemptState) -> IngestionAttemptState:
+    if type(state) is not IngestionAttemptState:
+        raise IngestionAttemptStateError("Ingestion attempt state is invalid.")
+
+    if type(state.status) is not IngestionAttemptStatus:
+        raise IngestionAttemptStateError("Ingestion attempt status is invalid.")
+
+    if state.status == IngestionAttemptStatus.IDLE and state.attempt_id is not None:
+        raise IngestionAttemptStateError("Idle ingestion attempts cannot have an ID.")
+
+    if state.status == IngestionAttemptStatus.IDLE and state.staged_work_remaining:
+        raise IngestionAttemptStateError("Idle ingestion attempts cannot have staged work.")
+
+    if state.status != IngestionAttemptStatus.IDLE and not state.attempt_id:
+        raise IngestionAttemptStateError("Active ingestion attempts require an ID.")
+
+    if state.status == IngestionAttemptStatus.PAUSED and not state.staged_work_remaining:
+        raise IngestionAttemptStateError("Paused ingestion attempts require staged work.")
+
+    if state.status == IngestionAttemptStatus.COMPLETE and state.staged_work_remaining:
+        raise IngestionAttemptStateError("Complete ingestion attempts cannot have staged work.")
+
+    return state
+
+
+def reject_stale_result() -> NoReturn:
+    logger.warning("Rejected stale ingestion attempt result.")
+    raise StaleIngestionAttemptResultError("Rejected stale ingestion attempt result.")
+
+
+def reject_invalid_transition(message: str) -> NoReturn:
+    logger.warning("Invalid ingestion attempt state transition: %s", message)
+    raise InvalidIngestionAttemptTransitionError(message)
+
+
+_ingestion_attempt_state_registry = IngestionAttemptStateRegistry()
+
+
+def get_attempt_state() -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.get_state()
+
+
+def start_attempt() -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.start_attempt()
+
+
+def request_stop() -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.request_stop()
+
+
+def finish_cancellation(
+    attempt_id: str,
+    staged_work_remaining: bool,
+) -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.finish_cancellation(
+        attempt_id,
+        staged_work_remaining,
+    )
+
+
+def resume_attempt() -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.resume_attempt()
+
+
+def complete_attempt(attempt_id: str) -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.complete_attempt(attempt_id)
