@@ -21,6 +21,10 @@ from app.ingestion.staging.source_file_access import (
     StagedSourceFileAccessError,
     validate_staged_source_file_access,
 )
+from app.ingestion.staging.source_hash_preflight import (
+    HashedStagedSource,
+    hash_staged_source_files,
+)
 from app.ingestion.staging.source_type_filter import (
     SourceStagingItem,
     build_source_staging_list,
@@ -38,12 +42,14 @@ __all__ = [
     "SourceStagingStateRegistry",
     "SourceStagingItem",
     "TemporarySourceStagingEntry",
+    "HashedStagedSource",
     "add_source_file_paths",
     "build_source_staging_list",
     "can_start_ingestion",
     "create_staging_context",
     "discard_staging_context",
     "get_staging_state",
+    "hash_staged_source_files",
     "remove_existing_world_source_item",
     "remove_staging_entry",
     "reorder_existing_world_staging_entries",
