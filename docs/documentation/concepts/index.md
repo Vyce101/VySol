@@ -10,6 +10,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Asset Hash Deduplication](asset-hash-deduplication.md)
 - [Asset Metadata Storage](asset-metadata-storage.md)
 - [Chunk Storage](chunk-storage.md)
+- [Commit Rollback and Cleanup Helper](commit-rollback-and-cleanup-helper.md)
 - [Committed Source Storage](committed-source-storage.md)
 - [Committed World Folder Bootstrap](committed-world-folder-bootstrap.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
