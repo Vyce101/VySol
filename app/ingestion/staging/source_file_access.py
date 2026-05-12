@@ -16,6 +16,7 @@ EXPECTED_READ_FAILURES = (
     FileNotFoundError,
     IsADirectoryError,
     PermissionError,
+    OSError,
 )
 
 

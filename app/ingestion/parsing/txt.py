@@ -23,15 +23,17 @@ class TxtParseError(ValueError):
 
 
 def parse_txt_file(source_file_path: Path) -> str:
-    encoding = choose_txt_encoding(source_file_path)
+    try:
+        encoding = choose_txt_encoding(source_file_path)
+    except OSError as error:
+        reject_unavailable_txt(error)
 
     try:
         parsed_text = read_txt_text(source_file_path, encoding)
     except UnicodeDecodeError as error:
         reject_unreadable_txt(encoding, error)
-    except OSError:
-        logger.error("Unexpected TXT file read failure.", exc_info=True)
-        raise
+    except OSError as error:
+        reject_unavailable_txt(error)
 
     logger.info(
         "Parsed TXT source: encoding=%s character_count=%s",
@@ -42,12 +44,8 @@ def parse_txt_file(source_file_path: Path) -> str:
 
 
 def choose_txt_encoding(source_file_path: Path) -> str:
-    try:
-        with source_file_path.open("rb") as source_file:
-            file_prefix = source_file.read(BOM_PREFIX_READ_SIZE)
-    except OSError:
-        logger.error("Unexpected TXT file read failure.", exc_info=True)
-        raise
+    with source_file_path.open("rb") as source_file:
+        file_prefix = source_file.read(BOM_PREFIX_READ_SIZE)
 
     for bom, encoding in TXT_ENCODINGS_BY_BOM:
         if file_prefix.startswith(bom):
@@ -69,3 +67,11 @@ def read_txt_text(source_file_path: Path, encoding: str) -> str:
 def reject_unreadable_txt(encoding: str, error: UnicodeDecodeError) -> NoReturn:
     logger.warning("Rejected unreadable TXT source: encoding=%s", encoding)
     raise TxtParseError("TXT source could not be decoded as clean supported text.") from error
+
+
+def reject_unavailable_txt(error: OSError | None = None) -> NoReturn:
+    logger.warning(
+        "Rejected unavailable TXT source: error_type=%s",
+        type(error).__name__ if error is not None else "OSError",
+    )
+    raise TxtParseError("TXT source could not be read.") from error

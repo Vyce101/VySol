@@ -72,9 +72,8 @@ def read_epub_book(source_file_path: Path) -> epub.EpubBook:
         return epub.read_epub(str(source_file_path), options=EPUB_READ_OPTIONS)
     except (epub.EpubException, zipfile.BadZipFile) as error:
         reject_malformed_epub(error)
-    except OSError:
-        logger.error("Unexpected EPUB file read failure.", exc_info=True)
-        raise
+    except OSError as error:
+        reject_unavailable_epub(error)
     except Exception as error:
         logger.error("Unexpected EPUB read failure.", exc_info=True)
         raise EpubParseError("EPUB source could not be read.") from error
@@ -266,6 +265,14 @@ def reject_epub_without_usable_text() -> NoReturn:
 def reject_malformed_epub(error: Exception) -> NoReturn:
     logger.warning("Rejected malformed EPUB source.")
     raise EpubParseError("EPUB source is malformed or unreadable.") from error
+
+
+def reject_unavailable_epub(error: OSError) -> NoReturn:
+    logger.warning(
+        "Rejected unavailable EPUB source: error_type=%s",
+        type(error).__name__,
+    )
+    raise EpubParseError("EPUB source could not be read.") from error
 
 
 def reject_malformed_epub_spine() -> NoReturn:

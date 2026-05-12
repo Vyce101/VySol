@@ -45,9 +45,19 @@ def parse_pdf_file(source_file_path: Path) -> str:
 
 
 def read_pdf_document(source_file_path: Path) -> pymupdf.Document:
+    if not source_file_path.exists():
+        reject_unavailable_pdf("missing")
+
+    if not source_file_path.is_file():
+        reject_unavailable_pdf("not_file")
+
     try:
         return pymupdf.open(str(source_file_path), filetype=PDF_FILE_TYPE)
-    except (RuntimeError, OSError, ValueError) as error:
+    except pymupdf.FileNotFoundError as error:
+        reject_unavailable_pdf("missing", error)
+    except OSError as error:
+        reject_unavailable_pdf("unreadable", error)
+    except (RuntimeError, ValueError) as error:
         logger.error("Unexpected PDF file read failure.", exc_info=True)
         raise PdfParseError("PDF source could not be read.") from error
 
@@ -79,3 +89,8 @@ def has_usable_text(text: str) -> bool:
 def reject_pdf_without_usable_text() -> NoReturn:
     logger.warning("Rejected PDF source with no usable text.")
     raise PdfParseError("PDF source did not contain usable text.")
+
+
+def reject_unavailable_pdf(reason: str, error: Exception | None = None) -> NoReturn:
+    logger.warning("Rejected unavailable PDF source: reason=%s", reason)
+    raise PdfParseError("PDF source could not be read.") from error
