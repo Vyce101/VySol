@@ -17,6 +17,7 @@ from app.ingestion.attempt_workspace import (
     IngestionAttemptWorkspaceError,
     IngestionAttemptWorkspaceRegistry,
     TemporaryIngestionWorkspace,
+    cleanup_abandoned_attempt_workspaces,
 )
 from app.ingestion.parsed_source_outputs import (
     ParsedSourcePreparationError,
@@ -53,6 +54,7 @@ __all__ = [
     "TemporarySplitChunkOutputSummary",
     "TemporarySplitChunkSourceSummary",
     "UnusableParsedSourceTextError",
+    "cleanup_abandoned_attempt_workspaces",
     "complete_attempt",
     "finish_cancellation",
     "get_attempt_workspace",

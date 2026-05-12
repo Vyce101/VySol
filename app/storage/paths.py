@@ -6,6 +6,7 @@ DATA_DIRECTORY_NAME = "data"
 LOG_DIRECTORY_NAME = "logs"
 WORLDS_DIRECTORY_NAME = "worlds"
 ASSETS_DIRECTORY_NAME = "assets"
+INGESTION_WORKSPACES_DIRECTORY_NAME = "ingestion-workspaces"
 IMAGE_ASSETS_DIRECTORY_NAME = "images"
 FONT_ASSETS_DIRECTORY_NAME = "fonts"
 DATABASE_FILE_NAME = "app.sqlite"
@@ -25,6 +26,10 @@ def get_log_directory() -> Path:
 
 def get_worlds_directory() -> Path:
     return get_user_directory() / WORLDS_DIRECTORY_NAME
+
+
+def get_ingestion_workspaces_directory() -> Path:
+    return get_data_directory() / INGESTION_WORKSPACES_DIRECTORY_NAME
 
 
 def get_assets_directory() -> Path:

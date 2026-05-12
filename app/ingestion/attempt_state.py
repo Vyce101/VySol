@@ -110,7 +110,9 @@ class IngestionAttemptStateRegistry:
                 )
             )
 
-        return self._set_state(build_idle_state())
+        state = self._set_state(build_idle_state())
+        self._workspace_registry.remove_attempt_workspace(attempt_id)
+        return state
 
     def resume_attempt(self) -> IngestionAttemptState:
         if self._state.status != IngestionAttemptStatus.PAUSED:
@@ -142,13 +144,15 @@ class IngestionAttemptStateRegistry:
             IngestionAttemptStatus.RUNNING,
         )
 
-        return self._set_state(
+        state = self._set_state(
             IngestionAttemptState(
                 status=IngestionAttemptStatus.COMPLETE,
                 attempt_id=self._state.attempt_id,
                 staged_work_remaining=False,
             )
         )
+        self._workspace_registry.remove_attempt_workspace(attempt_id)
+        return state
 
     def _validate_current_attempt_result(
         self,
