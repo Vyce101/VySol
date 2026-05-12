@@ -19,6 +19,11 @@ from app.ingestion.attempt_workspace import (
     TemporaryIngestionWorkspace,
     cleanup_abandoned_attempt_workspaces,
 )
+from app.ingestion.book_number_assignment import (
+    BookNumberAssignment,
+    BookNumberAssignmentError,
+    assign_book_numbers_for_staged_sources,
+)
 from app.ingestion.commit_cleanup import (
     CommitFileCopy,
     CommitFilePreparationError,
@@ -52,6 +57,8 @@ __all__ = [
     "IngestionAttemptWorkspaceRegistry",
     "InvalidIngestionAttemptTransitionError",
     "ParsedSourcePreparationError",
+    "BookNumberAssignment",
+    "BookNumberAssignmentError",
     "CommitFileCopy",
     "CommitFilePreparationError",
     "PreparedCommitFile",
@@ -64,6 +71,7 @@ __all__ = [
     "TemporarySplitChunkOutputSummary",
     "TemporarySplitChunkSourceSummary",
     "UnusableParsedSourceTextError",
+    "assign_book_numbers_for_staged_sources",
     "cleanup_abandoned_attempt_workspaces",
     "cleanup_commit_files",
     "complete_attempt",
