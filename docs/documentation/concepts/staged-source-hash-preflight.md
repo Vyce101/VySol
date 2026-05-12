@@ -6,7 +6,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 ## Why It Exists
 
-VySol needs future ingestion startup code to identify exact source-file duplicates before assigning permanent book numbers or creating committed source records. A stable content hash lets later duplicate checks and commit logic compare file contents without parsing source text, copying files, or writing database rows during preflight.
+VySol needs future ingestion startup code to identify exact source-file duplicates before assigning permanent book numbers or creating committed source records. A stable content hash lets Staged Source Duplicate Preflight and later commit logic compare file contents without parsing source text, copying files, or writing database rows during preflight.
 
 This preflight keeps hashing separate from storage and duplicate-blocking policy. It calculates temporary `sha256:<hex>` values and returns them in memory so future orchestration can decide how to use those hashes.
 
@@ -66,7 +66,7 @@ Staged Source Hash Preflight currently interacts with:
 
 - Temporary Source Staging State, which owns temporary entries and selected path references.
 - Staged Source File Access Validation, which should prove files are readable before this preflight hashes their contents.
-- Future duplicate checks, which can compare temporary source hashes before deciding whether a staged source may continue.
+- Staged Source Duplicate Preflight, which compares temporary source hashes before deciding whether a staged source may continue.
 - Future source commit orchestration, which can pass the temporary hashes into committed metadata creation after separate source IDs, stored paths, timestamps, and book numbers are prepared.
 - The central logger, which records path-safe hash summaries and failures.
 
@@ -86,7 +86,7 @@ Cross-system edge cases:
 
 - Access validation should run before hashing so missing or unreadable staged files are blocked consistently.
 - Unsupported source types should still be blocked by Source Type Selection Filter before future ingestion startup continues.
-- Duplicate checks may use the temporary hashes later, but duplicate-blocking policy is outside this preflight.
+- Staged Source Duplicate Preflight uses the temporary hashes later, but duplicate-blocking policy is outside this preflight.
 - Committed Source Storage may later receive a source hash from commit orchestration, but it must not infer that this preflight created committed metadata.
 - Asset hash deduplication remains separate and must not be reused as source ingestion policy.
 
