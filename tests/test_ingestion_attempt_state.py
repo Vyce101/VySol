@@ -8,11 +8,13 @@ from app.ingestion.attempt_state import (
     IngestionAttemptState,
     IngestionAttemptStateRegistry,
     IngestionAttemptStatus,
+    IngestionAttemptWorkspaceError,
     InvalidIngestionAttemptTransitionError,
     StaleIngestionAttemptResultError,
 )
 from app.storage.database import bootstrap_global_database, close_global_connection
 from app.storage.migrations import get_schema_version
+from app.storage.paths import get_worlds_directory
 from app.storage.world_migrations import apply_world_migrations, get_world_schema_version
 
 
@@ -49,6 +51,11 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=True,
             ),
         )
+        workspace = registry.get_attempt_workspace("attempt-1")
+
+        self.assertIsNotNone(workspace)
+        self.assertEqual(workspace.attempt_id, "attempt-1")
+        self.assertTrue(workspace.workspace_path.exists())
         logger.info.assert_called_once_with(
             "Ingestion attempt state changed: from_status=%s to_status=%s attempt_id=%s",
             IngestionAttemptStatus.IDLE,
@@ -64,12 +71,35 @@ class IngestionAttemptStateTests(unittest.TestCase):
             side_effect=("attempt-1", "attempt-2"),
         ):
             first_state = registry.start_attempt()
+            first_workspace = registry.get_attempt_workspace(first_state.attempt_id)
             registry.complete_attempt(first_state.attempt_id)
             second_state = registry.start_attempt()
+            second_workspace = registry.get_attempt_workspace(second_state.attempt_id)
 
         self.assertEqual(second_state.status, IngestionAttemptStatus.RUNNING)
         self.assertEqual(second_state.attempt_id, "attempt-2")
         self.assertNotEqual(first_state.attempt_id, second_state.attempt_id)
+        self.assertIsNotNone(first_workspace)
+        self.assertIsNotNone(second_workspace)
+        self.assertNotEqual(
+            first_workspace.workspace_path,
+            second_workspace.workspace_path,
+        )
+        self.assertTrue(first_workspace.workspace_path.exists())
+        self.assertTrue(second_workspace.workspace_path.exists())
+
+    def test_attempt_workspace_is_outside_committed_world_source_storage(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
+
+        self.assertIsNotNone(workspace)
+        self.assertFalse(
+            workspace.workspace_path.resolve().is_relative_to(
+                get_worlds_directory().resolve()
+            )
+        )
 
     def test_request_stop_moves_running_attempt_to_stopping(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -89,12 +119,14 @@ class IngestionAttemptStateTests(unittest.TestCase):
     def test_finish_cancellation_with_remaining_work_moves_to_paused(self) -> None:
         registry = IngestionAttemptStateRegistry()
         running_state = registry.start_attempt()
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
         registry.request_stop()
 
         state = registry.finish_cancellation(
             running_state.attempt_id,
             staged_work_remaining=True,
         )
+        paused_workspace = registry.get_attempt_workspace(running_state.attempt_id)
 
         self.assertEqual(
             state,
@@ -104,6 +136,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=True,
             ),
         )
+        self.assertEqual(paused_workspace, workspace)
 
     def test_finish_cancellation_without_remaining_work_moves_to_idle(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -127,6 +160,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
     def test_resume_paused_attempt_returns_to_running_with_same_attempt_id(self) -> None:
         registry = IngestionAttemptStateRegistry()
         running_state = registry.start_attempt()
+        paused_workspace = registry.get_attempt_workspace(running_state.attempt_id)
         registry.request_stop()
         registry.finish_cancellation(
             running_state.attempt_id,
@@ -134,6 +168,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
         )
 
         state = registry.resume_attempt()
+        resumed_workspace = registry.get_attempt_workspace(running_state.attempt_id)
 
         self.assertEqual(
             state,
@@ -143,6 +178,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=True,
             ),
         )
+        self.assertEqual(resumed_workspace, paused_workspace)
 
     def test_complete_running_attempt_moves_to_complete(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -169,12 +205,18 @@ class IngestionAttemptStateTests(unittest.TestCase):
             stale_state = registry.start_attempt()
             registry.complete_attempt(stale_state.attempt_id)
             current_state = registry.start_attempt()
+            current_workspace = registry.get_attempt_workspace(current_state.attempt_id)
 
         with patch("app.ingestion.attempt_state.logger") as logger:
             with self.assertRaises(StaleIngestionAttemptResultError):
                 registry.complete_attempt(stale_state.attempt_id)
 
         self.assertEqual(registry.get_state(), current_state)
+        self.assertIsNone(registry.get_attempt_workspace(stale_state.attempt_id))
+        self.assertEqual(
+            registry.get_attempt_workspace(current_state.attempt_id),
+            current_workspace,
+        )
         logger.warning.assert_called_once_with("Rejected stale ingestion attempt result.")
         logger.error.assert_not_called()
 
@@ -240,6 +282,29 @@ class IngestionAttemptStateTests(unittest.TestCase):
             "Unexpected ingestion attempt state failure.",
             exc_info=True,
         )
+
+    def test_workspace_creation_failure_leaves_state_unchanged_and_logs_error(
+        self,
+    ) -> None:
+        registry = IngestionAttemptStateRegistry()
+        original_state = registry.get_state()
+        private_path = str(Path("private") / "attempt")
+
+        with (
+            patch(
+                "app.ingestion.attempt_workspace.tempfile.TemporaryDirectory",
+                side_effect=OSError(private_path),
+            ),
+            patch("app.ingestion.attempt_workspace.logger") as logger,
+        ):
+            with self.assertRaises(IngestionAttemptWorkspaceError):
+                registry.start_attempt()
+
+        self.assertEqual(registry.get_state(), original_state)
+        logger.error.assert_called_once_with(
+            "Failed to create temporary ingestion workspace."
+        )
+        self.assertNotIn(private_path, str(logger.method_calls))
 
     def test_attempt_state_does_not_change_global_or_world_database_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
