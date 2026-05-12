@@ -13,6 +13,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend staged source file access validation so missing or unreadable selected files can block future ingestion before parsing or commit work starts.
+- Added a Staged Source File Access Validation concept page.
 - Added graceful staged source removal protection so committed source removal attempts leave world data unchanged.
 - Added backend staged source reorder guards that keep committed sources locked while preserving staged order.
 - Added temporary in-memory source staging state for draft and existing-world add-source flows.

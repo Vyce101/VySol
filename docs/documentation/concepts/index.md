@@ -24,6 +24,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Source Parser Router](source-parser-router.md)
 - [Source Type Selection Filter](source-type-selection-filter.md)
 - [Split Point Search](split-point-search.md)
+- [Staged Source File Access Validation](staged-source-file-access-validation.md)
 - [Temporary Source Staging State](temporary-source-staging-state.md)
 - [TXT Parser](txt-parser.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
