@@ -30,6 +30,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Source Parser Router](source-parser-router.md)
 - [Source Type Selection Filter](source-type-selection-filter.md)
 - [Split Point Search](split-point-search.md)
+- [Staged Batch Start Orchestration](staged-batch-start-orchestration.md)
 - [Staged Source Duplicate Preflight](staged-source-duplicate-preflight.md)
 - [Staged Source File Access Validation](staged-source-file-access-validation.md)
 - [Staged Source Hash Preflight](staged-source-hash-preflight.md)

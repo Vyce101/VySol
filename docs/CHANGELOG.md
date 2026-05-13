@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend staged batch start orchestration so valid staging contexts create one running attempt while invalid or duplicate starts are blocked.
+- Added a Staged Batch Start Orchestration concept page.
 - Added atomic existing-world batch commits so new source batches append only after source records, chunks, source copies, and cleanup-safe commit work succeed.
 - Added an Existing World Batch Commit concept page.
 - Added atomic new-world batch commits so a new world appears only after its first source batch, chunks, source copies, world database, and app index record are valid.
