@@ -44,6 +44,7 @@ class CommittedSourceFileStorageTests(unittest.TestCase):
             )
 
             self.assertEqual(prepared_source.source_id, FIRST_SOURCE_ID)
+            self.assertEqual(prepared_source.staging_entry_id, "Volume One")
             self.assertEqual(prepared_source.original_filename, "Volume One.TXT")
             self.assertEqual(
                 prepared_source.stored_path,
