@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.ingestion.attempt_state import (
+    IngestionAttemptCancellationError,
+    IngestionAttemptCancellationRegistry,
     IngestionAttemptState,
     IngestionAttemptStateRegistry,
     IngestionAttemptStatus,
@@ -121,6 +123,44 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=True,
             ),
         )
+        self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
+
+    def test_repeated_request_stop_while_stopping_returns_current_state(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        registry.start_attempt()
+        stopping_state = registry.request_stop()
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            state = registry.request_stop()
+
+        self.assertEqual(state, stopping_state)
+        self.assertEqual(registry.get_state(), stopping_state)
+        logger.warning.assert_called_once_with(
+            "Ignored repeated ingestion pause request: attempt_id=%s",
+            stopping_state.attempt_id,
+        )
+        logger.info.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_request_stop_failure_leaves_running_state_unchanged(self) -> None:
+        registry = IngestionAttemptStateRegistry(
+            cancellation_registry=FailingCancellationRegistry(),
+        )
+        running_state = registry.start_attempt()
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(IngestionAttemptCancellationError):
+                registry.request_stop()
+
+        self.assertEqual(registry.get_state(), running_state)
+        logger.error.assert_called_once_with(
+            "Failed to set ingestion attempt cancellation flag: "
+            "attempt_id=%s error_type=%s",
+            running_state.attempt_id,
+            "RuntimeError",
+            exc_info=True,
+        )
+        logger.warning.assert_not_called()
 
     def test_finish_cancellation_with_remaining_work_moves_to_paused(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -143,6 +183,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(paused_workspace, workspace)
+        self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
 
     def test_finish_cancellation_without_remaining_work_moves_to_idle(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -166,6 +207,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
         self.assertIsNotNone(workspace)
         self.assertFalse(workspace.workspace_path.exists())
         self.assertIsNone(registry.get_attempt_workspace(running_state.attempt_id))
+        self.assertFalse(registry.is_cancellation_requested(running_state.attempt_id))
 
     def test_resume_paused_attempt_returns_to_running_with_same_attempt_id(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -189,6 +231,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(resumed_workspace, paused_workspace)
+        self.assertFalse(registry.is_cancellation_requested(running_state.attempt_id))
 
     def test_complete_running_attempt_moves_to_complete(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -208,6 +251,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
         self.assertIsNotNone(workspace)
         self.assertFalse(workspace.workspace_path.exists())
         self.assertIsNone(registry.get_attempt_workspace(running_state.attempt_id))
+        self.assertFalse(registry.is_cancellation_requested(running_state.attempt_id))
 
     def test_stale_attempt_id_cannot_complete_newer_attempt(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -273,7 +317,43 @@ class IngestionAttemptStateTests(unittest.TestCase):
         self.assertEqual(registry.get_state(), original_state)
         logger.warning.assert_called_once_with(
             "Invalid ingestion attempt state transition: %s",
-            "Cannot stop ingestion from current state.",
+            "Cannot pause ingestion from current state.",
+        )
+        logger.info.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_request_stop_from_paused_or_complete_logs_warning(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        registry.request_stop()
+        paused_state = registry.finish_cancellation(
+            running_state.attempt_id,
+            staged_work_remaining=True,
+        )
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                registry.request_stop()
+
+        self.assertEqual(registry.get_state(), paused_state)
+        logger.warning.assert_called_once_with(
+            "Invalid ingestion attempt state transition: %s",
+            "Cannot pause ingestion from current state.",
+        )
+        logger.info.assert_not_called()
+        logger.error.assert_not_called()
+
+        registry.resume_attempt()
+        complete_state = registry.complete_attempt(running_state.attempt_id)
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                registry.request_stop()
+
+        self.assertEqual(registry.get_state(), complete_state)
+        logger.warning.assert_called_once_with(
+            "Invalid ingestion attempt state transition: %s",
+            "Cannot pause ingestion from current state.",
         )
         logger.info.assert_not_called()
         logger.error.assert_not_called()
@@ -421,6 +501,11 @@ class IngestionAttemptStateTests(unittest.TestCase):
             finally:
                 world_connection.close()
                 close_global_connection()
+
+
+class FailingCancellationRegistry(IngestionAttemptCancellationRegistry):
+    def request_cancellation(self, attempt_id: str) -> None:
+        raise RuntimeError("flag failed")
 
 
 if __name__ == "__main__":

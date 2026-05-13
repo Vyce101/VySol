@@ -8,6 +8,10 @@ from unittest.mock import patch
 from uuid import UUID
 
 from app.draft_worlds.splitter_settings import SplitterSettings
+from app.ingestion.attempt_cancellation import (
+    clear_attempt_cancellation,
+    request_attempt_cancellation,
+)
 from app.ingestion.existing_world_commit import (
     ExistingWorldBatchCommitResult,
     ExistingWorldBatchValidationError,
@@ -147,6 +151,34 @@ class ExistingWorldCommitTests(unittest.TestCase):
                 )
 
             self.assertFalse(resolve_world_directory(WORLD_ID).exists())
+
+    def test_rejects_cancelled_attempt_before_mutating_existing_world(self) -> None:
+        with commit_environment() as environment:
+            source_files = environment.write_source_files()
+            workspace = environment.prepare_split_outputs()
+            app_connection = environment.bootstrap_app_database()
+            environment.bootstrap_existing_world(app_connection)
+            original_last_used_at = get_committed_world(
+                WORLD_ID,
+                app_connection,
+            ).last_used_at
+            request_attempt_cancellation(workspace.attempt_id)
+
+            try:
+                with self.assertRaises(ExistingWorldBatchValidationError):
+                    commit_with_fixed_ids(
+                        app_connection,
+                        workspace,
+                        make_hashed_sources(source_files),
+                    )
+            finally:
+                clear_attempt_cancellation(workspace.attempt_id)
+
+            environment.assert_existing_world_unchanged()
+            self.assertEqual(
+                get_committed_world(WORLD_ID, app_connection).last_used_at,
+                original_last_used_at,
+            )
 
     def test_duplicate_existing_source_hash_leaves_world_unchanged(self) -> None:
         with commit_environment() as environment:

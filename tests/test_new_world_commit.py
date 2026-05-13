@@ -8,6 +8,10 @@ from unittest.mock import patch
 from uuid import UUID
 
 from app.draft_worlds.splitter_settings import SplitterSettings
+from app.ingestion.attempt_cancellation import (
+    clear_attempt_cancellation,
+    request_attempt_cancellation,
+)
 from app.ingestion.attempt_workspace import TemporaryIngestionWorkspace
 from app.ingestion.new_world_commit import (
     NewWorldBatchCommitResult,
@@ -100,6 +104,26 @@ class NewWorldCommitTests(unittest.TestCase):
                     (),
                     app_connection,
                 )
+
+            self.assertFalse((environment.repo_root / "user" / "worlds").exists())
+            self.assertEqual(list_committed_worlds(app_connection), [])
+
+    def test_rejects_cancelled_attempt_before_creating_world_or_app_index(self) -> None:
+        with commit_environment() as environment:
+            source_files = environment.write_source_files()
+            workspace = environment.prepare_split_outputs()
+            app_connection = environment.bootstrap_app_database()
+            request_attempt_cancellation(workspace.attempt_id)
+
+            try:
+                with self.assertRaises(NewWorldBatchValidationError):
+                    commit_with_fixed_ids(
+                        app_connection,
+                        workspace,
+                        make_hashed_sources(source_files),
+                    )
+            finally:
+                clear_attempt_cancellation(workspace.attempt_id)
 
             self.assertFalse((environment.repo_root / "user" / "worlds").exists())
             self.assertEqual(list_committed_worlds(app_connection), [])
