@@ -31,6 +31,12 @@ from app.ingestion.commit_cleanup import (
     cleanup_commit_files,
     run_commit_with_rollback,
 )
+from app.ingestion.existing_world_commit import (
+    ExistingWorldBatchCommitError,
+    ExistingWorldBatchCommitResult,
+    ExistingWorldBatchValidationError,
+    commit_existing_world_batch,
+)
 from app.ingestion.new_world_commit import (
     NewWorldBatchCommitError,
     NewWorldBatchCommitResult,
@@ -67,6 +73,9 @@ __all__ = [
     "BookNumberAssignmentError",
     "CommitFileCopy",
     "CommitFilePreparationError",
+    "ExistingWorldBatchCommitError",
+    "ExistingWorldBatchCommitResult",
+    "ExistingWorldBatchValidationError",
     "NewWorldBatchCommitError",
     "NewWorldBatchCommitResult",
     "NewWorldBatchValidationError",
@@ -83,6 +92,7 @@ __all__ = [
     "assign_book_numbers_for_staged_sources",
     "cleanup_abandoned_attempt_workspaces",
     "cleanup_commit_files",
+    "commit_existing_world_batch",
     "commit_new_world_batch",
     "complete_attempt",
     "finish_cancellation",
