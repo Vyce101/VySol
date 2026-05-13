@@ -4,6 +4,7 @@ import sqlite3
 from uuid import uuid4
 
 from app.ingestion.attempt_workspace import TemporaryIngestionWorkspace
+from app.ingestion.attempt_cancellation import is_cancellation_requested
 from app.ingestion.book_number_assignment import (
     BookNumberAssignment,
     assign_book_numbers_for_staged_sources,
@@ -55,6 +56,7 @@ def commit_existing_world_batch(
     hashed_sources: Sequence[HashedStagedSource],
     app_connection: sqlite3.Connection | None = None,
 ) -> ExistingWorldBatchCommitResult:
+    reject_cancelled_existing_world_commit(workspace)
     app_database = app_connection or get_global_connection()
     accepted_sources = validate_existing_world_batch_inputs(
         world_id,
@@ -177,3 +179,18 @@ def refresh_existing_world_last_used_at(
 def close_world_connection(connection: sqlite3.Connection | None) -> None:
     if connection is not None:
         connection.close()
+
+
+def reject_cancelled_existing_world_commit(
+    workspace: TemporaryIngestionWorkspace,
+) -> None:
+    if not is_cancellation_requested(workspace.attempt_id):
+        return
+
+    logger.warning(
+        "Rejected existing world batch commit after cancellation request: attempt_id=%s",
+        workspace.attempt_id,
+    )
+    raise ExistingWorldBatchValidationError(
+        "Cancelled ingestion attempts cannot commit."
+    )

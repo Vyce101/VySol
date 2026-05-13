@@ -9,6 +9,11 @@ from app.ingestion.attempt_workspace import (
     TemporaryIngestionWorkspace,
     get_ingestion_attempt_workspace_registry,
 )
+from app.ingestion.attempt_cancellation import (
+    IngestionAttemptCancellationError,
+    IngestionAttemptCancellationRegistry,
+    get_ingestion_attempt_cancellation_registry,
+)
 from app.logger import get_logger
 
 logger = get_logger()
@@ -45,9 +50,13 @@ class IngestionAttemptStateRegistry:
     def __init__(
         self,
         workspace_registry: IngestionAttemptWorkspaceRegistry | None = None,
+        cancellation_registry: IngestionAttemptCancellationRegistry | None = None,
     ) -> None:
         self._state = build_idle_state()
         self._workspace_registry = workspace_registry or IngestionAttemptWorkspaceRegistry()
+        self._cancellation_registry = (
+            cancellation_registry or IngestionAttemptCancellationRegistry()
+        )
 
     def get_state(self) -> IngestionAttemptState:
         return self._state
@@ -68,6 +77,7 @@ class IngestionAttemptStateRegistry:
         attempt_id = str(uuid4())
         self._workspace_registry.create_attempt_workspace(attempt_id)
         try:
+            self._cancellation_registry.initialize_attempt(attempt_id)
             return self._set_state(
                 IngestionAttemptState(
                     status=IngestionAttemptStatus.RUNNING,
@@ -76,12 +86,42 @@ class IngestionAttemptStateRegistry:
                 )
             )
         except Exception:
+            self._cancellation_registry.clear_attempt(attempt_id)
             self._workspace_registry.remove_attempt_workspace(attempt_id)
             raise
 
     def request_stop(self) -> IngestionAttemptState:
+        if self._state.status == IngestionAttemptStatus.STOPPING:
+            logger.warning(
+                "Ignored repeated ingestion pause request: attempt_id=%s",
+                self._state.attempt_id,
+            )
+            return self._state
+
         if self._state.status != IngestionAttemptStatus.RUNNING:
-            reject_invalid_transition("Cannot stop ingestion from current state.")
+            reject_invalid_transition("Cannot pause ingestion from current state.")
+
+        if self._state.attempt_id is None:
+            reject_invalid_transition("Cannot pause ingestion without an attempt ID.")
+
+        try:
+            self._cancellation_registry.request_cancellation(self._state.attempt_id)
+        except Exception as error:
+            logger.error(
+                "Failed to set ingestion attempt cancellation flag: "
+                "attempt_id=%s error_type=%s",
+                self._state.attempt_id,
+                type(error).__name__,
+                exc_info=True,
+            )
+            raise IngestionAttemptCancellationError(
+                "Failed to set ingestion attempt cancellation flag."
+            ) from error
+
+        logger.info(
+            "Ingestion pause requested: attempt_id=%s",
+            self._state.attempt_id,
+        )
 
         return self._set_state(
             IngestionAttemptState(
@@ -111,6 +151,7 @@ class IngestionAttemptStateRegistry:
             )
 
         state = self._set_state(build_idle_state())
+        self._cancellation_registry.clear_attempt(attempt_id)
         self._workspace_registry.remove_attempt_workspace(attempt_id)
         return state
 
@@ -130,6 +171,7 @@ class IngestionAttemptStateRegistry:
                 "Temporary ingestion workspace is missing."
             )
 
+        self._cancellation_registry.initialize_attempt(self._state.attempt_id)
         return self._set_state(
             IngestionAttemptState(
                 status=IngestionAttemptStatus.RUNNING,
@@ -152,7 +194,11 @@ class IngestionAttemptStateRegistry:
             )
         )
         self._workspace_registry.remove_attempt_workspace(attempt_id)
+        self._cancellation_registry.clear_attempt(attempt_id)
         return state
+
+    def is_cancellation_requested(self, attempt_id: str) -> bool:
+        return self._cancellation_registry.is_cancellation_requested(attempt_id)
 
     def _validate_current_attempt_result(
         self,
@@ -226,8 +272,12 @@ def reject_invalid_transition(message: str) -> NoReturn:
 
 
 _ingestion_attempt_workspace_registry = get_ingestion_attempt_workspace_registry()
+_ingestion_attempt_cancellation_registry = (
+    get_ingestion_attempt_cancellation_registry()
+)
 _ingestion_attempt_state_registry = IngestionAttemptStateRegistry(
     _ingestion_attempt_workspace_registry,
+    _ingestion_attempt_cancellation_registry,
 )
 
 
@@ -267,3 +317,7 @@ def resume_attempt() -> IngestionAttemptState:
 
 def complete_attempt(attempt_id: str) -> IngestionAttemptState:
     return _ingestion_attempt_state_registry.complete_attempt(attempt_id)
+
+
+def is_cancellation_requested(attempt_id: str) -> bool:
+    return _ingestion_attempt_state_registry.is_cancellation_requested(attempt_id)
