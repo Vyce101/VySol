@@ -108,7 +108,7 @@ Cross-system edge cases:
 - `frontend/src/draft-world-api.ts` owns draft detail API calls and the future Create World navigation helper.
 - `frontend/src/styles.css` owns the cinematic glass visual treatment, responsive layout, and default font face.
 - `frontend/src/components/ui/tabs.tsx` owns the local Radix Tabs wrapper used by the shell.
-- `scripts/launcher/launcher.config.json` contains the disabled frontend service configuration for the Vite dev server.
+- `scripts/launcher/launcher.config.json` contains the frontend service configuration for the Vite dev server.
 
 ## What AI/Coders Must Check Before Changing This System
 

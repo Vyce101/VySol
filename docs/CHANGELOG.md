@@ -19,6 +19,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a static World Hub shell, concept page, and launcher wiring to open the frontend app.
 - Added backend draft customization dirty-state tracking for future World Detail navigation guards.
 - Added a Draft World Leave Safety concept page.
 - Added backend-backed draft World Detail opening so draft IDs, splitter defaults, and staged-source setup come from temporary backend state before any world is committed.
