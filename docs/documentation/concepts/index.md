@@ -23,6 +23,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Image Upload Validation](image-upload-validation.md)
 - [Ingestion Attempt State](ingestion-attempt-state.md)
 - [Main Chunk Generation](main-chunk-generation.md)
+- [New World Batch Commit](new-world-batch-commit.md)
 - [PDF Parser](pdf-parser.md)
 - [Safe Asset File Storage](safe-asset-file-storage.md)
 - [Source Parser Router](source-parser-router.md)
