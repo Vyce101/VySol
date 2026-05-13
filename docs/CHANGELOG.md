@@ -17,6 +17,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend-backed draft World Detail opening so draft IDs, splitter defaults, and staged-source setup come from temporary backend state before any world is committed.
+- Added a Draft World Detail API concept page.
 - Added a fresh frontend World Detail shell with VySol branding, draft and committed modes, and Customize/Ingestion tabs.
 - Added a World Detail Page Shell concept page.
 - Added an Ingestion Attempt Cancellation concept page.

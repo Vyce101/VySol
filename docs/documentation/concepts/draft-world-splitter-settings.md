@@ -60,7 +60,8 @@ Draft World Splitter Settings currently interacts with:
 
 - The central logger, which records default initialization failures, validation rejections, validation diagnostics, and unexpected validation failures.
 - World Splitter Settings Storage, which can reuse the default splitter values when committed settings are created in `world.sqlite`.
-- Future Ingestion tab or ingestion setup code, which can read and update the draft settings once an HTTP or UI surface exists.
+- Draft World Detail API, which exposes the current draft settings to the frontend without persisting them.
+- Future Ingestion tab or ingestion setup code, which can read and update the draft settings through backend-owned draft state.
 - Future Start or Resume ingestion code, which should validate settings before it processes staged batches.
 - Future commit or discard flow, which should remove draft state after it no longer represents an uncommitted world.
 
@@ -86,6 +87,7 @@ Cross-system edge cases:
 
 - Draft worlds must not be written to `app.sqlite`.
 - Creating draft-world defaults must not require the recursive text splitter to exist.
+- Draft detail route code may expose these settings, but it must not persist, lock, normalize, or commit them.
 - Future Ingestion tab code must treat these settings as setup state, not as proof that splitting has run.
 - Future Start or Resume code must call validation before using settings for staged ingestion work.
 - Future commit code must remove the draft only after a successful commit, not before.
