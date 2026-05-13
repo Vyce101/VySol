@@ -114,7 +114,7 @@ class NewWorldCommitTests(unittest.TestCase):
 
             with (
                 patch(
-                    "app.ingestion.new_world_commit.insert_chunk_records",
+                    "app.ingestion.world_batch_records.insert_chunk_records",
                     side_effect=sqlite3.Error("chunk write failed"),
                 ),
                 patch("app.ingestion.new_world_commit.logger") as logger,
