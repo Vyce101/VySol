@@ -53,7 +53,7 @@ def close_global_connection() -> None:
 
 
 def connect_to_database(database_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(database_path, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     return connection
 

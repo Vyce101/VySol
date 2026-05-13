@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.asset_files.routes import router as asset_files_router
+from app.committed_worlds.routes import router as committed_worlds_router
 from app.draft_worlds.routes import router as draft_worlds_router
 from app.ingestion import (
     cancel_active_attempt_for_app_close,
@@ -32,6 +34,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(asset_files_router)
+app.include_router(committed_worlds_router)
 app.include_router(draft_worlds_router)
 
 
