@@ -4,6 +4,11 @@ from pathlib import Path
 from typing import NoReturn
 from uuid import uuid4
 
+from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchRegistry,
+    RunningStagedBatchSourceAddError,
+    get_active_staged_batch_registry,
+)
 from app.ingestion.staging.source_type_filter import build_source_staging_list
 from app.logger import get_logger
 
@@ -43,8 +48,14 @@ class SourceStagingState:
 
 
 class SourceStagingStateRegistry:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        active_batch_registry: ActiveStagedBatchRegistry | None = None,
+    ) -> None:
         self._staging_states: dict[str, SourceStagingState] = {}
+        self._active_batch_registry = (
+            active_batch_registry or get_active_staged_batch_registry()
+        )
 
     def create_staging_context(self, staging_context_id: str) -> SourceStagingState:
         state = SourceStagingState(
@@ -77,6 +88,11 @@ class SourceStagingStateRegistry:
         state = self.get_staging_state(staging_context_id)
         if state is None:
             return None
+
+        if self._active_batch_registry.is_staging_context_locked_for_running_attempt(
+            staging_context_id,
+        ):
+            reject_running_staged_batch_source_add(staging_context_id)
 
         try:
             staging_items = build_source_staging_list(source_file_paths)
@@ -359,7 +375,22 @@ def reject_staging_state(message: str) -> NoReturn:
     raise SourceStagingStateError(message)
 
 
+def reject_running_staged_batch_source_add(staging_context_id: str) -> NoReturn:
+    logger.warning(
+        "Rejected temporary source add while staged batch attempt is running: "
+        "staging_context_id=%s",
+        staging_context_id,
+    )
+    raise RunningStagedBatchSourceAddError(
+        "Sources cannot be added while this staged batch attempt is running."
+    )
+
+
 _source_staging_state_registry = SourceStagingStateRegistry()
+
+
+def get_source_staging_state_registry() -> SourceStagingStateRegistry:
+    return _source_staging_state_registry
 
 
 def create_staging_context(staging_context_id: str) -> SourceStagingState:

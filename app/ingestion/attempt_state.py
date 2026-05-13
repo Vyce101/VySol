@@ -231,6 +231,10 @@ _ingestion_attempt_state_registry = IngestionAttemptStateRegistry(
 )
 
 
+def get_ingestion_attempt_state_registry() -> IngestionAttemptStateRegistry:
+    return _ingestion_attempt_state_registry
+
+
 def get_attempt_state() -> IngestionAttemptState:
     return _ingestion_attempt_state_registry.get_state()
 

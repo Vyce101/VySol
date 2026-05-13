@@ -1,3 +1,17 @@
+from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchAttempt,
+    ActiveStagedBatchRegistry,
+    RunningStagedBatchSourceAddError,
+    get_active_staged_batch_attempt,
+)
+from app.ingestion.attempt_start import (
+    DuplicateIngestionAttemptStartError,
+    IngestionAttemptStartOrchestrationError,
+    IngestionAttemptStartRegistry,
+    InvalidStagedSourceSummary,
+    StagedBatchStartValidationError,
+    start_staged_batch_attempt,
+)
 from app.ingestion.attempt_state import (
     IngestionAttemptState,
     IngestionAttemptStateError,
@@ -7,6 +21,7 @@ from app.ingestion.attempt_state import (
     StaleIngestionAttemptResultError,
     complete_attempt,
     finish_cancellation,
+    get_ingestion_attempt_state_registry,
     get_attempt_workspace,
     get_attempt_state,
     request_stop,
@@ -61,13 +76,19 @@ from app.ingestion.split_chunk_outputs import (
 )
 
 __all__ = [
+    "ActiveStagedBatchAttempt",
+    "ActiveStagedBatchRegistry",
+    "DuplicateIngestionAttemptStartError",
     "IngestionAttemptState",
     "IngestionAttemptStateError",
     "IngestionAttemptStateRegistry",
+    "IngestionAttemptStartOrchestrationError",
+    "IngestionAttemptStartRegistry",
     "IngestionAttemptStatus",
     "IngestionAttemptWorkspaceError",
     "IngestionAttemptWorkspaceRegistry",
     "InvalidIngestionAttemptTransitionError",
+    "InvalidStagedSourceSummary",
     "ParsedSourcePreparationError",
     "BookNumberAssignment",
     "BookNumberAssignmentError",
@@ -80,9 +101,11 @@ __all__ = [
     "NewWorldBatchCommitResult",
     "NewWorldBatchValidationError",
     "PreparedCommitFile",
+    "RunningStagedBatchSourceAddError",
     "SplitChunkOutputPreparationError",
     "SplitChunkOutputReadError",
     "StaleIngestionAttemptResultError",
+    "StagedBatchStartValidationError",
     "TemporaryIngestionWorkspace",
     "TemporaryParsedSourceOutput",
     "TemporarySplitChunkOutput",
@@ -96,6 +119,8 @@ __all__ = [
     "commit_new_world_batch",
     "complete_attempt",
     "finish_cancellation",
+    "get_active_staged_batch_attempt",
+    "get_ingestion_attempt_state_registry",
     "get_attempt_workspace",
     "get_attempt_state",
     "iter_split_chunk_outputs",
@@ -106,4 +131,5 @@ __all__ = [
     "resume_attempt",
     "run_commit_with_rollback",
     "start_attempt",
+    "start_staged_batch_attempt",
 ]

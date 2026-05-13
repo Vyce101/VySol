@@ -10,6 +10,7 @@ from app.ingestion.staging.source_staging_state import (
     add_source_file_paths,
     create_staging_context,
     discard_staging_context,
+    get_source_staging_state_registry,
     get_staging_state,
     remove_existing_world_source_item,
     remove_staging_entry,
@@ -17,6 +18,7 @@ from app.ingestion.staging.source_staging_state import (
     reorder_staging_entries,
     replace_staging_state,
 )
+from app.ingestion.active_staged_batch import RunningStagedBatchSourceAddError
 from app.ingestion.staging.source_file_access import (
     StagedSourceFileAccessError,
     validate_staged_source_file_access,
@@ -44,6 +46,7 @@ __all__ = [
     "SourceStagingStateError",
     "StagedSourceFileAccessError",
     "DuplicateStagedSourceError",
+    "RunningStagedBatchSourceAddError",
     "SourceStagingStateRegistry",
     "SourceStagingItem",
     "TemporarySourceStagingEntry",
@@ -53,6 +56,7 @@ __all__ = [
     "can_start_ingestion",
     "create_staging_context",
     "discard_staging_context",
+    "get_source_staging_state_registry",
     "get_staging_state",
     "hash_staged_source_files",
     "remove_existing_world_source_item",
