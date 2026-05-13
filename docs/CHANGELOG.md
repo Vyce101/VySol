@@ -6,6 +6,9 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed World Hub so committed worlds render as cinematic image cards without changing the static hero area.
+- Changed frontend layout locking so the World Hub card row does not create vertical page scroll in narrow browser layouts.
+- Changed World Hub concept documentation to describe committed-world card loading instead of the earlier static shell.
 - Changed draft-world leave handling so backend leave-state checks can distinguish discard-warning danger zones from post-text-commit safe zones.
 - Changed ingestion attempt state to track the current ingestion phase from preflight through durable text commit.
 - Changed app shutdown so active ingestion attempts are cancelled, draft/staged state is discarded, and abandoned attempt workspaces are cleaned on next startup.
@@ -19,6 +22,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a committed-world card API and safe asset file delivery route for World Hub card backgrounds.
+- Added an Asset File Delivery concept page.
 - Added a static World Hub shell, concept page, and launcher wiring to open the frontend app.
 - Added backend draft customization dirty-state tracking for future World Detail navigation guards.
 - Added a Draft World Leave Safety concept page.

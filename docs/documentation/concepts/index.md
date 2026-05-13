@@ -7,6 +7,7 @@ Concept pages explain system contracts and features: what each system owns, what
 ## Pages
 
 - [Asset Deletion](asset-deletion.md)
+- [Asset File Delivery](asset-file-delivery.md)
 - [Asset Hash Deduplication](asset-hash-deduplication.md)
 - [Asset Metadata Storage](asset-metadata-storage.md)
 - [Book Number Assignment](book-number-assignment.md)
@@ -44,5 +45,5 @@ Concept pages explain system contracts and features: what each system owns, what
 - [TXT Parser](txt-parser.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
 - [World Detail Page Shell](world-detail-page-shell.md)
-- [World Hub Page Shell](world-hub-page-shell.md)
+- [World Hub Page](world-hub-page.md)
 - [World Splitter Settings Storage](world-splitter-settings-storage.md)
