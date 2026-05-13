@@ -57,6 +57,10 @@ class DraftWorldRegistry:
 _draft_world_registry = DraftWorldRegistry()
 
 
+def get_draft_world_registry() -> DraftWorldRegistry:
+    return _draft_world_registry
+
+
 def create_draft_world() -> DraftWorld:
     return _draft_world_registry.create_draft_world()
 

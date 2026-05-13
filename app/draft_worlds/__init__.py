@@ -2,6 +2,7 @@ from app.draft_worlds.registry import (
     DraftWorldRegistry,
     create_draft_world,
     discard_draft_world,
+    get_draft_world_registry,
     get_draft_world,
     update_draft_splitter_settings,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "create_default_splitter_settings",
     "create_draft_world",
     "discard_draft_world",
+    "get_draft_world_registry",
     "get_draft_world",
     "update_draft_splitter_settings",
     "validate_splitter_settings",

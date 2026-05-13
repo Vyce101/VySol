@@ -2,9 +2,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchAttemptError,
     ActiveStagedBatchAttempt,
     ActiveStagedBatchRegistry,
+    StagedBatchAttemptTarget,
     get_active_staged_batch_registry,
+    validate_staged_batch_attempt_target,
 )
 from app.ingestion.attempt_state import (
     IngestionAttemptStateRegistry,
@@ -68,8 +71,12 @@ class IngestionAttemptStartRegistry:
     def start_staged_batch_attempt(
         self,
         staging_context_id: str,
+        attempt_target: StagedBatchAttemptTarget,
     ) -> ActiveStagedBatchAttempt:
         try:
+            validated_attempt_target = validate_staged_batch_attempt_target(
+                attempt_target,
+            )
             self._reject_duplicate_running_start(staging_context_id)
             staging_state = self._get_valid_staging_state(staging_context_id)
             attempt_state = self._attempt_state_registry.start_attempt()
@@ -77,12 +84,14 @@ class IngestionAttemptStartRegistry:
                 self._active_batch_registry.record_active_staged_batch_attempt(
                     attempt_state=attempt_state,
                     staging_context_id=staging_state.staging_context_id,
+                    attempt_target=validated_attempt_target,
                     staging_entry_ids=(
                         entry.staging_entry_id for entry in staging_state.entries
                     ),
                 )
             )
         except (
+            ActiveStagedBatchAttemptError,
             DuplicateIngestionAttemptStartError,
             StagedBatchStartValidationError,
             InvalidIngestionAttemptTransitionError,
@@ -194,7 +203,9 @@ _ingestion_attempt_start_registry = IngestionAttemptStartRegistry()
 
 def start_staged_batch_attempt(
     staging_context_id: str,
+    attempt_target: StagedBatchAttemptTarget,
 ) -> ActiveStagedBatchAttempt:
     return _ingestion_attempt_start_registry.start_staged_batch_attempt(
         staging_context_id,
+        attempt_target,
     )

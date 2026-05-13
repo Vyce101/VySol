@@ -1,8 +1,17 @@
 from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchAttemptError,
     ActiveStagedBatchAttempt,
     ActiveStagedBatchRegistry,
     RunningStagedBatchSourceAddError,
+    StagedBatchAttemptKind,
+    StagedBatchAttemptTarget,
+    clear_current_staged_batch_attempt,
     get_active_staged_batch_attempt,
+    get_current_staged_batch_attempt,
+)
+from app.ingestion.app_close_cancellation import (
+    AppCloseAttemptCancellationCoordinator,
+    cancel_active_attempt_for_app_close,
 )
 from app.ingestion.attempt_start import (
     DuplicateIngestionAttemptStartError,
@@ -28,6 +37,7 @@ from app.ingestion.attempt_state import (
     IngestionAttemptStatus,
     InvalidIngestionAttemptTransitionError,
     StaleIngestionAttemptResultError,
+    cancel_attempt_for_app_close,
     complete_attempt,
     finish_cancellation,
     get_ingestion_attempt_state_registry,
@@ -38,9 +48,11 @@ from app.ingestion.attempt_state import (
     start_attempt,
 )
 from app.ingestion.attempt_workspace import (
+    AbandonedIngestionWorkspaceCleanupError,
     IngestionAttemptWorkspaceError,
     IngestionAttemptWorkspaceRegistry,
     TemporaryIngestionWorkspace,
+    abandon_attempt_workspace,
     cleanup_abandoned_attempt_workspaces,
 )
 from app.ingestion.book_number_assignment import (
@@ -86,7 +98,10 @@ from app.ingestion.split_chunk_outputs import (
 
 __all__ = [
     "ActiveStagedBatchAttempt",
+    "ActiveStagedBatchAttemptError",
     "ActiveStagedBatchRegistry",
+    "AppCloseAttemptCancellationCoordinator",
+    "AbandonedIngestionWorkspaceCleanupError",
     "DuplicateIngestionAttemptStartError",
     "IngestionAttemptState",
     "IngestionAttemptCancellationError",
@@ -117,13 +132,19 @@ __all__ = [
     "SplitChunkOutputReadError",
     "StaleIngestionAttemptResultError",
     "StagedBatchStartValidationError",
+    "StagedBatchAttemptKind",
+    "StagedBatchAttemptTarget",
     "TemporaryIngestionWorkspace",
     "TemporaryParsedSourceOutput",
     "TemporarySplitChunkOutput",
     "TemporarySplitChunkOutputSummary",
     "TemporarySplitChunkSourceSummary",
     "UnusableParsedSourceTextError",
+    "abandon_attempt_workspace",
     "assign_book_numbers_for_staged_sources",
+    "cancel_active_attempt_for_app_close",
+    "cancel_attempt_for_app_close",
+    "clear_current_staged_batch_attempt",
     "cleanup_abandoned_attempt_workspaces",
     "cleanup_commit_files",
     "clear_attempt_cancellation",
@@ -132,6 +153,7 @@ __all__ = [
     "complete_attempt",
     "finish_cancellation",
     "get_active_staged_batch_attempt",
+    "get_current_staged_batch_attempt",
     "get_ingestion_attempt_cancellation_registry",
     "get_ingestion_attempt_state_registry",
     "get_attempt_workspace",

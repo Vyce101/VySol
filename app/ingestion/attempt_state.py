@@ -210,6 +210,51 @@ class IngestionAttemptStateRegistry:
         self._cancellation_registry.clear_attempt(attempt_id)
         return state
 
+    def cancel_for_app_close(self) -> IngestionAttemptState:
+        if self._state.status not in {
+            IngestionAttemptStatus.RUNNING,
+            IngestionAttemptStatus.STOPPING,
+            IngestionAttemptStatus.PAUSED,
+        }:
+            return self._state
+
+        if self._state.attempt_id is None:
+            reject_invalid_transition(
+                "Cannot close-cancel ingestion without an attempt ID."
+            )
+
+        attempt_id = self._state.attempt_id
+        previous_status = self._state.status
+        try:
+            if not self._cancellation_registry.is_cancellation_requested(attempt_id):
+                self._cancellation_registry.request_cancellation(attempt_id)
+        except Exception as error:
+            logger.error(
+                "Failed to set app-close ingestion cancellation flag: "
+                "attempt_id=%s error_type=%s",
+                attempt_id,
+                type(error).__name__,
+                exc_info=True,
+            )
+            raise IngestionAttemptCancellationError(
+                "Failed to set app-close ingestion cancellation flag."
+            ) from error
+
+        self._workspace_registry.abandon_attempt_workspace(attempt_id)
+        logger.info(
+            "Ingestion attempt cancelled for app close: "
+            "attempt_id=%s previous_status=%s",
+            attempt_id,
+            previous_status,
+        )
+        return self._set_state(
+            IngestionAttemptState(
+                status=IngestionAttemptStatus.STOPPING,
+                attempt_id=attempt_id,
+                staged_work_remaining=False,
+            )
+        )
+
     def is_cancellation_requested(self, attempt_id: str) -> bool:
         return self._cancellation_registry.is_cancellation_requested(attempt_id)
 
@@ -349,3 +394,7 @@ def complete_attempt(attempt_id: str) -> IngestionAttemptState:
 
 def is_cancellation_requested(attempt_id: str) -> bool:
     return _ingestion_attempt_state_registry.is_cancellation_requested(attempt_id)
+
+
+def cancel_attempt_for_app_close() -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.cancel_for_app_close()

@@ -16,6 +16,10 @@ class IngestionAttemptWorkspaceError(RuntimeError):
     pass
 
 
+class AbandonedIngestionWorkspaceCleanupError(IngestionAttemptWorkspaceError):
+    pass
+
+
 @dataclass(frozen=True)
 class TemporaryIngestionWorkspace:
     attempt_id: str
@@ -72,6 +76,22 @@ class IngestionAttemptWorkspaceRegistry:
 
         clean_attempt_workspace_path(attempt_id, workspace_path)
 
+    def abandon_attempt_workspace(
+        self,
+        attempt_id: str,
+    ) -> TemporaryIngestionWorkspace | None:
+        workspace_path = self._workspace_paths.pop(attempt_id, None)
+        if self._current_attempt_id == attempt_id:
+            self._current_attempt_id = None
+
+        if workspace_path is None:
+            return None
+
+        return TemporaryIngestionWorkspace(
+            attempt_id=attempt_id,
+            workspace_path=workspace_path,
+        )
+
     def get_attempt_workspace(
         self,
         attempt_id: str,
@@ -119,8 +139,36 @@ def cleanup_abandoned_attempt_workspaces(workspace_parent: Path | None = None) -
         logger.debug("No abandoned temporary ingestion workspaces found.")
         return 0
 
+    abandoned_workspaces = list_abandoned_attempt_workspaces(parent)
+
+    cleanup_count = sum(
+        1
+        for workspace_path in abandoned_workspaces
+        if clean_attempt_workspace_path("startup", workspace_path)
+    )
+    remaining_count = sum(
+        1 for workspace_path in abandoned_workspaces if workspace_path.exists()
+    )
+    if remaining_count > 0:
+        logger.critical(
+            "Unrecoverable startup cleanup inconsistency: "
+            "remaining_workspace_count=%s",
+            remaining_count,
+        )
+        raise AbandonedIngestionWorkspaceCleanupError(
+            "Abandoned temporary ingestion workspace cleanup is incomplete."
+        )
+
+    logger.info(
+        "Cleaned abandoned temporary ingestion workspaces: count=%s",
+        cleanup_count,
+    )
+    return cleanup_count
+
+
+def list_abandoned_attempt_workspaces(parent: Path) -> tuple[Path, ...]:
     try:
-        abandoned_workspaces = tuple(
+        return tuple(
             path
             for path in parent.iterdir()
             if path.is_dir() and path.name.startswith(WORKSPACE_DIRECTORY_PREFIX)
@@ -131,18 +179,9 @@ def cleanup_abandoned_attempt_workspaces(workspace_parent: Path | None = None) -
             type(error).__name__,
             exc_info=True,
         )
-        return 0
-
-    cleanup_count = sum(
-        1
-        for workspace_path in abandoned_workspaces
-        if clean_attempt_workspace_path("startup", workspace_path)
-    )
-    logger.info(
-        "Cleaned abandoned temporary ingestion workspaces: count=%s",
-        cleanup_count,
-    )
-    return cleanup_count
+        raise AbandonedIngestionWorkspaceCleanupError(
+            "Failed to inspect abandoned temporary ingestion workspaces."
+        ) from error
 
 
 _ingestion_attempt_workspace_registry = IngestionAttemptWorkspaceRegistry()
@@ -158,6 +197,10 @@ def create_attempt_workspace(attempt_id: str) -> TemporaryIngestionWorkspace:
 
 def get_attempt_workspace(attempt_id: str) -> TemporaryIngestionWorkspace | None:
     return _ingestion_attempt_workspace_registry.get_attempt_workspace(attempt_id)
+
+
+def abandon_attempt_workspace(attempt_id: str) -> TemporaryIngestionWorkspace | None:
+    return _ingestion_attempt_workspace_registry.abandon_attempt_workspace(attempt_id)
 
 
 atexit.register(_ingestion_attempt_workspace_registry._cleanup_temporary_workspaces)
