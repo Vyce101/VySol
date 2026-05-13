@@ -15,6 +15,7 @@ Existing worlds also already contain committed source and chunk data that must r
 Existing World Batch Commit owns:
 
 - Rejecting empty accepted source batches before opening or mutating world storage.
+- Rejecting cancellation-requested attempts before opening or mutating world storage.
 - Verifying the target world exists in the app-level committed world index before opening `world.sqlite`.
 - Opening the existing world database.
 - Validating staged source hashes against both the batch and existing committed sources.
@@ -40,7 +41,7 @@ Existing World Batch Commit does not own:
 
 Earlier ingestion systems validate selected files, parse them, split them, hash them, and store temporary split chunk rows in the active attempt workspace. Existing World Batch Commit receives the target world ID, the active temporary ingestion workspace, and the already-accepted hashed staged sources.
 
-The orchestrator first confirms the target world exists in the global committed-world index. That check prevents a random UUID from silently creating a new world folder through the world database bootstrap path. For a non-empty batch, it opens the existing world database, validates duplicate hashes, prepares source copy destinations, assigns book numbers after the highest existing committed source, and builds chunk records from temporary split output.
+The orchestrator first rejects cancellation-requested attempts, then confirms the target world exists in the global committed-world index. That check prevents a random UUID from silently creating a new world folder through the world database bootstrap path. For a non-empty, non-cancelled batch, it opens the existing world database, validates duplicate hashes, prepares source copy destinations, assigns book numbers after the highest existing committed source, and builds chunk records from temporary split output.
 
 The source file promotion helper then copies source files to temporary paths and opens the world database transaction. Inside that transaction, the orchestrator writes only new committed source rows and new chunk rows. The helper promotes source files and commits the transaction only after the database callback succeeds.
 
@@ -65,7 +66,7 @@ On failure before the core world commit succeeds, it raises the original commit 
 
 ## Failure Behavior
 
-Empty accepted batches and missing committed-world index records are rejected before world storage is mutated.
+Cancellation-requested attempts, empty accepted batches, and missing committed-world index records are rejected before world storage is mutated.
 
 Failures during duplicate validation, source copy preparation, book-number assignment, source metadata writes, chunk writes, source file copying, file promotion, or world database commit leave existing committed data unchanged. Rollback removes only helper-created temporary files and newly promoted source files from the failed batch. It does not delete existing world files, existing source rows, existing chunk rows, or user-selected source files.
 
@@ -78,6 +79,7 @@ Logs must not include chunk text, overlap text, raw selected paths, raw local st
 Existing World Batch Commit interacts with:
 
 - Committed World Index Storage, which proves the target world exists before mutation and receives the best-effort `last_used_at` refresh after commit.
+- Ingestion Attempt Cancellation, which prevents final commit after Pause has been requested for the attempt.
 - World Database Bootstrap, which opens and migrates the target world database.
 - Temporary Ingestion Workspace and Temporary Split Chunk Outputs, which provide attempt-local chunk rows.
 - Staged Source Hash Preflight and Staged Source Duplicate Preflight, which prepare and validate source hashes.
@@ -95,6 +97,7 @@ It must stay separate from parser internals, splitter algorithms, UI progress, W
 Internal edge cases:
 
 - Empty accepted batches fail before world database writes or source copy promotion.
+- Cancellation-requested attempts fail before world database writes, source copy promotion, or recent-use refresh.
 - Missing committed-world index records fail before world database creation or mutation.
 - A batch that produces no chunks fails before source files are promoted.
 - Every committed source in the batch must have at least one temporary split chunk.
@@ -107,6 +110,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Existing committed source and chunk rows must remain append-only and must not be altered by add-source work.
+- Pause requests must prevent the attempt from appending final durable source data after cancellation is requested.
 - Old book-number gaps are preserved; new sources append after the highest existing book number.
 - Existing self-committing storage functions must not be called inside the rollback helper transaction.
 - Temporary split chunk output can contain chunk text, but commit logs must never include that text.
@@ -117,6 +121,7 @@ Cross-system edge cases:
 ## Invariants
 
 - Existing worlds can receive new source batches only when the target world already exists in the committed-world index.
+- Cancelled attempts must not append source batches to existing worlds.
 - New committed source rows must append after the highest existing committed source book number.
 - Existing committed source rows, chunk rows, source files, and splitter settings must remain unchanged.
 - Source file promotion and world database writes must share one rollback-aware commit boundary.
@@ -138,6 +143,7 @@ Before editing Existing World Batch Commit, check:
 
 - Whether the change belongs in final commit orchestration instead of parser, splitter, staging, file validation, storage repositories, UI, graph, embedding, retrieval, or chat behavior.
 - Whether the target world is still verified through the app-level committed-world index before world storage is opened or mutated.
+- Whether cancellation-requested attempts are still rejected before world storage is opened or mutated.
 - Whether existing committed source and chunk records remain untouched.
 - Whether new book numbers still append after the highest existing committed source.
 - Whether source file promotion and world database writes still share the rollback helper boundary.

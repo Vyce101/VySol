@@ -15,6 +15,7 @@ If the app index row is written too early, World Hub can show a world whose sour
 New World Batch Commit owns:
 
 - Rejecting empty accepted source batches before creating a world folder, world database, source copy, or app index row.
+- Rejecting cancellation-requested attempts before creating a world folder, world database, source copy, or app index row.
 - Generating one UUID world ID for the new committed world.
 - Bootstrapping the new world folder and `world.sqlite`.
 - Validating the accepted batch against duplicate source hashes in the new world database.
@@ -39,7 +40,7 @@ New World Batch Commit does not own:
 
 Earlier ingestion systems validate the selected files, parse them, split them, hash them, and store temporary split chunk rows in the active attempt workspace. New World Batch Commit receives the already-accepted first batch, validated draft splitter settings, the active temporary ingestion workspace, and the new world metadata.
 
-The orchestrator rejects an empty batch before durable world storage begins. For a non-empty batch, it generates a UUID world ID, bootstraps the world database, validates duplicate hashes, prepares source copy destinations, assigns book numbers starting at `1`, and builds chunk records from temporary split output.
+The orchestrator rejects a cancellation-requested attempt or empty batch before durable world storage begins. For a non-empty, non-cancelled batch, it generates a UUID world ID, bootstraps the world database, validates duplicate hashes, prepares source copy destinations, assigns book numbers starting at `1`, and builds chunk records from temporary split output.
 
 The source file promotion helper then copies source files to temporary paths and opens the world database transaction. Inside that transaction, the orchestrator writes locked splitter settings, committed source rows, and chunk rows without calling storage functions that perform their own commits. The helper promotes source files and commits the transaction only after the callback succeeds.
 
@@ -65,7 +66,7 @@ On failure, it raises the original commit error after rollback and cleanup have 
 
 ## Failure Behavior
 
-Empty accepted batches are rejected before folder, database, file, or app index creation.
+Cancellation-requested attempts and empty accepted batches are rejected before folder, database, file, or app index creation.
 
 Failures during duplicate validation, source copy preparation, book-number assignment, locked settings writes, source metadata writes, chunk writes, source file copying, file promotion, or world database commit keep the world hidden from World Hub. The orchestrator closes the world database connection, removes the new UUID world folder, logs the failure at `ERROR`, and logs cleanup activity at `WARNING`.
 
@@ -78,6 +79,7 @@ Logs must not include chunk text, overlap text, raw selected paths, raw local st
 New World Batch Commit interacts with:
 
 - Temporary Ingestion Workspace and Temporary Split Chunk Outputs, which provide attempt-local chunk rows.
+- Ingestion Attempt Cancellation, which prevents final commit after Pause has been requested for the attempt.
 - Staged Source Hash Preflight and Staged Source Duplicate Preflight, which prepare and validate source hashes.
 - Book Number Assignment, which supplies first-batch book numbers.
 - Committed World Folder Bootstrap and World Database Bootstrap, which create the UUID storage boundary.
@@ -93,6 +95,7 @@ It must stay separate from parser internals, splitter algorithms, UI progress, W
 Internal edge cases:
 
 - Empty accepted batches fail before durable world storage is created.
+- Cancellation-requested attempts fail before durable world storage is created.
 - A batch that produces no chunks fails before app index visibility.
 - Every committed source in the batch must have at least one temporary split chunk.
 - Temporary split chunk rows must reference staged source IDs that belong to the accepted batch.
@@ -104,6 +107,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - World Hub visibility depends on the app index row, so the app index insert must remain last.
+- Pause requests must prevent the attempt from reaching final durable commit after cancellation is requested.
 - Existing self-committing storage functions must not be called inside the rollback helper transaction.
 - Temporary split chunk output can contain chunk text, but commit logs must never include that text.
 - Source copy preparation preserves original filenames as metadata, but logs and stored filenames must not expose raw selected paths.
@@ -115,6 +119,7 @@ Cross-system edge cases:
 - A new world must not appear in World Hub until its world folder, `world.sqlite`, locked splitter settings, committed source records, chunk records, source copies, and app index row are all valid.
 - The world ID must be a UUID and must be used consistently for the folder, world database, copied source paths, and app index row.
 - Empty worlds must not be committed at this boundary.
+- Cancelled attempts must not be committed at this boundary.
 - Source file promotion and world database writes must share one rollback-aware commit boundary.
 - The app index insert must happen after the world data transaction and source file promotion succeed.
 - Cleanup must remove the new world folder when commit fails before visibility or when app index insertion fails after world data commit.
@@ -134,6 +139,7 @@ Before editing New World Batch Commit, check:
 
 - Whether the change belongs in final commit orchestration instead of parser, splitter, staging, file validation, storage repository, UI, graph, embedding, retrieval, or chat behavior.
 - Whether empty accepted batches are still rejected before any durable world storage is created.
+- Whether cancellation-requested attempts are still rejected before any durable world storage is created.
 - Whether the app index row is still inserted last.
 - Whether source file promotion and world database writes still share the rollback helper boundary.
 - Whether transaction-safe helpers still avoid storage functions that call `commit()` internally.

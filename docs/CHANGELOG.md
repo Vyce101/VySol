@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed Pause requests so running ingestion attempts enter stopping, mark cancellation requested, and block later final commits from that attempt.
 - Changed staged source access and parser read failures so current missing or unreadable source files fail with path-safe warnings.
 - Changed main chunk generation to return separate previous-context overlap for each chunk.
 - Changed main chunk generation to include character offsets with each returned chunk.
@@ -14,6 +15,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added an Ingestion Attempt Cancellation concept page.
 - Added backend staged batch start orchestration so valid staging contexts create one running attempt while invalid or duplicate starts are blocked.
 - Added a Staged Batch Start Orchestration concept page.
 - Added atomic existing-world batch commits so new source batches append only after source records, chunks, source copies, and cleanup-safe commit work succeed.
