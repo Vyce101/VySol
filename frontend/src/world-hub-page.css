@@ -1,0 +1,183 @@
+.world-hub-shell {
+  position: relative;
+  min-height: 100svh;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.world-hub-background {
+  position: absolute;
+  inset: 0;
+  z-index: -3;
+  background-position: center;
+  background-size: cover;
+}
+
+.world-hub-shade {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(circle at 84% 16%, rgba(255, 172, 83, 0.2), transparent 28%),
+    linear-gradient(90deg, rgba(8, 9, 14, 0.83) 0%, rgba(8, 9, 14, 0.5) 38%, rgba(8, 9, 14, 0.2) 100%),
+    linear-gradient(180deg, rgba(5, 6, 10, 0.12) 0%, rgba(5, 6, 10, 0.75) 100%);
+}
+
+.world-hub-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding: clamp(22px, 3.1vw, 32px) clamp(26px, 2vw, 34px);
+}
+
+.world-hub-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.93);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-decoration: none;
+  user-select: none;
+}
+
+.world-hub-brand-mark {
+  width: clamp(36px, 2.45vw, 42px);
+  height: clamp(36px, 2.45vw, 42px);
+  object-fit: contain;
+  filter: drop-shadow(0 8px 18px rgba(93, 109, 255, 0.38));
+  -webkit-user-drag: none;
+}
+
+.world-hub-brand-name {
+  font-size: clamp(20px, 1.58vw, 25px);
+  line-height: 1;
+  text-shadow: 0 3px 18px rgba(0, 0, 0, 0.42);
+}
+
+.world-hub-nav-root {
+  position: absolute;
+  top: clamp(22px, 1.45vw, 25px);
+  left: 50%;
+  z-index: 3;
+  display: grid;
+  justify-items: center;
+  transform: translateX(-50%);
+}
+
+.world-hub-nav-root .world-hub-nav-list {
+  min-width: 0;
+  width: fit-content;
+  height: clamp(49px, 3.05vw, 53px);
+  padding: 0 9px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.world-hub-nav-root .world-hub-nav-trigger {
+  min-width: 0;
+  height: clamp(38px, 2.35vw, 41px);
+  padding-right: clamp(18px, 1.15vw, 21px);
+  padding-left: clamp(18px, 1.15vw, 21px);
+}
+
+.world-hub-hero {
+  position: relative;
+  z-index: 1;
+  width: min(660px, calc(100vw - 64px));
+  margin: clamp(116px, 13vh, 154px) 0 0 clamp(34px, 3.35vw, 56px);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.world-hub-hero h1 {
+  margin: 0;
+  color: #ffffff;
+  font-size: clamp(58px, 5.1vw, 88px);
+  font-weight: 800;
+  line-height: 0.95;
+  letter-spacing: 0;
+  text-shadow: 0 10px 34px rgba(0, 0, 0, 0.44);
+}
+
+.world-hub-hero p {
+  max-width: 520px;
+  margin: 24px 0 0;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: clamp(20px, 1.45vw, 26px);
+  font-weight: 500;
+  line-height: 1.33;
+  letter-spacing: 0;
+  text-shadow: 0 6px 24px rgba(0, 0, 0, 0.44);
+}
+
+.world-hub-card-row {
+  position: relative;
+  z-index: 1;
+  width: calc(100vw - clamp(64px, 6.7vw, 112px));
+  min-height: clamp(196px, 20vw, 262px);
+  margin: clamp(116px, 13.2vh, 160px) clamp(32px, 3.35vw, 56px) 48px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: linear-gradient(
+    145deg,
+    rgba(21, 22, 28, 0.28) 0%,
+    rgba(8, 10, 14, 0.34) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 24px 64px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(7px) saturate(1.06);
+  -webkit-backdrop-filter: blur(7px) saturate(1.06);
+}
+
+@media (max-width: 720px) {
+  .world-hub-shell {
+    overflow-y: auto;
+  }
+
+  .world-hub-header {
+    padding: 18px 18px 0;
+  }
+
+  .world-hub-nav-root {
+    position: relative;
+    top: auto;
+    left: 0;
+    width: 100%;
+    margin-top: 20px;
+    transform: none;
+  }
+
+  .world-hub-nav-root .world-hub-nav-list {
+    width: fit-content;
+    max-width: calc(100vw - 32px);
+    min-width: 0;
+  }
+
+  .world-hub-nav-root .world-hub-nav-trigger {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .world-hub-hero {
+    width: calc(100vw - 36px);
+    margin: 72px 18px 0;
+  }
+
+  .world-hub-hero h1 {
+    font-size: clamp(46px, 15vw, 66px);
+  }
+
+  .world-hub-hero p {
+    margin-top: 18px;
+    font-size: 19px;
+  }
+
+  .world-hub-card-row {
+    width: calc(100vw - 36px);
+    min-height: 180px;
+    margin: 72px 18px 32px;
+  }
+}
