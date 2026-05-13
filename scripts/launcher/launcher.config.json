@@ -1,13 +1,13 @@
 {
   "appName": "VySol",
-  "browserUrl": "http://127.0.0.1:8000/health",
+  "browserUrl": "http://127.0.0.1:5173",
   "readyTimeoutSeconds": 60,
   "services": [
     {
       "name": "frontend",
-      "enabled": false,
+      "enabled": true,
       "workingDirectory": "frontend",
-      "command": "npm",
+      "command": "npm.cmd",
       "arguments": ["run", "dev"],
       "requiredPort": 5173,
       "healthUrl": "http://127.0.0.1:5173",
@@ -25,7 +25,6 @@
     }
   ],
   "todos": [
-    "Confirm final frontend command, ports, and health checks once UI work starts.",
     "Keep requiredPort and healthUrl aligned with the app's real runtime configuration."
   ]
 }

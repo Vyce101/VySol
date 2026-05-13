@@ -225,17 +225,17 @@ function Stop-AppOwnedRecord {
 
 function Read-StateRecords {
     if (-not (Test-Path $stateFile)) {
-        return @()
+        return ,@()
     }
 
     $content = Get-Content $stateFile -Raw
     if ([string]::IsNullOrWhiteSpace($content)) {
-        return @()
+        return ,@()
     }
 
     $records = $content | ConvertFrom-Json
     if ($null -eq $records) {
-        return @()
+        return ,@()
     }
 
     return @($records)
@@ -272,6 +272,7 @@ function Assert-ServiceCanStart {
 function Assert-PortAvailableOrRecoverAppOwned {
     param(
         [Parameter(Mandatory = $true)]$Service,
+        [AllowEmptyCollection()]
         [Parameter(Mandatory = $true)][array]$KnownRecords
     )
 
