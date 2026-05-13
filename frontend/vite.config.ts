@@ -12,7 +12,9 @@ export default defineConfig({
       allow: [".."],
     },
     proxy: {
+      "/assets": "http://127.0.0.1:8000",
       "/draft-worlds": "http://127.0.0.1:8000",
+      "/worlds": "http://127.0.0.1:8000",
     },
   },
 });
