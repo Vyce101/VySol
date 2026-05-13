@@ -6,6 +6,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed draft-world leave handling so backend leave-state checks can distinguish discard-warning danger zones from post-text-commit safe zones.
+- Changed ingestion attempt state to track the current ingestion phase from preflight through durable text commit.
 - Changed app shutdown so active ingestion attempts are cancelled, draft/staged state is discarded, and abandoned attempt workspaces are cleaned on next startup.
 - Changed ingestion concept docs to describe app-close attempt cancellation, explicit attempt targets, and startup cleanup consistency.
 - Changed Pause requests so running ingestion attempts enter stopping, expose paused only after cancellation completion, preserve Deep Pause workspaces, and reject late results from cancelled attempts.
@@ -17,6 +19,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added backend draft customization dirty-state tracking for future World Detail navigation guards.
+- Added a Draft World Leave Safety concept page.
 - Added backend-backed draft World Detail opening so draft IDs, splitter defaults, and staged-source setup come from temporary backend state before any world is committed.
 - Added a Draft World Detail API concept page.
 - Added a fresh frontend World Detail shell with VySol branding, draft and committed modes, and Customize/Ingestion tabs.

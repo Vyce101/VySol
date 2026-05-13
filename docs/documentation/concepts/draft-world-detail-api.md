@@ -1,6 +1,6 @@
 # Draft World Detail API
 
-Draft World Detail API is VySol's backend HTTP contract for opening an uncommitted draft world in World Detail. It creates backend-owned draft setup state, exposes the draft's splitter defaults and staged-source summary, and keeps the draft outside committed world storage.
+Draft World Detail API is VySol's backend HTTP contract for opening and reading an uncommitted draft world in World Detail. It creates backend-owned draft setup state, exposes the draft's splitter defaults, staged-source summary, and temporary customization dirty state, and keeps the draft outside committed world storage.
 
 This page is for developers, power users, and AI coding agents that need to understand draft opening behavior before changing Create World entrypoints, World Detail route state, draft splitter defaults, source staging setup, or committed-world visibility.
 
@@ -18,13 +18,16 @@ Draft World Detail API owns:
 - Creating or replacing a temporary source staging context keyed by the draft ID.
 - Returning draft splitter settings from backend draft state.
 - Returning a safe staged-source summary without raw selected file paths.
+- Returning temporary unsaved customization state for future navigation guard UI.
+- Updating the temporary unsaved customization dirty-state flag for an existing draft.
 - Returning `404` for missing draft IDs.
 - Keeping draft opening separate from committed world storage, source parsing, ingestion attempts, and world folders.
 
 Draft World Detail API does not own:
 
 - World Hub rendering, Create World buttons, or entry screens.
-- Customize controls, validation, saving, or asset picking.
+- Customize controls, field validation, durable saving, or asset picking.
+- Browser confirmation prompts, navigation interception, or draft leave warning presentation.
 - Source selection UI, file pickers, drag/drop behavior, parsing, splitting, hashing, or duplicate checks.
 - Committing worlds, creating world folders, creating `world.sqlite`, copying sources, or writing `app.sqlite` world rows.
 - Persisting draft state across app restarts.
@@ -34,11 +37,13 @@ Draft World Detail API does not own:
 
 A future Create World entrypoint calls the draft creation endpoint. The backend creates a draft world in memory, creates an empty temporary source staging context with the same draft ID, and returns a draft detail response. The frontend then navigates to World Detail with draft route state containing that draft ID.
 
-When World Detail loads with a draft ID, it calls the read endpoint. The backend reads the existing draft world and matching temporary staging context from memory, then returns splitter settings and staged-source summaries. Refreshing the same URL reuses the backend draft as long as the app process still owns that in-memory state.
+When World Detail loads with a draft ID, it calls the read endpoint. The backend reads the existing draft world and matching temporary staging context from memory, then returns splitter settings, staged-source summaries, and the current unsaved customization dirty flag. Refreshing the same URL reuses the backend draft as long as the app process still owns that in-memory state.
+
+Future Customize UI can set the dirty flag when name, description, or customization controls have unsaved edits. Future navigation guard UI can use Draft World Leave Safety to decide whether leaving should warn or discard temporary state.
 
 ## Inputs
 
-Draft World Detail API receives draft creation requests and draft IDs from frontend route or service code. It reads in-memory draft-world and temporary source staging state.
+Draft World Detail API receives draft creation requests, draft IDs from frontend route or service code, and temporary dirty-state updates for future customization UI. It reads in-memory draft-world and temporary source staging state.
 
 It does not receive display names, selected source file paths, parser output, source text, chunk rows, database connections, provider responses, or committed world metadata.
 
@@ -49,8 +54,9 @@ The API returns draft detail responses containing:
 - A draft ID.
 - Splitter settings with character-count defaults and splitter version metadata.
 - Staged-source summaries containing temporary staging entry IDs, source type, validity state, and safe error text.
+- A temporary unsaved customization changes flag.
 
-It produces backend in-memory state only. It does not write files, create database rows, create durable world folders, start ingestion, parse sources, copy sources, create chunks, call providers, or emit UI state directly.
+It produces backend in-memory state only. It can update the in-memory dirty-state flag, but it does not write files, create database rows, create durable world folders, start ingestion, parse sources, copy sources, create chunks, call providers, or emit UI state directly.
 
 ## User-Facing Behavior
 
@@ -69,6 +75,7 @@ The API must not recover by creating a committed world, writing fallback databas
 Draft World Detail API interacts with:
 
 - Draft World Splitter Settings, which creates and stores draft splitter defaults in memory.
+- Draft World Leave Safety, which reads draft dirty state and current ingestion phase before future UI navigates away.
 - Temporary Source Staging State, which owns the empty staged-source context and future staged source summaries.
 - World Detail Page Shell, which reads backend draft detail for draft route state.
 - Committed World Index Storage and Committed World Folder Bootstrap only as systems it must avoid during draft opening.
@@ -81,8 +88,11 @@ Internal edge cases:
 
 - Creating a draft returns backend defaults and an empty staged-source list.
 - Creating a draft creates a matching temporary staging context keyed by draft ID.
+- Creating a draft starts with no unsaved customization changes.
 - Reading an existing draft returns the same in-memory draft setup state.
+- Updating unsaved customization state changes only the in-memory draft flag.
 - Reading a missing draft returns `404`.
+- Updating a missing draft returns `404`.
 - Missing staging state for an existing draft is represented as an empty staged-source list rather than committed source data.
 
 Cross-system edge cases:
@@ -93,6 +103,7 @@ Cross-system edge cases:
 - World Hub must not show drafts because World Hub visibility depends on committed world index rows.
 - Refresh behavior depends on the running backend process; app restart recovery remains outside this in-memory draft contract.
 - Staged-source summaries must not expose raw local file paths.
+- Draft dirty state is temporary until future Customize storage defines durable name, description, and customization behavior.
 
 ## Invariants
 
@@ -101,13 +112,14 @@ Cross-system edge cases:
 - Draft detail responses must stay safe to show in UI without exposing raw local paths.
 - Opening a draft must not create committed storage or committed world visibility.
 - Draft state must remain temporary and outside `app/storage` migrations.
+- The unsaved customization flag must remain temporary and must not imply durable customization storage exists.
 - The API must not start ingestion or treat splitter settings as proof that splitting has run.
 - Future commit code must remain the first boundary that can make a new world visible in World Hub.
 
 ## Implementation Landmarks
 
 - `app/draft_worlds/routes.py` owns the draft detail HTTP routes and response shaping.
-- `app/draft_worlds/registry.py` owns in-memory draft creation and reads.
+- `app/draft_worlds/registry.py` owns in-memory draft creation, reads, and dirty-state updates.
 - `app/ingestion/staging/source_staging_state.py` owns temporary staged-source state.
 - `frontend/src/draft-world-api.ts` owns frontend calls and future Create World navigation helper behavior.
 - `frontend/src/world-detail-page.tsx` owns draft route rehydration in the shell.
@@ -119,6 +131,7 @@ Before editing Draft World Detail API, check:
 
 - Whether the change still belongs to draft opening rather than World Hub, Customize controls, Ingestion controls, or new-world commit orchestration.
 - Whether draft creation still creates matching draft and staging state without committed storage.
+- Whether dirty-state updates stay temporary and avoid pretending name, description, or customization persistence exists.
 - Whether missing draft IDs fail clearly instead of creating hidden state.
 - Whether response data avoids raw local paths, source text, secrets, and user-owned file contents.
 - Whether frontend refresh behavior still rehydrates from the backend draft ID.
