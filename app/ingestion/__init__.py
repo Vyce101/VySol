@@ -31,6 +31,7 @@ from app.ingestion.attempt_cancellation import (
     request_attempt_cancellation,
 )
 from app.ingestion.attempt_state import (
+    IngestionAttemptPhase,
     IngestionAttemptState,
     IngestionAttemptStateError,
     IngestionAttemptStateRegistry,
@@ -46,6 +47,7 @@ from app.ingestion.attempt_state import (
     request_stop,
     resume_attempt,
     start_attempt,
+    update_attempt_phase,
 )
 from app.ingestion.attempt_workspace import (
     AbandonedIngestionWorkspaceCleanupError,
@@ -104,6 +106,7 @@ __all__ = [
     "AbandonedIngestionWorkspaceCleanupError",
     "DuplicateIngestionAttemptStartError",
     "IngestionAttemptState",
+    "IngestionAttemptPhase",
     "IngestionAttemptCancellationError",
     "IngestionAttemptCancellationRegistry",
     "IngestionAttemptStateError",
@@ -170,4 +173,5 @@ __all__ = [
     "run_commit_with_rollback",
     "start_attempt",
     "start_staged_batch_attempt",
+    "update_attempt_phase",
 ]

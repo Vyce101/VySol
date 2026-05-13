@@ -46,6 +46,26 @@ class DraftWorldRegistry:
         updated_draft_world = DraftWorld(
             draft_id=draft_world.draft_id,
             splitter_settings=splitter_settings,
+            has_unsaved_customization_changes=(
+                draft_world.has_unsaved_customization_changes
+            ),
+        )
+        self._draft_worlds[draft_id] = updated_draft_world
+        return updated_draft_world
+
+    def update_draft_unsaved_customization_changes(
+        self,
+        draft_id: str,
+        has_unsaved_customization_changes: bool,
+    ) -> DraftWorld | None:
+        draft_world = self.get_draft_world(draft_id)
+        if draft_world is None:
+            return None
+
+        updated_draft_world = DraftWorld(
+            draft_id=draft_world.draft_id,
+            splitter_settings=draft_world.splitter_settings,
+            has_unsaved_customization_changes=has_unsaved_customization_changes,
         )
         self._draft_worlds[draft_id] = updated_draft_world
         return updated_draft_world
@@ -76,6 +96,16 @@ def update_draft_splitter_settings(
     return _draft_world_registry.update_draft_splitter_settings(
         draft_id,
         splitter_settings,
+    )
+
+
+def update_draft_unsaved_customization_changes(
+    draft_id: str,
+    has_unsaved_customization_changes: bool,
+) -> DraftWorld | None:
+    return _draft_world_registry.update_draft_unsaved_customization_changes(
+        draft_id,
+        has_unsaved_customization_changes,
     )
 
 

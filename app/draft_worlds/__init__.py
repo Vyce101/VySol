@@ -5,6 +5,7 @@ from app.draft_worlds.registry import (
     get_draft_world_registry,
     get_draft_world,
     update_draft_splitter_settings,
+    update_draft_unsaved_customization_changes,
 )
 from app.draft_worlds.splitter_settings import (
     DEFAULT_CHUNK_SIZE,
@@ -31,5 +32,6 @@ __all__ = [
     "get_draft_world_registry",
     "get_draft_world",
     "update_draft_splitter_settings",
+    "update_draft_unsaved_customization_changes",
     "validate_splitter_settings",
 ]

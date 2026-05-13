@@ -7,3 +7,4 @@ from app.draft_worlds.splitter_settings import SplitterSettings
 class DraftWorld:
     draft_id: str
     splitter_settings: SplitterSettings
+    has_unsaved_customization_changes: bool = False

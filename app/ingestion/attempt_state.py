@@ -27,6 +27,15 @@ class IngestionAttemptStatus(StrEnum):
     COMPLETE = "complete"
 
 
+class IngestionAttemptPhase(StrEnum):
+    NOT_STARTED = "not_started"
+    PREFLIGHT = "preflight"
+    PARSING = "parsing"
+    SPLITTING = "splitting"
+    ATOMIC_TEXT_COMMIT = "atomic_text_commit"
+    TEXT_COMMITTED = "text_committed"
+
+
 class IngestionAttemptStateError(ValueError):
     pass
 
@@ -44,6 +53,7 @@ class IngestionAttemptState:
     status: IngestionAttemptStatus
     attempt_id: str | None
     staged_work_remaining: bool
+    phase: IngestionAttemptPhase = IngestionAttemptPhase.NOT_STARTED
 
 
 class IngestionAttemptStateRegistry:
@@ -83,6 +93,7 @@ class IngestionAttemptStateRegistry:
                     status=IngestionAttemptStatus.RUNNING,
                     attempt_id=attempt_id,
                     staged_work_remaining=True,
+                    phase=IngestionAttemptPhase.PREFLIGHT,
                 )
             )
         except Exception:
@@ -128,6 +139,7 @@ class IngestionAttemptStateRegistry:
                 status=IngestionAttemptStatus.STOPPING,
                 attempt_id=self._state.attempt_id,
                 staged_work_remaining=self._state.staged_work_remaining,
+                phase=self._state.phase,
             )
         )
 
@@ -153,6 +165,7 @@ class IngestionAttemptStateRegistry:
                     status=IngestionAttemptStatus.PAUSED,
                     attempt_id=self._state.attempt_id,
                     staged_work_remaining=True,
+                    phase=self._state.phase,
                 )
             )
 
@@ -183,6 +196,29 @@ class IngestionAttemptStateRegistry:
                 status=IngestionAttemptStatus.RUNNING,
                 attempt_id=self._state.attempt_id,
                 staged_work_remaining=True,
+                phase=self._state.phase,
+            )
+        )
+
+    def update_attempt_phase(
+        self,
+        attempt_id: str,
+        phase: IngestionAttemptPhase,
+    ) -> IngestionAttemptState:
+        self._validate_current_attempt_result(
+            attempt_id,
+            IngestionAttemptStatus.RUNNING,
+        )
+
+        if type(phase) is not IngestionAttemptPhase:
+            reject_invalid_transition("Ingestion attempt phase is invalid.")
+
+        return self._set_state(
+            IngestionAttemptState(
+                status=self._state.status,
+                attempt_id=self._state.attempt_id,
+                staged_work_remaining=self._state.staged_work_remaining,
+                phase=phase,
             )
         )
 
@@ -204,6 +240,7 @@ class IngestionAttemptStateRegistry:
                 status=IngestionAttemptStatus.COMPLETE,
                 attempt_id=self._state.attempt_id,
                 staged_work_remaining=False,
+                phase=IngestionAttemptPhase.NOT_STARTED,
             )
         )
         self._workspace_registry.remove_attempt_workspace(attempt_id)
@@ -252,6 +289,7 @@ class IngestionAttemptStateRegistry:
                 status=IngestionAttemptStatus.STOPPING,
                 attempt_id=attempt_id,
                 staged_work_remaining=False,
+                phase=self._state.phase,
             )
         )
 
@@ -291,6 +329,7 @@ def build_idle_state() -> IngestionAttemptState:
         status=IngestionAttemptStatus.IDLE,
         attempt_id=None,
         staged_work_remaining=False,
+        phase=IngestionAttemptPhase.NOT_STARTED,
     )
 
 
@@ -300,6 +339,9 @@ def validate_attempt_state(state: IngestionAttemptState) -> IngestionAttemptStat
 
     if type(state.status) is not IngestionAttemptStatus:
         raise IngestionAttemptStateError("Ingestion attempt status is invalid.")
+
+    if type(state.phase) is not IngestionAttemptPhase:
+        raise IngestionAttemptStateError("Ingestion attempt phase is invalid.")
 
     if state.status == IngestionAttemptStatus.IDLE and state.attempt_id is not None:
         raise IngestionAttemptStateError("Idle ingestion attempts cannot have an ID.")
@@ -315,6 +357,12 @@ def validate_attempt_state(state: IngestionAttemptState) -> IngestionAttemptStat
 
     if state.status == IngestionAttemptStatus.COMPLETE and state.staged_work_remaining:
         raise IngestionAttemptStateError("Complete ingestion attempts cannot have staged work.")
+
+    if state.status in {
+        IngestionAttemptStatus.IDLE,
+        IngestionAttemptStatus.COMPLETE,
+    } and state.phase != IngestionAttemptPhase.NOT_STARTED:
+        raise IngestionAttemptStateError("Inactive ingestion attempts cannot have a phase.")
 
     return state
 
@@ -386,6 +434,13 @@ def finish_cancellation(
 
 def resume_attempt() -> IngestionAttemptState:
     return _ingestion_attempt_state_registry.resume_attempt()
+
+
+def update_attempt_phase(
+    attempt_id: str,
+    phase: IngestionAttemptPhase,
+) -> IngestionAttemptState:
+    return _ingestion_attempt_state_registry.update_attempt_phase(attempt_id, phase)
 
 
 def complete_attempt(attempt_id: str) -> IngestionAttemptState:
