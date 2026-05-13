@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.draft_worlds.routes import router as draft_worlds_router
 from app.ingestion import (
     cancel_active_attempt_for_app_close,
     cleanup_abandoned_attempt_workspaces,
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(draft_worlds_router)
 
 
 @app.get("/health")
