@@ -21,8 +21,10 @@ Temporary Ingestion Workspace owns:
 - Keeping workspace paths outside committed world source storage.
 - Holding workspace state in process memory.
 - Cleaning up managed temporary workspaces after successful completion, terminal cancellation, registry lifetime end, and startup discovery of abandoned workspaces.
+- Abandoning workspace registry ownership during app-close cancellation so shutdown does not need to delete temporary workspace folders.
 - Logging successful workspace creation at `INFO` without full local paths.
 - Logging successful cleanup at `INFO`, missing already-cleaned workspaces at `DEBUG`, and cleanup failures at `ERROR` without full local paths.
+- Logging unrecoverable startup cleanup inconsistency at `CRITICAL`.
 - Logging workspace creation failures at `ERROR` without full local paths.
 
 Temporary Ingestion Workspace does not own:
@@ -44,6 +46,8 @@ If the attempt is stopped and cancellation finishes with staged work remaining, 
 If cancellation finishes with no staged work remaining, the attempt returns to `IDLE` and the workspace is removed. If a running attempt completes successfully, the attempt moves to `COMPLETE` and the workspace is removed.
 
 Fresh starts after `IDLE` or `COMPLETE` receive new attempt IDs and new isolated workspaces. Looking up an older attempt ID after a newer attempt has started returns no workspace. When the app starts, startup cleanup scans only the app-owned ingestion workspace area and removes abandoned temporary workspace folders left by an earlier process.
+
+When the app closes during a current attempt, app-close cancellation abandons the workspace registry record but intentionally leaves the folder for the next startup cleanup pass. Shutdown is allowed to discard in-memory ownership quickly; startup cleanup is the reliable filesystem cleanup boundary for workspaces left by an interrupted process.
 
 ## Inputs
 
@@ -68,6 +72,8 @@ Abandoned workspaces from an earlier process are not resumed. Startup cleanup re
 
 Late completion results from a cancelled attempt must not remove the paused workspace. Only successful completion from `RUNNING`, terminal cancellation to `IDLE`, registry lifetime cleanup, and startup cleanup are allowed to remove managed temporary workspaces.
 
+App-close cancellation is not restart resume. The workspace folder may remain on disk after shutdown, but it is abandoned temporary data and startup cleanup must remove it before normal app work continues.
+
 ## Failure Behavior
 
 Workspace creation failure is logged at `ERROR` without the attempted full temp path and is raised to the caller. Ingestion Attempt State creates the workspace before committing the `RUNNING` state, so a workspace creation failure leaves the attempt state unchanged.
@@ -76,6 +82,8 @@ If attempt-state validation fails after a workspace is created, the workspace re
 
 If cleanup is requested for a workspace that is already missing, the registry treats it as already cleaned and logs at `DEBUG`. If filesystem cleanup fails, the failure is logged at `ERROR` with safe metadata and the attempted lifecycle transition is not converted into a state failure.
 
+Startup cleanup logs successful abandoned workspace cleanup at `INFO` and per-workspace cleanup failures at `ERROR`. If abandoned workspace folders remain after cleanup attempts, startup cleanup logs `CRITICAL` and fails startup with a cleanup inconsistency error so the app does not continue while stale attempt data remains.
+
 Logs must not include full local temp paths, raw source paths, source text, provider output, local machine details, or user data.
 
 ## System Interactions
@@ -83,7 +91,8 @@ Logs must not include full local temp paths, raw source paths, source text, prov
 Temporary Ingestion Workspace currently interacts with:
 
 - Ingestion Attempt State, which generates attempt IDs, starts fresh attempts, pauses attempts, and verifies workspace availability before resume.
-- Backend startup, which removes abandoned temporary ingestion workspaces from earlier app processes.
+- App-close cancellation, which abandons the current workspace record so shutdown does not delete the folder directly.
+- Backend startup, which removes abandoned temporary ingestion workspaces from earlier app processes and fails startup if cleanup cannot make the temp area consistent.
 - Temporary Source Staging State, whose staged-work signal can keep an attempt paused and therefore keep the workspace associated with that attempt.
 - Temporary Parsed Source Outputs, which uses the active attempt workspace identity while keeping parsed text in memory.
 - Future ingestion orchestration, which may use the workspace for attempt-specific temporary files before later parsing, chunking, hashing, provider, or commit systems run.
@@ -116,6 +125,7 @@ Cross-system edge cases:
 - Future resume code must not create a new workspace for the same paused attempt.
 - Future cancellation completion code must not clean the workspace when the attempt becomes `PAUSED`.
 - Startup cleanup must only remove abandoned temporary ingestion workspace folders, not committed world folders, committed sources, uploaded assets, or source files outside the temporary workspace area.
+- App-close cancellation must leave abandoned temporary workspace folder removal to startup cleanup instead of treating shutdown cleanup as required for correctness.
 - Future source commit work must not treat workspace files as committed source files.
 - Future failed-attempt handling must not expose workspace contents as durable world data.
 - Attempt workspace behavior must not create or migrate app-global or per-world database tables.
@@ -131,13 +141,16 @@ Cross-system edge cases:
 - `PAUSED` workspaces must remain available for same-process resume.
 - Rejected late completion results must not remove `PAUSED` workspaces.
 - Terminal cancellation, successful completion, and startup cleanup must remove only temporary ingestion workspaces.
+- App-close cancellation must abandon current workspace registry ownership without deleting committed world data or user-selected source files.
+- Startup cleanup must fail loudly if abandoned temporary workspace folders remain after cleanup attempts.
 - The system must not parse, hash, copy, commit, persist, create chunks, or assign book numbers for sources.
 - No database migration is required for temporary ingestion workspace behavior.
 
 ## Implementation Landmarks
 
-- `app/ingestion/attempt_workspace.py` owns temporary workspace creation, lookup, current-attempt scoping, cleanup, startup cleanup, and workspace logging.
+- `app/ingestion/attempt_workspace.py` owns temporary workspace creation, lookup, current-attempt scoping, app-close abandonment, cleanup, startup cleanup, and workspace logging.
 - `app/ingestion/attempt_state.py` coordinates Start, Resume, completion cleanup, and terminal cancellation cleanup with the workspace registry.
+- `app/ingestion/app_close_cancellation.py` coordinates app-close cancellation before the global database connection closes.
 - `app/ingestion/__init__.py` exports the public workspace and startup cleanup APIs for backend callers.
 - `app/main.py` calls startup cleanup during backend lifespan startup.
 - `tests/test_ingestion_attempt_state.py` covers workspace creation, isolation, resume reuse, terminal cleanup, startup cleanup boundaries, stale lookup behavior, path-safe failure logging, and database non-persistence.
@@ -150,7 +163,9 @@ Before editing Temporary Ingestion Workspace, check:
 - Whether Start still creates the workspace before committing the `RUNNING` state.
 - Whether Resume still reuses the paused attempt's existing workspace.
 - Whether terminal cancellation and successful completion still remove the workspace.
+- Whether app-close cancellation still abandons workspace ownership and leaves filesystem cleanup to startup.
 - Whether startup cleanup is scoped only to temporary ingestion workspaces.
+- Whether startup cleanup still logs remaining abandoned workspaces at `CRITICAL` and fails startup.
 - Whether stale attempt IDs still cannot retrieve the current workspace.
 - Whether workspace paths still stay outside committed world source storage.
 - Whether logs avoid full local paths, source paths, source text, provider output, local machine details, and user data.

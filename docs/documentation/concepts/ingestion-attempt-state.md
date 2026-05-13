@@ -19,9 +19,11 @@ Ingestion Attempt State owns:
 - Creating a new attempt ID when a fresh attempt starts from `IDLE` or `COMPLETE`.
 - Coordinating fresh attempt workspace creation before entering `RUNNING`.
 - Coordinating attempt cancellation flag setup, pause requests, resume clearing, and terminal cleanup.
+- Cancelling active or pausable attempts during app shutdown without treating shutdown as a successful completion.
 - Preserving the same attempt ID while a paused attempt resumes.
 - Verifying that a paused attempt still has its temporary workspace before resume.
 - Coordinating temporary workspace cleanup after successful completion and terminal cancellation to `IDLE`.
+- Abandoning the active temporary workspace record during app-close cancellation so startup cleanup owns filesystem removal.
 - Rejecting stale completion or cancellation results from old attempt IDs.
 - Rejecting late completion results from the cancelled current attempt while it is `STOPPING` or `PAUSED`.
 - Representing whether staged work remains when cooperative cancellation finishes.
@@ -51,9 +53,13 @@ Resuming a paused attempt first verifies that the same attempt ID still has its 
 
 If a completion result arrives for the same attempt after cancellation has moved it to `STOPPING` or `PAUSED`, the result is rejected. The attempt state, cancellation flag, and temporary workspace remain unchanged so a cancelled attempt cannot accidentally complete or delete resumable Deep Pause data.
 
+When the app is closing, the shutdown boundary cancels any current `RUNNING`, `STOPPING`, or `PAUSED` attempt. It leaves the cancellation flag requested, records the lifecycle as stopping, and abandons the temporary workspace record instead of deleting the workspace during shutdown. App-close cancellation is not a successful commit and is not a resumable pause; it exists so late completion and commit guards reject the attempt while backend startup remains responsible for removing abandoned temporary workspace folders.
+
 ## Inputs
 
 Ingestion Attempt State receives caller intent to start, stop, resume, finish cancellation, or complete an attempt. Cancellation and completion calls must include the attempt ID they belong to. Cancellation completion also receives a boolean staged-work signal so it can choose between `PAUSED` and `IDLE`. Stop requests also coordinate with Ingestion Attempt Cancellation so downstream work can see that Pause was requested.
+
+On FastAPI shutdown, the app-close cancellation boundary can ask this system to cancel the current active or pausable attempt without preserving it for restart resume.
 
 It does not receive source file paths, source text, parser output, chunks, hashes, provider responses, database connections, or UI request objects.
 
@@ -74,11 +80,15 @@ Attempt state is in memory only. It is intended to represent the currently runni
 
 `PAUSED` means cancellation finished while staged work still exists and the same attempt can resume with its existing temporary workspace. That workspace may contain intermediate parsed or split data needed for a true Deep Pause continuation. `IDLE` means no current attempt is resumable. `COMPLETE` means an attempt finished successfully, its temporary workspace has been cleaned, and the completed state can be shown separately from `IDLE` until a new attempt starts.
 
+App-close cancellation discards the same-process resume boundary. A paused attempt that exists only because the app is still open must not be persisted across restart, and shutdown must not convert paused work into a committed or resumable attempt.
+
 ## Retry, Pause, And Abort Behavior
 
 This model supports cooperative cancellation state, but it does not interrupt running work itself. The future ingestion runner must request a stop, check the cancellation flag between work-launch boundaries, finish its own cancellation work, and then report whether staged work remains.
 
 Fresh starts from `IDLE` or `COMPLETE` create new attempt IDs, new temporary workspaces, and fresh cancellation flags. Resume from `PAUSED` keeps the existing attempt ID and workspace while clearing the previous cancellation request. Terminal cancellation and successful completion remove the temporary workspace and clear the cancellation flag. Late completion or cancellation results for older attempt IDs are rejected and leave the current state unchanged. Late completion for the cancelled current attempt is also rejected while `STOPPING` or `PAUSED`.
+
+App-close cancellation is stricter than same-process Pause. It handles `RUNNING`, `STOPPING`, and `PAUSED` as discard-on-close states, keeps the cancellation signal requested, and does not expose a restart resume path.
 
 ## Failure Behavior
 
@@ -87,6 +97,8 @@ Invalid transitions are logged at `WARNING` and rejected without changing state.
 If the cancellation flag cannot be set for a valid stop request, the failure is logged at `ERROR`, the attempt remains `RUNNING`, and the caller receives a cancellation error.
 
 Stale attempt results are logged at `WARNING` and rejected without changing state. Late completion results from a cancelled current attempt are also logged at `WARNING`, rejected without changing state, and must not clean the paused workspace. Workspace creation failures and unexpected state-model failures are logged at `ERROR` and raised so callers do not continue with an unknown lifecycle state.
+
+App-close cancellation is logged at `INFO`. It must not commit staged work, must not clear the cancellation flag in a way that permits a late commit, and must leave temporary workspace folder removal to the next startup cleanup boundary.
 
 Logs must not include raw source paths, full temporary workspace paths, source text, local machine details, provider output, or user data.
 
@@ -98,6 +110,7 @@ Ingestion Attempt State currently interacts with:
 - Ingestion Attempt Cancellation, which stores the attempt-scoped cancellation signal used by future orchestration and commit guards.
 - Temporary Ingestion Workspace, which provides current-attempt scratch storage for Start and Resume attempts.
 - Temporary Source Staging State, whose remaining staged work determines whether cancellation ends in `PAUSED` or `IDLE`.
+- App-close cancellation, which discards draft or staged source state and uses attempt state to reject late completion.
 - Future one-button UI state, which can map the backend lifecycle to start, stopping, resume, and completion feedback.
 - The central logger, which records transition summaries and rejected transitions without source data.
 
@@ -123,6 +136,9 @@ Internal edge cases:
 - `COMPLETE` and `IDLE` remain distinct statuses.
 - Stale attempt IDs cannot complete or cancel a newer attempt.
 - Late completion from the current attempt while `STOPPING` or `PAUSED` is rejected without changing state or cleaning the workspace.
+- App-close cancellation accepts `RUNNING`, `STOPPING`, and `PAUSED` attempts as discard-on-close states.
+- App-close cancellation keeps the cancellation signal requested so late completion and commit work are rejected.
+- App-close cancellation abandons workspace registry ownership instead of deleting the temporary workspace folder during shutdown.
 
 Cross-system edge cases:
 
@@ -138,6 +154,8 @@ Cross-system edge cases:
 - Future UI code must treat `PAUSED` as resumable work and `IDLE` as ready for a fresh start.
 - Future source commit work must not infer that attempt state has committed, parsed, copied, hashed, or chunked any source.
 - Future source commit work must not treat temporary workspace files as committed source files.
+- FastAPI shutdown must run app-close cancellation before closing the global database connection so draft and staging cleanup can still use app-owned registries.
+- App-close cancellation must not preserve `PAUSED` state for restart resume.
 - Attempt state must not create or migrate app-global or per-world database tables.
 
 ## Invariants
@@ -157,6 +175,8 @@ Cross-system edge cases:
 - Completion and terminal cancellation must clean the attempt workspace without changing the meaning of `COMPLETE`, `IDLE`, or `PAUSED`.
 - Terminal completion and terminal cancellation must clear the attempt cancellation flag.
 - Repeated stop requests while `STOPPING` must not change state or create a new attempt.
+- App close must never be treated as successful completion.
+- App close must not preserve paused staged work across restart.
 - Stale attempt results must never mutate current state.
 - Late completion results from a cancelled current attempt must never mutate current state or clean Deep Pause workspace data.
 - Invalid transitions must leave current state unchanged.
@@ -166,6 +186,7 @@ Cross-system edge cases:
 ## Implementation Landmarks
 
 - `app/ingestion/attempt_state.py` owns the in-memory attempt state model, registry, transitions, stale-result rejection, terminal workspace cleanup coordination, and logging.
+- `app/ingestion/app_close_cancellation.py` coordinates app-close discard behavior across attempt state, active staged-batch metadata, draft worlds, source staging, and temporary workspace ownership.
 - `app/ingestion/attempt_cancellation.py` owns the in-memory cancellation flag used when Pause is requested.
 - `app/ingestion/attempt_workspace.py` owns temporary workspace creation, lookup, current-attempt scoping, and cleanup.
 - `app/ingestion/__init__.py` exports the public attempt-state and workspace API for backend callers.
@@ -183,6 +204,7 @@ Before editing Ingestion Attempt State, check:
 - Whether valid Pause requests still set the cancellation flag before entering `STOPPING`.
 - Whether repeated Pause requests while `STOPPING` remain idempotent.
 - Whether late completion after cancellation is still rejected without deleting paused workspace data.
+- Whether app-close cancellation still discards `RUNNING`, `STOPPING`, and `PAUSED` attempts without creating restart-resumable work.
 - Whether cancellation to `IDLE` and successful completion still clean the temporary workspace.
 - Whether terminal cleanup and Resume clear cancellation flag state at the right time.
 - Whether Start and Resume still preserve the Temporary Ingestion Workspace contract.

@@ -15,11 +15,13 @@ The orchestration layer keeps that policy out of lower-level attempt state. Atte
 Staged Batch Start Orchestration owns:
 
 - Reading the requested temporary staging context.
+- Requiring explicit attempt target metadata that identifies whether the attempt is for a new-world draft or an existing committed world.
 - Rejecting missing, empty, or invalid staged batches before a new attempt starts.
+- Rejecting blank or invalid attempt target metadata before a new attempt starts.
 - Returning safe invalid-source summaries that future UI or route layers can surface.
 - Blocking a second Start request while an attempt is already `RUNNING`.
 - Calling Ingestion Attempt State only after the staged batch is valid.
-- Recording the active attempt's staging context ID and staged entry ID snapshot.
+- Recording the active attempt's staging context ID, staged entry ID snapshot, attempt kind, and target ID.
 - Logging successful attempt start at `INFO`.
 - Logging duplicate running starts at `WARNING`.
 - Logging unexpected start orchestration failures at `ERROR`.
@@ -34,17 +36,17 @@ Staged Batch Start Orchestration does not own:
 
 ## Normal Flow
 
-A caller passes a staging context ID to the start orchestration API. The orchestrator first checks the current attempt state. If an attempt is already running, the request is rejected as a duplicate start and the existing attempt remains unchanged.
+A caller passes a staging context ID and attempt target metadata to the start orchestration API. The target metadata states whether the attempt belongs to a new-world draft or an existing committed world, and carries the draft ID or committed world ID that app-close cancellation must use later. The orchestrator first checks the current attempt state. If an attempt is already running, the request is rejected as a duplicate start and the existing attempt remains unchanged.
 
-If no attempt is running, the orchestrator reads the staging context. A missing context, an empty staging list, or any staged entry with `is_valid == False` blocks start before a temporary workspace or attempt ID is created. Invalid entries are summarized by staging entry ID, source type, and staging error message so a future UI can notify the user without exposing local paths.
+If no attempt is running, the orchestrator validates the attempt target metadata and reads the staging context. Blank target IDs, unsupported attempt kinds, a missing context, an empty staging list, or any staged entry with `is_valid == False` block start before a temporary workspace or attempt ID is created. Invalid entries are summarized by staging entry ID, source type, and staging error message so a future UI can notify the user without exposing local paths.
 
-When every staged entry is valid, the orchestrator starts a fresh ingestion attempt through Ingestion Attempt State. That creates the attempt ID, creates the temporary workspace, and moves the state to `RUNNING`. The orchestrator then records the active staged-batch link with the attempt state, staging context ID, and staged entry ID snapshot.
+When every staged entry and the target metadata are valid, the orchestrator starts a fresh ingestion attempt through Ingestion Attempt State. That creates the attempt ID, creates the temporary workspace, and moves the state to `RUNNING`. The orchestrator then records the active staged-batch link with the attempt state, staging context ID, staged entry ID snapshot, attempt kind, and target ID.
 
 While that active link points to the current running attempt, Temporary Source Staging State blocks adding more sources to the same staging context. This keeps the batch that started the attempt stable until the running attempt is no longer current. Once cooperative cancellation has finished and the attempt is `PAUSED`, the active running link clears and staged sources can be edited again while the paused attempt keeps its Deep Pause workspace.
 
 ## Inputs
 
-The start orchestration API receives a staging context ID. It reads in-memory temporary staging state and current in-memory attempt state.
+The start orchestration API receives a staging context ID and attempt target metadata. It reads in-memory temporary staging state and current in-memory attempt state.
 
 It does not receive raw source text, parser output, chunk rows, source hashes, database connections, provider responses, saved manifests, or UI request objects.
 
@@ -55,6 +57,7 @@ On success, the system returns an active staged-batch attempt object containing:
 - The running ingestion attempt state.
 - The staging context ID used to start the attempt.
 - The staged entry IDs that were part of the batch at start time.
+- The attempt kind and target ID needed by app-close cancellation.
 
 On validation failure, the system raises a domain validation error that can carry safe invalid-entry summaries. On duplicate running starts, it raises a duplicate-start error. It does not create committed source rows, chunks, source file copies, durable attempt records, HTTP responses, or UI state directly.
 
@@ -66,7 +69,7 @@ This keeps source-add blocking from getting stuck after completion, cancellation
 
 ## Failure Behavior
 
-Expected start blockers are logged at `WARNING` and leave attempt state unchanged. These include duplicate running starts, missing staging contexts, empty staging lists, and invalid staged sources.
+Expected start blockers are logged at `WARNING` and leave attempt state unchanged. These include duplicate running starts, invalid attempt target metadata, missing staging contexts, empty staging lists, and invalid staged sources.
 
 Unexpected orchestration failures are logged at `ERROR` with safe metadata and raised as start orchestration errors. Logs must not include raw source paths, filenames, source text, parsed text, local machine details, or temporary workspace paths.
 
@@ -78,6 +81,7 @@ Staged Batch Start Orchestration interacts with:
 - Source Type Selection Filter, which sets each staged entry's `is_valid` value and error message before Start is requested.
 - Ingestion Attempt State, which owns attempt IDs, lifecycle state, and the `RUNNING` transition.
 - Temporary Ingestion Workspace, which is created through attempt state only after staged batch validation succeeds.
+- App-close cancellation, which uses the active attempt metadata to discard the right draft or staged additions without assuming the staging context ID matches the target ID.
 - Future route handlers or UI state, which can surface the domain errors and active attempt state without owning the orchestration policy.
 - The central logger, which records path-safe start summaries and blockers.
 
@@ -89,15 +93,18 @@ Internal edge cases:
 
 - Missing staging contexts block start before an attempt ID or workspace is created.
 - Empty staging lists block start before an attempt ID or workspace is created.
+- Blank target IDs or unsupported attempt kinds block start before an attempt ID or workspace is created.
 - Any invalid staged entry blocks the whole batch.
 - Invalid-source summaries expose staging entry IDs, source types, and error messages only.
 - Duplicate starts while `RUNNING` leave the original attempt and workspace unchanged.
 - Successful starts preserve the staged entry order by snapshotting entry IDs in current staging order.
+- Successful starts preserve the explicit attempt kind and target ID separately from the staging context ID.
 - Unexpected start failures are wrapped in an orchestration error after safe `ERROR` logging.
 
 Cross-system edge cases:
 
 - Temporary Source Staging State must reject adding more sources only for the staging context tied to the current running attempt.
+- App-close cancellation must use the recorded attempt kind and target ID instead of assuming the staging context ID is the draft ID or committed world ID.
 - The active staged-batch link must not keep a staging context locked after its attempt is no longer running, including after cancellation completion moves the attempt to `PAUSED`.
 - Attempt state remains responsible for rejecting non-running lifecycle transitions outside this start flow.
 - Future file access validation, hashing, parsing, splitting, and commit systems must run only after this start boundary succeeds.
@@ -108,7 +115,8 @@ Cross-system edge cases:
 
 - Start must not create an attempt or temporary workspace for an invalid staged batch.
 - Only one running staged-batch attempt may exist at a time.
-- A running attempt must stay tied to the staging context and staged entry IDs that started it.
+- A running attempt must stay tied to the staging context, staged entry IDs, attempt kind, and target ID that started it.
+- The attempt target ID must remain explicit metadata and must not be inferred from the staging context ID.
 - A staging context tied to the current running attempt must not accept additional sources.
 - A staging context must become editable again after the linked attempt is no longer `RUNNING`.
 - Invalid staged entries must remain staging data; Start must not silently drop them.
@@ -130,6 +138,7 @@ Before editing Staged Batch Start Orchestration, check:
 
 - Whether the change belongs in start orchestration or in attempt state, source staging, file access validation, parser routing, splitting, commit logic, routes, or UI behavior.
 - Whether invalid staged entries still block start without disappearing from staging.
+- Whether attempt target metadata is still required, nonblank, and stored separately from the staging context ID.
 - Whether duplicate starts still leave the original running attempt unchanged.
 - Whether source-add blocking is scoped only to the staging context tied to the current running attempt.
 - Whether active-batch state clears when the linked attempt is no longer running, including after cancellation completion reaches `PAUSED`.

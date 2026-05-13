@@ -17,6 +17,7 @@ Ingestion Attempt Cancellation owns:
 - Holding in-memory cancellation flags keyed by ingestion attempt ID.
 - Initializing a fresh flag when an attempt starts or resumes.
 - Marking the current attempt as cancellation-requested when Pause is requested.
+- Keeping the current cancellation flag requested when app-close cancellation discards an active or pausable attempt.
 - Reporting whether cancellation has been requested for a specific attempt ID.
 - Clearing attempt flags after terminal completion or terminal cancellation.
 
@@ -36,6 +37,8 @@ When an ingestion attempt starts, the cancellation flag for that attempt ID is i
 Future ingestion work can check the flag between work-launch boundaries. Current durable commit boundaries also check it before creating or mutating world storage. If cancellation is requested, commit is rejected before source files, source rows, chunk rows, world folders, app index rows, or recent-use timestamps are written. If a late completion result returns for the same cancelled attempt, Ingestion Attempt State rejects it before it can move the attempt to `COMPLETE`.
 
 If cooperative cancellation finishes with staged work remaining, the attempt can become `PAUSED` while the cancellation flag remains true. Resume reinitializes the same attempt ID's flag to not requested so work can continue. Terminal cancellation to `IDLE` and successful completion to `COMPLETE` clear the flag.
+
+If the app closes while an attempt is `RUNNING`, `STOPPING`, or `PAUSED`, app-close cancellation requests or preserves the same cancellation flag and discards the attempt instead of treating it as a successful commit or restart-resumable pause. This keeps late completion and commit guards from writing durable data after shutdown cancellation has begun.
 
 ## Inputs
 
@@ -59,6 +62,8 @@ Repeated Pause while an attempt is already `STOPPING` is an idempotent no-op at 
 
 Invalid pause requests from non-running states are rejected by Ingestion Attempt State and do not set a new flag. This system does not kill workers or discard staged files; callers must cooperatively check the flag and stop launching additional work.
 
+App-close cancellation uses the same attempt-scoped signal but has a different lifecycle meaning from Pause. Pause can lead to same-process resume after cooperative cancellation finishes. App close discards the attempt and leaves startup cleanup to remove abandoned temporary workspace folders.
+
 ## Failure Behavior
 
 If marking the cancellation flag fails, Ingestion Attempt State logs the failure at `ERROR`, leaves the attempt `RUNNING`, and raises a cancellation error so callers do not believe cancellation was requested when the signal was not recorded.
@@ -71,6 +76,7 @@ Ingestion Attempt Cancellation interacts with:
 
 - Ingestion Attempt State, which initializes, sets, clears, and resumes cancellation state as part of lifecycle transitions.
 - Staged Batch Start Orchestration, which creates the running attempt that receives an initialized cancellation flag.
+- App-close cancellation, which requests or preserves cancellation before discarding draft or staged state.
 - New World Batch Commit and Existing World Batch Commit, which reject cancelled attempts before durable commit work begins.
 - Future ingestion orchestration, which can check the flag before starting parsing, hashing, splitting, provider calls, or commit work.
 - The central logger, which records pause-request and flag-failure behavior without user-owned content.
@@ -86,6 +92,7 @@ Internal edge cases:
 - Repeated Pause while `STOPPING` leaves state and flag unchanged.
 - Resume clears the previous cancellation request for the same attempt ID.
 - Terminal cancellation and successful completion clear the attempt flag.
+- App-close cancellation keeps the current attempt cancelled so late completion or commit work remains rejected.
 - Missing or unknown attempt IDs read as not cancelled.
 - Invalid blank attempt IDs are rejected.
 
@@ -95,6 +102,7 @@ Cross-system edge cases:
 - A paused attempt may still have staged work and a temporary workspace even though cancellation has been requested.
 - Future orchestration must check the flag between units of work because this system does not interrupt running parser, splitter, provider, or file-copy calls by itself.
 - Late completion remains rejected by Ingestion Attempt State once Pause has moved the attempt to `STOPPING`, including after cancellation completion exposes `PAUSED`.
+- App-close cancellation must use this signal before draft or staging state is discarded so final commit boundaries cannot race into durable writes.
 
 ## Invariants
 
@@ -104,6 +112,7 @@ Cross-system edge cases:
 - A cancellation flag failure must not silently move the attempt to `STOPPING`.
 - Commit boundaries must not write durable world data for an attempt whose cancellation flag is requested.
 - Resuming a paused attempt must clear the cancellation signal before work continues.
+- App-close cancellation must not clear the cancellation signal in a way that permits late commit.
 - Late completion from a cancelled current attempt must not clear the cancellation signal or clean the paused workspace.
 - The system must not delete staged files, committed files, user-selected files, workspaces, or database rows.
 - No database migration is required for ingestion attempt cancellation.

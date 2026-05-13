@@ -6,6 +6,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed app shutdown so active ingestion attempts are cancelled, draft/staged state is discarded, and abandoned attempt workspaces are cleaned on next startup.
+- Changed ingestion concept docs to describe app-close attempt cancellation, explicit attempt targets, and startup cleanup consistency.
 - Changed Pause requests so running ingestion attempts enter stopping, expose paused only after cancellation completion, preserve Deep Pause workspaces, and reject late results from cancelled attempts.
 - Changed staged source access and parser read failures so current missing or unreadable source files fail with path-safe warnings.
 - Changed main chunk generation to return separate previous-context overlap for each chunk.
