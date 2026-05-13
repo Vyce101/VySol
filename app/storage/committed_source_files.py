@@ -24,6 +24,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class PreparedCommittedSourceFile:
+    staging_entry_id: str
     source_id: str
     original_filename: str
     stored_path: str
@@ -65,6 +66,7 @@ def prepare_committed_source_file(
     ensure_path_is_inside_directory(destination_path, sources_directory)
 
     return PreparedCommittedSourceFile(
+        staging_entry_id=hashed_source.staged_source.staging_entry_id,
         source_id=source_id,
         original_filename=original_filename,
         stored_path=get_world_source_stored_path(destination_path.name),
