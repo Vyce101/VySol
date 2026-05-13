@@ -123,6 +123,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 staged_work_remaining=True,
             ),
         )
+        self.assertNotEqual(state.status, IngestionAttemptStatus.PAUSED)
         self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
 
     def test_repeated_request_stop_while_stopping_returns_current_state(self) -> None:
@@ -166,12 +167,15 @@ class IngestionAttemptStateTests(unittest.TestCase):
         registry = IngestionAttemptStateRegistry()
         running_state = registry.start_attempt()
         workspace = registry.get_attempt_workspace(running_state.attempt_id)
+        self.assertIsNotNone(workspace)
         registry.request_stop()
 
-        state = registry.finish_cancellation(
-            running_state.attempt_id,
-            staged_work_remaining=True,
-        )
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            state = registry.finish_cancellation(
+                running_state.attempt_id,
+                staged_work_remaining=True,
+            )
+
         paused_workspace = registry.get_attempt_workspace(running_state.attempt_id)
 
         self.assertEqual(
@@ -183,7 +187,14 @@ class IngestionAttemptStateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(paused_workspace, workspace)
+        self.assertTrue(workspace.workspace_path.exists())
         self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
+        logger.info.assert_any_call(
+            "Ingestion cancellation completed: "
+            "attempt_id=%s staged_work_remaining=%s",
+            running_state.attempt_id,
+            True,
+        )
 
     def test_finish_cancellation_without_remaining_work_moves_to_idle(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -252,6 +263,64 @@ class IngestionAttemptStateTests(unittest.TestCase):
         self.assertFalse(workspace.workspace_path.exists())
         self.assertIsNone(registry.get_attempt_workspace(running_state.attempt_id))
         self.assertFalse(registry.is_cancellation_requested(running_state.attempt_id))
+
+    def test_late_completion_after_stop_request_is_rejected(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
+        self.assertIsNotNone(workspace)
+        stopping_state = registry.request_stop()
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                registry.complete_attempt(running_state.attempt_id)
+
+        self.assertEqual(registry.get_state(), stopping_state)
+        self.assertEqual(
+            registry.get_attempt_workspace(running_state.attempt_id),
+            workspace,
+        )
+        self.assertTrue(workspace.workspace_path.exists())
+        self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
+        logger.warning.assert_called_once_with(
+            "Rejected late ingestion attempt result after cancellation: "
+            "attempt_id=%s status=%s",
+            running_state.attempt_id,
+            IngestionAttemptStatus.STOPPING,
+        )
+        logger.info.assert_not_called()
+        logger.error.assert_not_called()
+
+    def test_late_completion_after_pause_is_rejected(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        workspace = registry.get_attempt_workspace(running_state.attempt_id)
+        self.assertIsNotNone(workspace)
+        registry.request_stop()
+        paused_state = registry.finish_cancellation(
+            running_state.attempt_id,
+            staged_work_remaining=True,
+        )
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                registry.complete_attempt(running_state.attempt_id)
+
+        self.assertEqual(registry.get_state(), paused_state)
+        self.assertEqual(
+            registry.get_attempt_workspace(running_state.attempt_id),
+            workspace,
+        )
+        self.assertTrue(workspace.workspace_path.exists())
+        self.assertTrue(registry.is_cancellation_requested(running_state.attempt_id))
+        logger.warning.assert_called_once_with(
+            "Rejected late ingestion attempt result after cancellation: "
+            "attempt_id=%s status=%s",
+            running_state.attempt_id,
+            IngestionAttemptStatus.PAUSED,
+        )
+        logger.info.assert_not_called()
+        logger.error.assert_not_called()
 
     def test_stale_attempt_id_cannot_complete_newer_attempt(self) -> None:
         registry = IngestionAttemptStateRegistry()

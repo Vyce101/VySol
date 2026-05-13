@@ -202,6 +202,35 @@ class IngestionAttemptStartTests(unittest.TestCase):
             )
             self.assertNotIn(private_path, repr(logger.method_calls))
 
+    def test_adding_sources_after_pause_is_allowed(self) -> None:
+        with make_start_registry() as registries:
+            registries.source_staging_registry.replace_staging_state(
+                "draft-1",
+                [make_entry("entry-1", "one.txt")],
+            )
+
+            with patch("app.ingestion.attempt_state.uuid4", return_value="attempt-1"):
+                active_attempt = registries.start_registry.start_staged_batch_attempt(
+                    "draft-1",
+                )
+
+            registries.attempt_state_registry.request_stop()
+            registries.attempt_state_registry.finish_cancellation(
+                active_attempt.attempt_state.attempt_id,
+                staged_work_remaining=True,
+            )
+
+            updated_state = registries.source_staging_registry.add_source_file_paths(
+                "draft-1",
+                [Path("two.txt")],
+            )
+
+            self.assertIsNotNone(updated_state)
+            self.assertEqual(len(updated_state.entries), 2)
+            self.assertIsNone(
+                registries.active_batch_registry.get_active_staged_batch_attempt()
+            )
+
     def test_unexpected_start_failure_logs_error_without_raw_path(self) -> None:
         private_path = str(Path("private") / "attempt")
 
