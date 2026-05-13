@@ -14,6 +14,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added atomic existing-world batch commits so new source batches append only after source records, chunks, source copies, and cleanup-safe commit work succeed.
+- Added an Existing World Batch Commit concept page.
 - Added atomic new-world batch commits so a new world appears only after its first source batch, chunks, source copies, world database, and app index record are valid.
 - Added a New World Batch Commit concept page.
 - Added committed source file copy preparation so accepted source files can be safely copied into a world's `sources/` folder during commit.

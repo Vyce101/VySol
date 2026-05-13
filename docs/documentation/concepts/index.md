@@ -18,6 +18,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Committed World Index Storage](committed-world-index-storage.md)
 - [Draft World Splitter Settings](draft-world-splitter-settings.md)
 - [EPUB Parser](epub-parser.md)
+- [Existing World Batch Commit](existing-world-batch-commit.md)
 - [Font Upload Validation](font-upload-validation.md)
 - [Global App Storage](global-app-storage.md)
 - [Image Upload Validation](image-upload-validation.md)
