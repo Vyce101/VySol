@@ -141,6 +141,12 @@ class IngestionAttemptStateRegistry:
             IngestionAttemptStatus.STOPPING,
         )
 
+        logger.info(
+            "Ingestion cancellation completed: attempt_id=%s staged_work_remaining=%s",
+            attempt_id,
+            staged_work_remaining,
+        )
+
         if staged_work_remaining:
             return self._set_state(
                 IngestionAttemptState(
@@ -181,6 +187,13 @@ class IngestionAttemptStateRegistry:
         )
 
     def complete_attempt(self, attempt_id: str) -> IngestionAttemptState:
+        if (
+            self._state.attempt_id == attempt_id
+            and self._state.status
+            in {IngestionAttemptStatus.STOPPING, IngestionAttemptStatus.PAUSED}
+        ):
+            reject_late_cancelled_result(attempt_id, self._state.status)
+
         self._validate_current_attempt_result(
             attempt_id,
             IngestionAttemptStatus.RUNNING,
@@ -264,6 +277,21 @@ def validate_attempt_state(state: IngestionAttemptState) -> IngestionAttemptStat
 def reject_stale_result() -> NoReturn:
     logger.warning("Rejected stale ingestion attempt result.")
     raise StaleIngestionAttemptResultError("Rejected stale ingestion attempt result.")
+
+
+def reject_late_cancelled_result(
+    attempt_id: str,
+    status: IngestionAttemptStatus,
+) -> NoReturn:
+    logger.warning(
+        "Rejected late ingestion attempt result after cancellation: "
+        "attempt_id=%s status=%s",
+        attempt_id,
+        status,
+    )
+    raise InvalidIngestionAttemptTransitionError(
+        "Cancelled ingestion attempts cannot complete."
+    )
 
 
 def reject_invalid_transition(message: str) -> NoReturn:
