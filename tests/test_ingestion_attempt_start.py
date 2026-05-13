@@ -4,8 +4,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchAttemptError,
     ActiveStagedBatchRegistry,
     RunningStagedBatchSourceAddError,
+    StagedBatchAttemptKind,
+    StagedBatchAttemptTarget,
 )
 from app.ingestion.attempt_start import (
     DuplicateIngestionAttemptStartError,
@@ -42,6 +45,7 @@ class IngestionAttemptStartTests(unittest.TestCase):
             ):
                 active_attempt = registries.start_registry.start_staged_batch_attempt(
                     "draft-1",
+                    make_new_world_target("draft-world-1"),
                 )
 
             self.assertEqual(
@@ -50,6 +54,11 @@ class IngestionAttemptStartTests(unittest.TestCase):
             )
             self.assertEqual(active_attempt.attempt_state.attempt_id, "attempt-1")
             self.assertEqual(active_attempt.staging_context_id, "draft-1")
+            self.assertEqual(
+                active_attempt.attempt_kind,
+                StagedBatchAttemptKind.NEW_WORLD,
+            )
+            self.assertEqual(active_attempt.target_id, "draft-world-1")
             self.assertEqual(active_attempt.staging_entry_ids, ("entry-1", "entry-2"))
             self.assertEqual(
                 registries.active_batch_registry.get_active_staged_batch_attempt(),
@@ -91,7 +100,10 @@ class IngestionAttemptStartTests(unittest.TestCase):
 
             with patch("app.ingestion.attempt_start.logger") as logger:
                 with self.assertRaises(StagedBatchStartValidationError) as raised:
-                    registries.start_registry.start_staged_batch_attempt("draft-1")
+                    registries.start_registry.start_staged_batch_attempt(
+                        "draft-1",
+                        make_new_world_target("draft-world-1"),
+                    )
 
             self.assertEqual(
                 raised.exception.invalid_staged_sources,
@@ -121,7 +133,10 @@ class IngestionAttemptStartTests(unittest.TestCase):
 
             with patch("app.ingestion.attempt_start.logger") as logger:
                 with self.assertRaises(StagedBatchStartValidationError):
-                    registries.start_registry.start_staged_batch_attempt("draft-1")
+                    registries.start_registry.start_staged_batch_attempt(
+                        "draft-1",
+                        make_new_world_target("draft-world-1"),
+                    )
 
             self.assertEqual(
                 registries.attempt_state_registry.get_state().status,
@@ -145,6 +160,7 @@ class IngestionAttemptStartTests(unittest.TestCase):
             with patch("app.ingestion.attempt_state.uuid4", return_value="attempt-1"):
                 first_attempt = registries.start_registry.start_staged_batch_attempt(
                     "draft-1",
+                    make_new_world_target("draft-world-1"),
                 )
 
             first_workspace = registries.attempt_state_registry.get_attempt_workspace(
@@ -153,7 +169,10 @@ class IngestionAttemptStartTests(unittest.TestCase):
 
             with patch("app.ingestion.attempt_start.logger") as logger:
                 with self.assertRaises(DuplicateIngestionAttemptStartError):
-                    registries.start_registry.start_staged_batch_attempt("draft-1")
+                    registries.start_registry.start_staged_batch_attempt(
+                        "draft-1",
+                        make_new_world_target("draft-world-1"),
+                    )
 
             self.assertEqual(
                 registries.active_batch_registry.get_active_staged_batch_attempt(),
@@ -182,7 +201,10 @@ class IngestionAttemptStartTests(unittest.TestCase):
             )
 
             with patch("app.ingestion.attempt_state.uuid4", return_value="attempt-1"):
-                registries.start_registry.start_staged_batch_attempt("draft-1")
+                registries.start_registry.start_staged_batch_attempt(
+                    "draft-1",
+                    make_new_world_target("draft-world-1"),
+                )
 
             with patch("app.ingestion.staging.source_staging_state.logger") as logger:
                 with self.assertRaises(RunningStagedBatchSourceAddError):
@@ -212,6 +234,7 @@ class IngestionAttemptStartTests(unittest.TestCase):
             with patch("app.ingestion.attempt_state.uuid4", return_value="attempt-1"):
                 active_attempt = registries.start_registry.start_staged_batch_attempt(
                     "draft-1",
+                    make_new_world_target("draft-world-1"),
                 )
 
             registries.attempt_state_registry.request_stop()
@@ -249,13 +272,39 @@ class IngestionAttemptStartTests(unittest.TestCase):
                 patch("app.ingestion.attempt_start.logger") as logger,
             ):
                 with self.assertRaises(IngestionAttemptStartOrchestrationError):
-                    registries.start_registry.start_staged_batch_attempt("draft-1")
+                    registries.start_registry.start_staged_batch_attempt(
+                        "draft-1",
+                        make_new_world_target("draft-world-1"),
+                    )
 
             logger.error.assert_called_once()
             self.assertNotIn(private_path, repr(logger.method_calls))
             self.assertEqual(
                 registries.attempt_state_registry.get_state().status,
                 IngestionAttemptStatus.IDLE,
+            )
+
+    def test_invalid_attempt_target_blocks_before_attempt_is_created(self) -> None:
+        with make_start_registry() as registries:
+            registries.source_staging_registry.replace_staging_state(
+                "draft-1",
+                [make_entry("entry-1", "one.txt")],
+            )
+
+            with patch("app.ingestion.active_staged_batch.logger") as logger:
+                with self.assertRaises(ActiveStagedBatchAttemptError):
+                    registries.start_registry.start_staged_batch_attempt(
+                        "draft-1",
+                        "draft-world-1",  # type: ignore[arg-type]
+                    )
+
+            self.assertEqual(
+                registries.attempt_state_registry.get_state().status,
+                IngestionAttemptStatus.IDLE,
+            )
+            logger.warning.assert_called_once_with(
+                "Invalid staged batch attempt target: %s",
+                "Staged batch attempt target is invalid.",
             )
 
 
@@ -304,6 +353,10 @@ def make_entry(
         is_valid=is_valid,
         error_message=error_message,
     )
+
+
+def make_new_world_target(target_id: str) -> StagedBatchAttemptTarget:
+    return StagedBatchAttemptTarget(StagedBatchAttemptKind.NEW_WORLD, target_id)
 
 
 if __name__ == "__main__":

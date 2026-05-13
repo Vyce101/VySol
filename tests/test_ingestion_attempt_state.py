@@ -4,6 +4,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.draft_worlds.registry import DraftWorldRegistry
+from app.draft_worlds.splitter_settings import SplitterSettings
+from app.ingestion.active_staged_batch import (
+    ActiveStagedBatchRegistry,
+    StagedBatchAttemptKind,
+    StagedBatchAttemptTarget,
+)
+from app.ingestion.app_close_cancellation import AppCloseAttemptCancellationCoordinator
+from app.ingestion.attempt_cancellation import clear_attempt_cancellation
+from app.ingestion.attempt_start import IngestionAttemptStartRegistry
 from app.ingestion.attempt_state import (
     IngestionAttemptCancellationError,
     IngestionAttemptCancellationRegistry,
@@ -13,16 +23,31 @@ from app.ingestion.attempt_state import (
     IngestionAttemptWorkspaceError,
     InvalidIngestionAttemptTransitionError,
     StaleIngestionAttemptResultError,
+    get_ingestion_attempt_cancellation_registry,
 )
 from app.ingestion.attempt_workspace import (
+    AbandonedIngestionWorkspaceCleanupError,
     IngestionAttemptWorkspaceRegistry,
     WORKSPACE_DIRECTORY_PREFIX,
     cleanup_abandoned_attempt_workspaces,
+)
+from app.ingestion.new_world_commit import (
+    NewWorldBatchValidationError,
+    commit_new_world_batch,
+)
+from app.ingestion.staging.source_staging_state import (
+    SourceStagingStateRegistry,
+    TemporarySourceStagingEntry,
 )
 from app.storage.database import bootstrap_global_database, close_global_connection
 from app.storage.migrations import get_schema_version
 from app.storage.paths import get_worlds_directory
 from app.storage.world_migrations import apply_world_migrations, get_world_schema_version
+from app.storage.worlds import (
+    NewCommittedWorld,
+    create_committed_world,
+    get_committed_world,
+)
 
 
 class IngestionAttemptStateTests(unittest.TestCase):
@@ -520,13 +545,44 @@ class IngestionAttemptStateTests(unittest.TestCase):
             committed_sources.mkdir(parents=True)
             (committed_sources / "source.txt").write_text("committed", encoding="utf-8")
 
-            cleanup_count = cleanup_abandoned_attempt_workspaces(workspace_parent)
+            with patch("app.ingestion.attempt_workspace.logger") as logger:
+                cleanup_count = cleanup_abandoned_attempt_workspaces(workspace_parent)
 
             self.assertEqual(cleanup_count, 1)
             self.assertFalse(abandoned_workspace.exists())
             self.assertTrue(unrelated_directory.exists())
             self.assertTrue(committed_sources.exists())
             self.assertTrue((committed_sources / "source.txt").exists())
+            logger.info.assert_any_call(
+                "Cleaned abandoned temporary ingestion workspaces: count=%s",
+                1,
+            )
+
+    def test_startup_cleanup_failure_logs_error_and_critical_inconsistency(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            workspace_parent = Path(temp_directory) / "ingestion-workspaces"
+            abandoned_workspace = workspace_parent / f"{WORKSPACE_DIRECTORY_PREFIX}old"
+            abandoned_workspace.mkdir(parents=True)
+
+            with (
+                patch(
+                    "app.ingestion.attempt_workspace.shutil.rmtree",
+                    side_effect=OSError,
+                ),
+                patch("app.ingestion.attempt_workspace.logger") as logger,
+            ):
+                with self.assertRaises(AbandonedIngestionWorkspaceCleanupError):
+                    cleanup_abandoned_attempt_workspaces(workspace_parent)
+
+            logger.error.assert_called_once()
+            logger.critical.assert_called_once_with(
+                "Unrecoverable startup cleanup inconsistency: "
+                "remaining_workspace_count=%s",
+                1,
+            )
+            self.assertTrue(abandoned_workspace.exists())
 
     def test_attempt_state_does_not_change_global_or_world_database_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
@@ -572,9 +628,247 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 close_global_connection()
 
 
+class AppCloseAttemptCancellationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        close_global_connection()
+
+    def test_app_close_cancels_new_world_attempt_and_discards_draft_state(
+        self,
+    ) -> None:
+        with make_app_close_fixture() as fixture:
+            draft_world = fixture.draft_world_registry.create_draft_world()
+            fixture.source_staging_registry.replace_staging_state(
+                "staging-1",
+                [make_staging_entry("entry-1", "one.txt")],
+            )
+            active_attempt = fixture.start_registry.start_staged_batch_attempt(
+                "staging-1",
+                StagedBatchAttemptTarget(
+                    StagedBatchAttemptKind.NEW_WORLD,
+                    draft_world.draft_id,
+                ),
+            )
+            attempt_id = active_attempt.attempt_state.attempt_id
+            workspace = fixture.attempt_state_registry.get_attempt_workspace(attempt_id)
+            self.assertIsNotNone(workspace)
+
+            with patch("app.ingestion.app_close_cancellation.logger") as logger:
+                cancelled_state = fixture.coordinator.cancel_for_app_close()
+
+            self.assertEqual(cancelled_state.status, IngestionAttemptStatus.STOPPING)
+            self.assertFalse(cancelled_state.staged_work_remaining)
+            self.assertTrue(
+                fixture.attempt_state_registry.is_cancellation_requested(attempt_id)
+            )
+            self.assertIsNone(
+                fixture.source_staging_registry.get_staging_state("staging-1")
+            )
+            self.assertIsNone(
+                fixture.draft_world_registry.get_draft_world(draft_world.draft_id)
+            )
+            self.assertIsNone(
+                fixture.active_batch_registry.get_current_staged_batch_attempt()
+            )
+            self.assertIsNone(
+                fixture.attempt_state_registry.get_attempt_workspace(attempt_id)
+            )
+            self.assertTrue(workspace.workspace_path.exists())
+            logger.info.assert_called_once_with(
+                "Cancelled ingestion attempt for app close: "
+                "attempt_id=%s attempt_kind=%s staging_context_id=%s source_count=%s",
+                attempt_id,
+                StagedBatchAttemptKind.NEW_WORLD,
+                "staging-1",
+                1,
+            )
+
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                fixture.attempt_state_registry.complete_attempt(attempt_id)
+
+            with self.assertRaises(NewWorldBatchValidationError):
+                try:
+                    commit_new_world_batch(
+                        make_new_world_request(),
+                        make_splitter_settings(),
+                        workspace,
+                        (),
+                    )
+                finally:
+                    clear_attempt_cancellation(attempt_id)
+
+    def test_app_close_discards_existing_world_staging_without_changing_world(
+        self,
+    ) -> None:
+        with make_app_close_fixture() as fixture:
+            app_connection = bootstrap_global_database(
+                fixture.repo_root / "user" / "data" / "app.sqlite",
+            )
+            committed_world = create_committed_world(
+                make_new_world_request("Existing World"),
+                app_connection,
+            )
+            fixture.source_staging_registry.replace_staging_state(
+                "existing-staging-1",
+                [make_staging_entry("entry-1", "one.txt")],
+            )
+            active_attempt = fixture.start_registry.start_staged_batch_attempt(
+                "existing-staging-1",
+                StagedBatchAttemptTarget(
+                    StagedBatchAttemptKind.EXISTING_WORLD,
+                    committed_world.world_id,
+                ),
+            )
+
+            fixture.coordinator.cancel_for_app_close()
+
+            self.assertTrue(
+                fixture.attempt_state_registry.is_cancellation_requested(
+                    active_attempt.attempt_state.attempt_id,
+                )
+            )
+            self.assertIsNone(
+                fixture.source_staging_registry.get_staging_state(
+                    "existing-staging-1",
+                )
+            )
+            self.assertEqual(
+                get_committed_world(committed_world.world_id, app_connection),
+                committed_world,
+            )
+
+    def test_app_close_discards_stopping_and_paused_attempt_resume_state(self) -> None:
+        for pause_before_close in (False, True):
+            with self.subTest(pause_before_close=pause_before_close):
+                with make_app_close_fixture() as fixture:
+                    fixture.source_staging_registry.replace_staging_state(
+                        "staging-1",
+                        [make_staging_entry("entry-1", "one.txt")],
+                    )
+                    draft_world = fixture.draft_world_registry.create_draft_world()
+                    active_attempt = fixture.start_registry.start_staged_batch_attempt(
+                        "staging-1",
+                        StagedBatchAttemptTarget(
+                            StagedBatchAttemptKind.NEW_WORLD,
+                            draft_world.draft_id,
+                        ),
+                    )
+                    attempt_id = active_attempt.attempt_state.attempt_id
+                    workspace = fixture.attempt_state_registry.get_attempt_workspace(
+                        attempt_id,
+                    )
+                    fixture.attempt_state_registry.request_stop()
+                    if pause_before_close:
+                        fixture.attempt_state_registry.finish_cancellation(
+                            attempt_id,
+                            staged_work_remaining=True,
+                        )
+
+                    cancelled_state = fixture.coordinator.cancel_for_app_close()
+
+                    self.assertEqual(
+                        cancelled_state.status,
+                        IngestionAttemptStatus.STOPPING,
+                    )
+                    self.assertFalse(cancelled_state.staged_work_remaining)
+                    self.assertIsNone(
+                        fixture.source_staging_registry.get_staging_state("staging-1")
+                    )
+                    self.assertIsNone(
+                        fixture.draft_world_registry.get_draft_world(
+                            draft_world.draft_id,
+                        )
+                    )
+                    self.assertIsNone(
+                        fixture.attempt_state_registry.get_attempt_workspace(attempt_id)
+                    )
+                    self.assertIsNotNone(workspace)
+                    self.assertTrue(workspace.workspace_path.exists())
+                    with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                        fixture.attempt_state_registry.resume_attempt()
+
+
 class FailingCancellationRegistry(IngestionAttemptCancellationRegistry):
     def request_cancellation(self, attempt_id: str) -> None:
         raise RuntimeError("flag failed")
+
+
+class AppCloseFixture:
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        workspace_registry = IngestionAttemptWorkspaceRegistry(
+            repo_root / "user" / "data" / "ingestion-workspaces",
+        )
+        self.attempt_state_registry = IngestionAttemptStateRegistry(
+            workspace_registry,
+            get_ingestion_attempt_cancellation_registry(),
+        )
+        self.active_batch_registry = ActiveStagedBatchRegistry(
+            self.attempt_state_registry.get_state,
+        )
+        self.source_staging_registry = SourceStagingStateRegistry(
+            self.active_batch_registry,
+        )
+        self.draft_world_registry = DraftWorldRegistry()
+        self.start_registry = IngestionAttemptStartRegistry(
+            self.attempt_state_registry,
+            self.source_staging_registry,
+            self.active_batch_registry,
+        )
+        self.coordinator = AppCloseAttemptCancellationCoordinator(
+            self.attempt_state_registry,
+            self.active_batch_registry,
+            self.source_staging_registry,
+            self.draft_world_registry,
+        )
+
+
+class AppCloseFixtureContext:
+    def __enter__(self) -> AppCloseFixture:
+        self._temp_directory = tempfile.TemporaryDirectory()
+        self.repo_root = Path(self._temp_directory.name) / "repo"
+        self._repo_root_patch = patch("app.storage.paths.REPO_ROOT", self.repo_root)
+        self._repo_root_patch.start()
+        return AppCloseFixture(self.repo_root)
+
+    def __exit__(self, *args: object) -> None:
+        close_global_connection()
+        self._repo_root_patch.stop()
+        self._temp_directory.cleanup()
+
+
+def make_app_close_fixture() -> AppCloseFixtureContext:
+    return AppCloseFixtureContext()
+
+
+def make_staging_entry(
+    staging_entry_id: str,
+    source_file_path: str,
+) -> TemporarySourceStagingEntry:
+    return TemporarySourceStagingEntry(
+        staging_entry_id=staging_entry_id,
+        source_file_path=Path(source_file_path),
+        source_file_type="txt",
+        is_valid=True,
+        error_message=None,
+    )
+
+
+def make_new_world_request(display_name: str = "Atomic World") -> NewCommittedWorld:
+    return NewCommittedWorld(
+        display_name=display_name,
+        description="Committed after first batch",
+        background_asset_id="builtin-image-main-world",
+        font_asset_id="builtin-font-inter",
+    )
+
+
+def make_splitter_settings() -> SplitterSettings:
+    return SplitterSettings(
+        chunk_size=5,
+        max_lookback_size=0,
+        overlap_size=2,
+        splitter_version="ignored-caller-version",
+    )
 
 
 if __name__ == "__main__":
