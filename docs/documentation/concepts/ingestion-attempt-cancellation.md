@@ -33,7 +33,7 @@ Ingestion Attempt Cancellation does not own:
 
 When an ingestion attempt starts, the cancellation flag for that attempt ID is initialized to not requested. When Pause is requested during `RUNNING`, Ingestion Attempt State asks this system to mark cancellation requested before moving the attempt to `STOPPING`.
 
-Future ingestion work can check the flag between work-launch boundaries. Current durable commit boundaries also check it before creating or mutating world storage. If cancellation is requested, commit is rejected before source files, source rows, chunk rows, world folders, app index rows, or recent-use timestamps are written.
+Future ingestion work can check the flag between work-launch boundaries. Current durable commit boundaries also check it before creating or mutating world storage. If cancellation is requested, commit is rejected before source files, source rows, chunk rows, world folders, app index rows, or recent-use timestamps are written. If a late completion result returns for the same cancelled attempt, Ingestion Attempt State rejects it before it can move the attempt to `COMPLETE`.
 
 If cooperative cancellation finishes with staged work remaining, the attempt can become `PAUSED` while the cancellation flag remains true. Resume reinitializes the same attempt ID's flag to not requested so work can continue. Terminal cancellation to `IDLE` and successful completion to `COMPLETE` clear the flag.
 
@@ -94,7 +94,7 @@ Cross-system edge cases:
 - Commit boundaries must check cancellation before creating or mutating durable world storage.
 - A paused attempt may still have staged work and a temporary workspace even though cancellation has been requested.
 - Future orchestration must check the flag between units of work because this system does not interrupt running parser, splitter, provider, or file-copy calls by itself.
-- Late completion remains rejected by Ingestion Attempt State once Pause has moved the attempt to `STOPPING`.
+- Late completion remains rejected by Ingestion Attempt State once Pause has moved the attempt to `STOPPING`, including after cancellation completion exposes `PAUSED`.
 
 ## Invariants
 
@@ -104,6 +104,7 @@ Cross-system edge cases:
 - A cancellation flag failure must not silently move the attempt to `STOPPING`.
 - Commit boundaries must not write durable world data for an attempt whose cancellation flag is requested.
 - Resuming a paused attempt must clear the cancellation signal before work continues.
+- Late completion from a cancelled current attempt must not clear the cancellation signal or clean the paused workspace.
 - The system must not delete staged files, committed files, user-selected files, workspaces, or database rows.
 - No database migration is required for ingestion attempt cancellation.
 

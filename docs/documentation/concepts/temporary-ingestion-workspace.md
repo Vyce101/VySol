@@ -39,7 +39,7 @@ When a caller starts ingestion from an allowed state, Ingestion Attempt State ge
 
 The workspace registry creates an isolated directory under the app-owned ingestion workspace area, records it under the current attempt ID, logs creation without the local path, and returns a `Path` to backend callers that need scratch storage.
 
-If the attempt is stopped and cancellation finishes with staged work remaining, the attempt becomes `PAUSED` and the workspace remains associated with that same attempt ID. Resume verifies that the workspace still exists for the paused attempt ID before the state returns to `RUNNING`.
+If the attempt is stopped and cancellation finishes with staged work remaining, the attempt becomes `PAUSED` and the workspace remains associated with that same attempt ID. This Deep Pause behavior preserves attempt-local intermediate data so Resume can continue from the same temporary work rather than restarting from selected source files. Resume verifies that the workspace still exists for the paused attempt ID before the state returns to `RUNNING`.
 
 If cancellation finishes with no staged work remaining, the attempt returns to `IDLE` and the workspace is removed. If a running attempt completes successfully, the attempt moves to `COMPLETE` and the workspace is removed.
 
@@ -65,6 +65,8 @@ Workspace ownership state is in memory only and is tied to the current app proce
 Resume keeps the same attempt ID and the same workspace. If the paused attempt no longer has a workspace, resume is rejected so future ingestion code does not continue with missing scratch storage.
 
 Abandoned workspaces from an earlier process are not resumed. Startup cleanup removes them before a new app session continues.
+
+Late completion results from a cancelled attempt must not remove the paused workspace. Only successful completion from `RUNNING`, terminal cancellation to `IDLE`, registry lifetime cleanup, and startup cleanup are allowed to remove managed temporary workspaces.
 
 ## Failure Behavior
 
@@ -102,6 +104,7 @@ Internal edge cases:
 - Successful completion removes the workspace.
 - Terminal cancellation to `IDLE` removes the workspace.
 - Cancellation to `PAUSED` preserves the workspace for same-process resume.
+- Late completion after cancellation is rejected by Ingestion Attempt State and does not remove the paused workspace.
 - Registry cleanup removes managed temporary workspaces when the registry lifetime ends.
 - Missing already-cleaned workspaces are treated as no-op cleanup.
 - Workspace creation logs omit full local temporary paths.
@@ -111,6 +114,7 @@ Cross-system edge cases:
 - Future ingestion orchestration must use the current attempt ID when requesting the workspace.
 - Temporary parsed output preparation may use the workspace identity, but must not write parsed source text into the workspace.
 - Future resume code must not create a new workspace for the same paused attempt.
+- Future cancellation completion code must not clean the workspace when the attempt becomes `PAUSED`.
 - Startup cleanup must only remove abandoned temporary ingestion workspace folders, not committed world folders, committed sources, uploaded assets, or source files outside the temporary workspace area.
 - Future source commit work must not treat workspace files as committed source files.
 - Future failed-attempt handling must not expose workspace contents as durable world data.
@@ -125,6 +129,7 @@ Cross-system edge cases:
 - Workspaces must stay outside committed world source storage.
 - Workspace state must remain in memory for this system.
 - `PAUSED` workspaces must remain available for same-process resume.
+- Rejected late completion results must not remove `PAUSED` workspaces.
 - Terminal cancellation, successful completion, and startup cleanup must remove only temporary ingestion workspaces.
 - The system must not parse, hash, copy, commit, persist, create chunks, or assign book numbers for sources.
 - No database migration is required for temporary ingestion workspace behavior.

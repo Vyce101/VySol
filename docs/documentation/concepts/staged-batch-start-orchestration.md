@@ -40,7 +40,7 @@ If no attempt is running, the orchestrator reads the staging context. A missing 
 
 When every staged entry is valid, the orchestrator starts a fresh ingestion attempt through Ingestion Attempt State. That creates the attempt ID, creates the temporary workspace, and moves the state to `RUNNING`. The orchestrator then records the active staged-batch link with the attempt state, staging context ID, and staged entry ID snapshot.
 
-While that active link points to the current running attempt, Temporary Source Staging State blocks adding more sources to the same staging context. This keeps the batch that started the attempt stable until the running attempt is no longer current.
+While that active link points to the current running attempt, Temporary Source Staging State blocks adding more sources to the same staging context. This keeps the batch that started the attempt stable until the running attempt is no longer current. Once cooperative cancellation has finished and the attempt is `PAUSED`, the active running link clears and staged sources can be edited again while the paused attempt keeps its Deep Pause workspace.
 
 ## Inputs
 
@@ -98,7 +98,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Temporary Source Staging State must reject adding more sources only for the staging context tied to the current running attempt.
-- The active staged-batch link must not keep a staging context locked after its attempt is no longer running.
+- The active staged-batch link must not keep a staging context locked after its attempt is no longer running, including after cancellation completion moves the attempt to `PAUSED`.
 - Attempt state remains responsible for rejecting non-running lifecycle transitions outside this start flow.
 - Future file access validation, hashing, parsing, splitting, and commit systems must run only after this start boundary succeeds.
 - Start success must not imply that file paths still exist, file contents are parseable, hashes are unique, chunks can be generated, or commit work will succeed.
@@ -110,6 +110,7 @@ Cross-system edge cases:
 - Only one running staged-batch attempt may exist at a time.
 - A running attempt must stay tied to the staging context and staged entry IDs that started it.
 - A staging context tied to the current running attempt must not accept additional sources.
+- A staging context must become editable again after the linked attempt is no longer `RUNNING`.
 - Invalid staged entries must remain staging data; Start must not silently drop them.
 - Start orchestration must not parse, hash, copy, split, commit, persist, assign book numbers, or create chunks.
 - Active-batch state must remain in memory for this system.
@@ -131,6 +132,6 @@ Before editing Staged Batch Start Orchestration, check:
 - Whether invalid staged entries still block start without disappearing from staging.
 - Whether duplicate starts still leave the original running attempt unchanged.
 - Whether source-add blocking is scoped only to the staging context tied to the current running attempt.
-- Whether active-batch state clears when the linked attempt is no longer running.
+- Whether active-batch state clears when the linked attempt is no longer running, including after cancellation completion reaches `PAUSED`.
 - Whether Start still runs before file access, hashing, parsing, splitting, and commit work.
 - Whether logs avoid raw source paths, filenames, source text, workspace paths, provider output, local machine details, and user data.
