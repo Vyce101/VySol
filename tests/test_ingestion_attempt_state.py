@@ -17,6 +17,7 @@ from app.ingestion.attempt_start import IngestionAttemptStartRegistry
 from app.ingestion.attempt_state import (
     IngestionAttemptCancellationError,
     IngestionAttemptCancellationRegistry,
+    IngestionAttemptPhase,
     IngestionAttemptState,
     IngestionAttemptStateRegistry,
     IngestionAttemptStatus,
@@ -63,6 +64,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.IDLE,
                 attempt_id=None,
                 staged_work_remaining=False,
+                phase=IngestionAttemptPhase.NOT_STARTED,
             ),
         )
 
@@ -81,6 +83,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.RUNNING,
                 attempt_id="attempt-1",
                 staged_work_remaining=True,
+                phase=IngestionAttemptPhase.PREFLIGHT,
             ),
         )
         workspace = registry.get_attempt_workspace("attempt-1")
@@ -94,6 +97,92 @@ class IngestionAttemptStateTests(unittest.TestCase):
             IngestionAttemptStatus.RUNNING,
             "attempt-1",
         )
+
+    def test_updates_current_running_attempt_phase(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+
+        updated_state = registry.update_attempt_phase(
+            running_state.attempt_id,
+            IngestionAttemptPhase.SPLITTING,
+        )
+
+        self.assertEqual(updated_state.phase, IngestionAttemptPhase.SPLITTING)
+        self.assertEqual(registry.get_state(), updated_state)
+
+    def test_stale_attempt_id_cannot_update_phase(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+
+        with patch(
+            "app.ingestion.attempt_state.uuid4",
+            side_effect=("attempt-1", "attempt-2"),
+        ):
+            stale_state = registry.start_attempt()
+            registry.complete_attempt(stale_state.attempt_id)
+            current_state = registry.start_attempt()
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(StaleIngestionAttemptResultError):
+                registry.update_attempt_phase(
+                    stale_state.attempt_id,
+                    IngestionAttemptPhase.PARSING,
+                )
+
+        self.assertEqual(registry.get_state(), current_state)
+        logger.warning.assert_called_once_with("Rejected stale ingestion attempt result.")
+
+    def test_non_running_attempt_cannot_update_phase(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        complete_state = registry.complete_attempt(running_state.attempt_id)
+
+        with patch("app.ingestion.attempt_state.logger") as logger:
+            with self.assertRaises(InvalidIngestionAttemptTransitionError):
+                registry.update_attempt_phase(
+                    running_state.attempt_id,
+                    IngestionAttemptPhase.PARSING,
+                )
+
+        self.assertEqual(registry.get_state(), complete_state)
+        logger.warning.assert_called_once_with(
+            "Invalid ingestion attempt state transition: %s",
+            "Attempt result does not match current state.",
+        )
+
+    def test_pause_resume_preserves_attempt_phase(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        registry.update_attempt_phase(
+            running_state.attempt_id,
+            IngestionAttemptPhase.TEXT_COMMITTED,
+        )
+
+        stopping_state = registry.request_stop()
+        paused_state = registry.finish_cancellation(
+            running_state.attempt_id,
+            staged_work_remaining=True,
+        )
+        resumed_state = registry.resume_attempt()
+
+        self.assertEqual(stopping_state.phase, IngestionAttemptPhase.TEXT_COMMITTED)
+        self.assertEqual(paused_state.phase, IngestionAttemptPhase.TEXT_COMMITTED)
+        self.assertEqual(resumed_state.phase, IngestionAttemptPhase.TEXT_COMMITTED)
+
+    def test_terminal_cancellation_resets_attempt_phase(self) -> None:
+        registry = IngestionAttemptStateRegistry()
+        running_state = registry.start_attempt()
+        registry.update_attempt_phase(
+            running_state.attempt_id,
+            IngestionAttemptPhase.SPLITTING,
+        )
+        registry.request_stop()
+
+        idle_state = registry.finish_cancellation(
+            running_state.attempt_id,
+            staged_work_remaining=False,
+        )
+
+        self.assertEqual(idle_state.phase, IngestionAttemptPhase.NOT_STARTED)
 
     def test_start_from_complete_creates_new_attempt_id(self) -> None:
         registry = IngestionAttemptStateRegistry()
@@ -146,6 +235,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.STOPPING,
                 attempt_id=running_state.attempt_id,
                 staged_work_remaining=True,
+                phase=IngestionAttemptPhase.PREFLIGHT,
             ),
         )
         self.assertNotEqual(state.status, IngestionAttemptStatus.PAUSED)
@@ -209,6 +299,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.PAUSED,
                 attempt_id=running_state.attempt_id,
                 staged_work_remaining=True,
+                phase=IngestionAttemptPhase.PREFLIGHT,
             ),
         )
         self.assertEqual(paused_workspace, workspace)
@@ -238,6 +329,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.IDLE,
                 attempt_id=None,
                 staged_work_remaining=False,
+                phase=IngestionAttemptPhase.NOT_STARTED,
             ),
         )
         self.assertIsNotNone(workspace)
@@ -264,6 +356,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.RUNNING,
                 attempt_id=running_state.attempt_id,
                 staged_work_remaining=True,
+                phase=IngestionAttemptPhase.PREFLIGHT,
             ),
         )
         self.assertEqual(resumed_workspace, paused_workspace)
@@ -282,6 +375,7 @@ class IngestionAttemptStateTests(unittest.TestCase):
                 status=IngestionAttemptStatus.COMPLETE,
                 attempt_id=running_state.attempt_id,
                 staged_work_remaining=False,
+                phase=IngestionAttemptPhase.NOT_STARTED,
             ),
         )
         self.assertIsNotNone(workspace)
