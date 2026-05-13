@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +55,27 @@ class DatabaseBootstrapTests(unittest.TestCase):
                 ).fetchone()
 
                 self.assertEqual(row["value"], "ok")
+            finally:
+                close_global_connection()
+
+    def test_bootstrapped_connection_can_be_used_from_route_worker_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            try:
+                database_path = Path(temp_directory) / "app.sqlite"
+                connection = bootstrap_global_database(database_path)
+                worker_errors: list[Exception] = []
+
+                def read_from_worker_thread() -> None:
+                    try:
+                        connection.execute("SELECT COUNT(*) FROM worlds").fetchone()
+                    except Exception as error:
+                        worker_errors.append(error)
+
+                worker_thread = threading.Thread(target=read_from_worker_thread)
+                worker_thread.start()
+                worker_thread.join()
+
+                self.assertEqual(worker_errors, [])
             finally:
                 close_global_connection()
 
