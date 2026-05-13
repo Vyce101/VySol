@@ -17,6 +17,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a fresh frontend World Detail shell with VySol branding, draft and committed modes, and Customize/Ingestion tabs.
+- Added a World Detail Page Shell concept page.
 - Added an Ingestion Attempt Cancellation concept page.
 - Added backend staged batch start orchestration so valid staging contexts create one running attempt while invalid or duplicate starts are blocked.
 - Added a Staged Batch Start Orchestration concept page.

@@ -41,4 +41,5 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Temporary Split Chunk Outputs](temporary-split-chunk-outputs.md)
 - [TXT Parser](txt-parser.md)
 - [World Database Bootstrap](world-database-bootstrap.md)
+- [World Detail Page Shell](world-detail-page-shell.md)
 - [World Splitter Settings Storage](world-splitter-settings-storage.md)
