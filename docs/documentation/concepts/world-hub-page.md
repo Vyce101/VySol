@@ -65,7 +65,7 @@ The system produces visible frontend UI state: brand, navbar, hero presentation,
 
 ## User-Facing Behavior
 
-Users see a cinematic World Hub with VySol branding, one compact `Worlds` nav item, a hero area, and a row that starts with the Create World card.
+Users see a cinematic World Hub with VySol branding, one content-sized `Worlds` nav item, a hero area, and a row that starts with the Create World card.
 
 If at least one committed world exists, the most recently used world appears first and supplies the hero background, name, optional description, and hero font. If the description is missing, the description space remains blank instead of falling back to default copy. If no committed world exists, users see the default Create World hero with the default background and font.
 
@@ -124,6 +124,7 @@ Cross-system edge cases:
 - World Hub must remain the default frontend page when no world-detail route query is present.
 - The VySol brand must remain visible, top-left, and non-clickable.
 - The navbar must contain only `Worlds` for the current hub.
+- The navbar must use the shared content-sized app nav behavior: width follows its contents, height stays fixed, and tab text size matches other app nav tabs.
 - Search and settings must not appear in the current hub.
 - The default empty-list hero copy must remain `Create World` and `Build a living setting for roleplay and simulation.` until that default copy is intentionally changed.
 - The Create World card must remain the first card-row item.

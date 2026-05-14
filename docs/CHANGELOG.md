@@ -6,6 +6,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed app nav bars so their width follows their contents while height and tab text size stay consistent across pages.
 - Changed World Hub so committed worlds load in recent-use order and the latest world controls the hero background, title, description, and font.
 - Changed World Hub so committed worlds render as cinematic image cards without changing the static hero area.
 - Changed frontend layout locking so the World Hub card row does not create vertical page scroll in narrow browser layouts.

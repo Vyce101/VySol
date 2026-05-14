@@ -100,6 +100,7 @@ Cross-system edge cases:
 ## Invariants
 
 - The World Detail shell must render both `Customize` and `Ingestion` tabs in draft and committed modes.
+- The tab control must use the shared content-sized app nav behavior: width follows its contents, height stays fixed, and tab text size matches other app nav tabs.
 - The VySol brand must remain visible, top-left, and non-clickable.
 - The shell must not implement Customize fields or Ingestion controls by itself.
 - The shell must not persist draft state, committed-world state, source state, or ingestion state.
