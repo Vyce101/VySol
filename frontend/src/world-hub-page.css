@@ -88,12 +88,15 @@
   position: relative;
   z-index: 1;
   width: min(660px, calc(100vw - 64px));
+  height: clamp(150px, 12vw, 180px);
   margin: clamp(116px, 13vh, 154px) 0 0 clamp(34px, 3.35vw, 56px);
+  overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
 }
 
 .world-hub-hero h1 {
+  max-width: 100%;
   margin: 0;
   color: #ffffff;
   font-size: clamp(58px, 5.1vw, 88px);
@@ -101,17 +104,26 @@
   line-height: 0.95;
   letter-spacing: 0;
   text-shadow: 0 10px 34px rgba(0, 0, 0, 0.44);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .world-hub-hero p {
   max-width: 520px;
+  min-height: calc(1.33em * 2);
+  max-height: calc(1.33em * 2);
   margin: 24px 0 0;
   color: rgba(255, 255, 255, 0.88);
+  display: -webkit-box;
   font-size: clamp(20px, 1.45vw, 26px);
   font-weight: 500;
   line-height: 1.33;
   letter-spacing: 0;
   text-shadow: 0 6px 24px rgba(0, 0, 0, 0.44);
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .world-hub-card-row {
@@ -130,7 +142,8 @@
 }
 
 .world-hub-world-card,
-.world-hub-empty-card {
+.world-hub-empty-card,
+.world-hub-load-error {
   flex: 0 0 clamp(292px, 18.8vw, 344px);
   height: clamp(300px, 25vw, 410px);
   border: 1px solid rgba(255, 255, 255, 0.22);
@@ -192,7 +205,8 @@
     0 0 26px rgba(80, 111, 255, 0.26);
 }
 
-.world-hub-empty-card {
+.world-hub-empty-card,
+.world-hub-load-error {
   background: linear-gradient(
     145deg,
     rgba(21, 22, 28, 0.22) 0%,
@@ -203,6 +217,19 @@
     0 20px 54px rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(7px) saturate(1.06);
   -webkit-backdrop-filter: blur(7px) saturate(1.06);
+}
+
+.world-hub-load-error {
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 @media (max-width: 720px) {
@@ -236,6 +263,7 @@
 
   .world-hub-hero {
     width: calc(100vw - 36px);
+    height: 135px;
     margin: 72px 18px 0;
   }
 
@@ -259,7 +287,8 @@
   }
 
   .world-hub-world-card,
-  .world-hub-empty-card {
+  .world-hub-empty-card,
+  .world-hub-load-error {
     flex-basis: min(304px, calc(100vw - 44px));
     height: clamp(260px, 36svh, 300px);
   }

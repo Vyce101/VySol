@@ -1,5 +1,5 @@
 import { Globe2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import {
   type CommittedWorldCardResponse,
@@ -12,20 +12,30 @@ import "./world-hub-page.css";
 const WORLD_HUB_HERO_TITLE = "Create World";
 const WORLD_HUB_HERO_DESCRIPTION =
   "Build a living setting for roleplay and simulation.";
+const DEFAULT_HERO_FONT_FAMILY =
+  '"VySol Default Inter", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
 type CommittedWorldCardState =
   | { status: "loading"; worlds: [] }
   | { status: "loaded"; worlds: CommittedWorldCardResponse[] }
   | { status: "error"; worlds: [] };
 
+type WorldHubHero = {
+  title: string;
+  description: string;
+  backgroundImageUrl: string;
+  fontFamily: string;
+};
+
 export function WorldHubPage() {
   const committedWorldState = useCommittedWorldCards();
+  const hero = useWorldHubHero(committedWorldState);
 
   return (
     <main className="world-hub-shell">
       <div
         className="world-hub-background"
-        style={{ backgroundImage: `url("${backgroundUrl}")` }}
+        style={{ backgroundImage: `url("${hero.backgroundImageUrl}")` }}
         aria-hidden="true"
       />
       <div className="world-hub-shade" aria-hidden="true" />
@@ -36,9 +46,13 @@ export function WorldHubPage() {
         </div>
       </header>
       <WorldHubNav />
-      <section className="world-hub-hero" aria-labelledby="world-hub-title">
-        <h1 id="world-hub-title">{WORLD_HUB_HERO_TITLE}</h1>
-        <p>{WORLD_HUB_HERO_DESCRIPTION}</p>
+      <section
+        className="world-hub-hero"
+        aria-labelledby="world-hub-title"
+        style={{ fontFamily: hero.fontFamily }}
+      >
+        <h1 id="world-hub-title">{hero.title}</h1>
+        <p>{hero.description}</p>
       </section>
       <CommittedWorldCardRow state={committedWorldState} />
     </main>
@@ -65,6 +79,7 @@ function CommittedWorldCardRow({
 }) {
   const shouldShowEmptyState =
     state.status === "loaded" && state.worlds.length === 0;
+  const shouldShowErrorState = state.status === "error";
 
   return (
     <section className="world-hub-card-row" aria-label="Committed worlds">
@@ -73,6 +88,11 @@ function CommittedWorldCardRow({
       ))}
       {shouldShowEmptyState ? (
         <div className="world-hub-empty-card" aria-label="No committed worlds" />
+      ) : null}
+      {shouldShowErrorState ? (
+        <div className="world-hub-load-error" role="status">
+          Unable to load worlds.
+        </div>
       ) : null}
     </section>
   );
@@ -120,4 +140,66 @@ function useCommittedWorldCards(): CommittedWorldCardState {
   }, []);
 
   return state;
+}
+
+function useWorldHubHero(state: CommittedWorldCardState): WorldHubHero {
+  const latestWorld =
+    state.status === "loaded" && state.worlds.length > 0 ? state.worlds[0] : null;
+  const fontFamily = useHeroFontFamily(latestWorld);
+
+  if (latestWorld === null) {
+    return {
+      title: WORLD_HUB_HERO_TITLE,
+      description: WORLD_HUB_HERO_DESCRIPTION,
+      backgroundImageUrl: backgroundUrl,
+      fontFamily: DEFAULT_HERO_FONT_FAMILY,
+    };
+  }
+
+  return {
+    title: latestWorld.display_name,
+    description: latestWorld.description ?? "",
+    backgroundImageUrl: latestWorld.background_image_url,
+    fontFamily,
+  };
+}
+
+function useHeroFontFamily(world: CommittedWorldCardResponse | null): string {
+  const fontFamily = useMemo(() => {
+    if (world === null) {
+      return DEFAULT_HERO_FONT_FAMILY;
+    }
+
+    return `"${getHeroFontFamilyName(world.font_asset_id)}", ${DEFAULT_HERO_FONT_FAMILY}`;
+  }, [world]);
+
+  useEffect(() => {
+    if (world === null) {
+      return;
+    }
+
+    const styleElement = document.createElement("style");
+    styleElement.dataset.worldHubHeroFont = world.font_asset_id;
+    styleElement.textContent = buildHeroFontFaceRule(world);
+    document.head.appendChild(styleElement);
+
+    return () => {
+      styleElement.remove();
+    };
+  }, [world]);
+
+  return fontFamily;
+}
+
+function buildHeroFontFaceRule(world: CommittedWorldCardResponse): string {
+  return `
+@font-face {
+  font-family: "${getHeroFontFamilyName(world.font_asset_id)}";
+  src: url("${world.font_file_url}") format("truetype");
+  font-display: swap;
+}`;
+}
+
+function getHeroFontFamilyName(fontAssetId: string): string {
+  return `VySol Hero ${fontAssetId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
 }

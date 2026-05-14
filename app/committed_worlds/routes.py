@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from app.storage.database import get_global_connection
-from app.storage.worlds import CommittedWorld, list_committed_worlds
+from app.storage.worlds import CommittedWorld, list_committed_worlds_by_recent_use
 
 router = APIRouter(prefix="/worlds", tags=["worlds"])
 
@@ -16,6 +16,9 @@ class CommittedWorldCardResponse(BaseModel):
     description: str | None
     background_asset_id: str
     background_image_url: str
+    font_asset_id: str
+    font_file_url: str
+    last_used_at: str
 
 
 def get_database_connection_dependency() -> sqlite3.Connection:
@@ -32,7 +35,7 @@ def list_committed_world_cards(
 ) -> list[CommittedWorldCardResponse]:
     return [
         build_committed_world_card_response(world)
-        for world in list_committed_worlds(connection)
+        for world in list_committed_worlds_by_recent_use(connection)
     ]
 
 
@@ -45,6 +48,9 @@ def build_committed_world_card_response(
         description=world.description,
         background_asset_id=world.background_asset_id,
         background_image_url=build_asset_file_url(world.background_asset_id),
+        font_asset_id=world.font_asset_id,
+        font_file_url=build_asset_file_url(world.font_asset_id),
+        last_used_at=world.last_used_at,
     )
 
 

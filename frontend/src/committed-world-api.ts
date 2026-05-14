@@ -4,6 +4,9 @@ export type CommittedWorldCardResponse = {
   description: string | null;
   background_asset_id: string;
   background_image_url: string;
+  font_asset_id: string;
+  font_file_url: string;
+  last_used_at: string;
 };
 
 const COMMITTED_WORLDS_ENDPOINT = "/worlds";
