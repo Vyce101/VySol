@@ -65,23 +65,10 @@
   z-index: 3;
   display: grid;
   justify-items: center;
+  max-width: calc(100vw - 32px);
+  overflow-x: auto;
+  overflow-y: hidden;
   transform: translateX(-50%);
-}
-
-.world-hub-nav-root .world-hub-nav-list {
-  min-width: 0;
-  width: fit-content;
-  height: clamp(49px, 3.05vw, 53px);
-  padding: 0 9px;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.world-hub-nav-root .world-hub-nav-trigger {
-  min-width: 0;
-  height: clamp(38px, 2.35vw, 41px);
-  padding-right: clamp(18px, 1.15vw, 21px);
-  padding-left: clamp(18px, 1.15vw, 21px);
 }
 
 .world-hub-hero {
@@ -335,17 +322,6 @@
     width: 100%;
     margin-top: 20px;
     transform: none;
-  }
-
-  .world-hub-nav-root .world-hub-nav-list {
-    width: fit-content;
-    max-width: calc(100vw - 32px);
-    min-width: 0;
-  }
-
-  .world-hub-nav-root .world-hub-nav-trigger {
-    flex: 1;
-    min-width: 0;
   }
 
   .world-hub-hero {

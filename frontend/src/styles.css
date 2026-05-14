@@ -105,6 +105,9 @@ button {
   z-index: 3;
   display: grid;
   justify-items: center;
+  max-width: calc(100vw - 32px);
+  overflow-x: auto;
+  overflow-y: hidden;
   transform: translateX(-50%);
 }
 
@@ -113,8 +116,9 @@ button {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-width: clamp(316px, 20vw, 344px);
-  height: clamp(53px, 3.35vw, 57px);
+  width: max-content;
+  min-width: 0;
+  height: 53px;
   padding: 0 13px;
   border: 1px solid rgba(255, 255, 255, 0.27);
   border-radius: 999px;
@@ -122,7 +126,9 @@ button {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.16),
     0 18px 42px rgba(0, 0, 0, 0.36);
+  user-select: none;
   backdrop-filter: blur(18px) saturate(1.12);
+  -webkit-user-select: none;
   -webkit-backdrop-filter: blur(18px) saturate(1.12);
 }
 
@@ -131,17 +137,18 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: clamp(41px, 2.6vw, 44px);
+  height: 41px;
   gap: 11px;
-  padding: 0 clamp(15px, 1vw, 18px);
+  padding: 0 18px;
   border: 0;
   border-radius: 999px;
   color: rgba(255, 255, 255, 0.78);
   background: transparent;
   cursor: pointer;
-  font-size: clamp(17px, 1.18vw, 20px);
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .tabs-trigger:hover,
@@ -219,18 +226,14 @@ button {
   }
 
   .tabs-list {
-    width: calc(100vw - 32px);
-    max-width: 350px;
+    width: max-content;
     min-width: 0;
     gap: 4px;
   }
 
   .tabs-trigger {
-    flex: 1;
     min-width: 0;
     gap: 7px;
-    padding: 0 10px;
-    font-size: 15px;
   }
 
   .tabs-content {
