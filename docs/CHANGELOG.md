@@ -23,6 +23,7 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a Create World Hub card that opens backend-backed draft World Detail without reloading the page.
 - Added a committed-world card API and safe asset file delivery route for World Hub card backgrounds.
 - Added an Asset File Delivery concept page.
 - Added a static World Hub shell, concept page, and launcher wiring to open the frontend app.

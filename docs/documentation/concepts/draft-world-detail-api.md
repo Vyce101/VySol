@@ -2,7 +2,7 @@
 
 Draft World Detail API is VySol's backend HTTP contract for opening and reading an uncommitted draft world in World Detail. It creates backend-owned draft setup state, exposes the draft's splitter defaults, staged-source summary, and temporary customization dirty state, and keeps the draft outside committed world storage.
 
-This page is for developers, power users, and AI coding agents that need to understand draft opening behavior before changing Create World entrypoints, World Detail route state, draft splitter defaults, source staging setup, or committed-world visibility.
+This page is for developers, power users, and AI coding agents that need to understand draft opening behavior before changing the World Hub Create World entrypoint, World Detail route state, draft splitter defaults, source staging setup, or committed-world visibility.
 
 ## Why It Exists
 
@@ -25,7 +25,8 @@ Draft World Detail API owns:
 
 Draft World Detail API does not own:
 
-- World Hub rendering, Create World buttons, or entry screens.
+- World Hub rendering, Create World card layout, or user click handling.
+- Frontend route switching after draft creation.
 - Customize controls, field validation, durable saving, or asset picking.
 - Browser confirmation prompts, navigation interception, or draft leave warning presentation.
 - Source selection UI, file pickers, drag/drop behavior, parsing, splitting, hashing, or duplicate checks.
@@ -35,7 +36,7 @@ Draft World Detail API does not own:
 
 ## Normal Flow
 
-A future Create World entrypoint calls the draft creation endpoint. The backend creates a draft world in memory, creates an empty temporary source staging context with the same draft ID, and returns a draft detail response. The frontend then navigates to World Detail with draft route state containing that draft ID.
+The World Hub Create World card calls the draft creation endpoint. The backend creates a draft world in memory, creates an empty temporary source staging context with the same draft ID, and returns a draft detail response. The frontend then updates browser history to the World Detail draft route containing that draft ID without forcing a full document reload.
 
 When World Detail loads with a draft ID, it calls the read endpoint. The backend reads the existing draft world and matching temporary staging context from memory, then returns splitter settings, staged-source summaries, and the current unsaved customization dirty flag. Refreshing the same URL reuses the backend draft as long as the app process still owns that in-memory state.
 
@@ -43,7 +44,7 @@ Future Customize UI can set the dirty flag when name, description, or customizat
 
 ## Inputs
 
-Draft World Detail API receives draft creation requests, draft IDs from frontend route or service code, and temporary dirty-state updates for future customization UI. It reads in-memory draft-world and temporary source staging state.
+Draft World Detail API receives draft creation requests from the World Hub entrypoint, draft IDs from frontend route or service code, and temporary dirty-state updates for future customization UI. It reads in-memory draft-world and temporary source staging state.
 
 It does not receive display names, selected source file paths, parser output, source text, chunk rows, database connections, provider responses, or committed world metadata.
 
@@ -78,6 +79,7 @@ Draft World Detail API interacts with:
 - Draft World Leave Safety, which reads draft dirty state and current ingestion phase before future UI navigates away.
 - Temporary Source Staging State, which owns the empty staged-source context and future staged source summaries.
 - World Detail Page Shell, which reads backend draft detail for draft route state.
+- World Hub Page, which initiates draft creation through the frontend draft-opening helper.
 - Committed World Index Storage and Committed World Folder Bootstrap only as systems it must avoid during draft opening.
 
 It must stay separate from ingestion start orchestration, parser routing, chunk storage, new-world commit orchestration, asset storage, graph extraction, retrieval, and chat behavior.
@@ -89,6 +91,7 @@ Internal edge cases:
 - Creating a draft returns backend defaults and an empty staged-source list.
 - Creating a draft creates a matching temporary staging context keyed by draft ID.
 - Creating a draft starts with no unsaved customization changes.
+- Creating a draft returns enough detail for the frontend to build a draft World Detail route immediately.
 - Reading an existing draft returns the same in-memory draft setup state.
 - Updating unsaved customization state changes only the in-memory draft flag.
 - Reading a missing draft returns `404`.
@@ -101,6 +104,8 @@ Cross-system edge cases:
 - Draft opening must not create committed world folders or `world.sqlite`.
 - Draft opening must not parse, hash, split, copy, or commit staged sources.
 - World Hub must not show drafts because World Hub visibility depends on committed world index rows.
+- World Hub may initiate draft creation, but draft identity and setup state must still come from this backend API.
+- Frontend route updates after draft creation must not replace or invent draft setup state.
 - Refresh behavior depends on the running backend process; app restart recovery remains outside this in-memory draft contract.
 - Staged-source summaries must not expose raw local file paths.
 - Draft dirty state is temporary until future Customize storage defines durable name, description, and customization behavior.
@@ -121,7 +126,7 @@ Cross-system edge cases:
 - `app/draft_worlds/routes.py` owns the draft detail HTTP routes and response shaping.
 - `app/draft_worlds/registry.py` owns in-memory draft creation, reads, and dirty-state updates.
 - `app/ingestion/staging/source_staging_state.py` owns temporary staged-source state.
-- `frontend/src/draft-world-api.ts` owns frontend calls and future Create World navigation helper behavior.
+- `frontend/src/draft-world-api.ts` owns frontend calls and Create World navigation helper behavior.
 - `frontend/src/world-detail-page.tsx` owns draft route rehydration in the shell.
 - `tests/test_draft_world_routes.py` covers the route contract.
 
