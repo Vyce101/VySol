@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 import sqlite3
 import tempfile
 import unittest
@@ -7,7 +8,11 @@ from pathlib import Path
 
 from app.committed_worlds.routes import list_committed_world_cards, router
 from app.storage.database import bootstrap_global_database, close_global_connection
-from app.storage.worlds import NewCommittedWorld, create_committed_world
+from app.storage.worlds import (
+    NewCommittedWorld,
+    create_committed_world,
+    mark_committed_world_used,
+)
 
 
 class CommittedWorldRouteTests(unittest.TestCase):
@@ -16,7 +21,7 @@ class CommittedWorldRouteTests(unittest.TestCase):
 
     def test_lists_committed_worlds_as_card_responses(self) -> None:
         with bootstrap_test_database() as connection:
-            create_committed_world(
+            older_world = create_committed_world(
                 NewCommittedWorld(
                     display_name="Zeta",
                     description="Second card",
@@ -25,7 +30,7 @@ class CommittedWorldRouteTests(unittest.TestCase):
                 ),
                 connection,
             )
-            first_world = create_committed_world(
+            newer_world = create_committed_world(
                 NewCommittedWorld(
                     display_name="Alpha",
                     description="First card",
@@ -34,17 +39,55 @@ class CommittedWorldRouteTests(unittest.TestCase):
                 ),
                 connection,
             )
+            mark_committed_world_used(
+                older_world.world_id,
+                datetime(2026, 1, 1, 10, 0, 0),
+                connection,
+            )
+            mark_committed_world_used(
+                newer_world.world_id,
+                datetime(2026, 1, 2, 10, 0, 0),
+                connection,
+            )
 
             responses = list_committed_world_cards(connection)
 
             self.assertEqual(len(responses), 2)
-            self.assertEqual(responses[0].world_id, first_world.world_id)
+            self.assertEqual(responses[0].world_id, newer_world.world_id)
             self.assertEqual(responses[0].display_name, "Alpha")
             self.assertEqual(responses[0].description, "First card")
             self.assertEqual(responses[0].background_asset_id, "builtin-image-main-world")
             self.assertEqual(
                 responses[0].background_image_url,
                 "/assets/builtin-image-main-world/file",
+            )
+            self.assertEqual(responses[0].font_asset_id, "builtin-font-inter")
+            self.assertEqual(
+                responses[0].font_file_url,
+                "/assets/builtin-font-inter/file",
+            )
+            self.assertEqual(responses[0].last_used_at, "2026-01-02 10:00:00")
+
+    def test_asset_urls_are_quoted(self) -> None:
+        with bootstrap_test_database() as connection:
+            create_committed_world(
+                NewCommittedWorld(
+                    display_name="Quoted Assets",
+                    background_asset_id="image asset/one",
+                    font_asset_id="font asset/two",
+                ),
+                connection,
+            )
+
+            response = list_committed_world_cards(connection)[0]
+
+            self.assertEqual(
+                response.background_image_url,
+                "/assets/image%20asset%2Fone/file",
+            )
+            self.assertEqual(
+                response.font_file_url,
+                "/assets/font%20asset%2Ftwo/file",
             )
 
     def test_empty_committed_world_list_returns_empty_response(self) -> None:
