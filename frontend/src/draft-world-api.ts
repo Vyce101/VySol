@@ -125,7 +125,8 @@ export async function confirmDraftWorldLeave(
 export async function createDraftWorldDetailFlow(): Promise<string> {
   const draftWorld = await createDraftWorld();
   const draftWorldUrl = buildDraftWorldDetailUrl(draftWorld.draft_id);
-  window.location.assign(draftWorldUrl);
+  window.history.pushState(null, "", draftWorldUrl);
+  window.dispatchEvent(new PopStateEvent("popstate"));
   return draftWorldUrl;
 }
 

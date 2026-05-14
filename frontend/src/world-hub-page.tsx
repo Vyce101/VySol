@@ -5,7 +5,9 @@ import {
   type CommittedWorldCardResponse,
   fetchCommittedWorldCards,
 } from "./committed-world-api";
+import { createDraftWorldDetailFlow } from "./draft-world-api";
 import logoUrl from "../../docs/assets/Butterfly_logo_compressed_centered.png";
+import createWorldCardImageUrl from "../../docs/assets/New Create World Card.png";
 import backgroundUrl from "../../app/assets/images/Main World Image.png";
 import "./world-hub-page.css";
 
@@ -77,24 +79,47 @@ function CommittedWorldCardRow({
 }: {
   state: CommittedWorldCardState;
 }) {
-  const shouldShowEmptyState =
-    state.status === "loaded" && state.worlds.length === 0;
   const shouldShowErrorState = state.status === "error";
 
   return (
     <section className="world-hub-card-row" aria-label="Committed worlds">
+      <CreateWorldCard committedWorldCount={state.worlds.length} />
       {state.worlds.map((world) => (
         <CommittedWorldCard key={world.world_id} world={world} />
       ))}
-      {shouldShowEmptyState ? (
-        <div className="world-hub-empty-card" aria-label="No committed worlds" />
-      ) : null}
       {shouldShowErrorState ? (
         <div className="world-hub-load-error" role="status">
           Unable to load worlds.
         </div>
       ) : null}
     </section>
+  );
+}
+
+function CreateWorldCard({
+  committedWorldCount,
+}: {
+  committedWorldCount: number;
+}) {
+  return (
+    <button
+      className="world-hub-create-world-card"
+      type="button"
+      onClick={() => void createDraftWorldDetailFlow()}
+      aria-label={`Create World. ${committedWorldCount} Worlds`}
+    >
+      <img
+        className="world-hub-world-card-image"
+        src={createWorldCardImageUrl}
+        alt=""
+        draggable={false}
+      />
+      <div className="world-hub-create-world-card-shade" aria-hidden="true" />
+      <div className="world-hub-create-world-card-copy">
+        <h2>Create World</h2>
+        <p>{committedWorldCount} Worlds</p>
+      </div>
+    </button>
   );
 }
 
