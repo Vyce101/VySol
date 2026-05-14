@@ -120,8 +120,9 @@
   align-items: stretch;
   gap: clamp(18px, 1.45vw, 26px);
   width: calc(100vw - clamp(64px, 6.7vw, 112px));
-  min-height: clamp(300px, 25vw, 410px);
-  margin: clamp(116px, 13.2vh, 160px) clamp(32px, 3.35vw, 56px) 48px;
+  min-height: clamp(416px, 31vw, 526px);
+  margin: clamp(28px, 4.5vh, 58px) clamp(32px, 3.35vw, 56px) 0;
+  padding: 42px 0 54px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
@@ -133,7 +134,7 @@
 .world-hub-empty-card,
 .world-hub-load-error {
   flex: 0 0 clamp(292px, 18.8vw, 344px);
-  height: clamp(300px, 25vw, 410px);
+  height: clamp(320px, 26vw, 430px);
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 14px;
 }
@@ -141,12 +142,19 @@
 .world-hub-create-world-card,
 .world-hub-world-card {
   position: relative;
+  z-index: 0;
   overflow: hidden;
   background: rgba(9, 11, 16, 0.64);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.14),
     0 18px 48px rgba(0, 0, 0, 0.34);
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
   user-select: none;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
   -webkit-user-select: none;
 }
 
@@ -161,16 +169,17 @@
 .world-hub-world-card-image {
   position: absolute;
   inset: 0;
+  z-index: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transform: scale(1.01);
   -webkit-user-drag: none;
 }
 
 .world-hub-world-card-shade {
   position: absolute;
   inset: 0;
+  z-index: 1;
   background:
     linear-gradient(180deg, rgba(5, 7, 12, 0.04) 0%, rgba(5, 7, 12, 0.26) 48%, rgba(5, 7, 12, 0.9) 100%),
     linear-gradient(90deg, rgba(5, 7, 12, 0.18) 0%, transparent 56%);
@@ -179,6 +188,7 @@
 .world-hub-create-world-card-shade {
   position: absolute;
   inset: 0;
+  z-index: 1;
   background:
     linear-gradient(180deg, rgba(5, 7, 12, 0.02) 0%, rgba(5, 7, 12, 0.18) 48%, rgba(5, 7, 12, 0.9) 100%),
     linear-gradient(90deg, rgba(7, 6, 16, 0.14) 0%, transparent 58%);
@@ -186,8 +196,9 @@
 
 .world-hub-create-world-card-copy {
   position: absolute;
+  z-index: 2;
   right: 20px;
-  bottom: 29px;
+  bottom: 22px;
   left: 20px;
   display: grid;
   justify-items: center;
@@ -195,12 +206,21 @@
   text-align: center;
 }
 
+.world-hub-world-card-copy {
+  position: absolute;
+  z-index: 2;
+  right: 16px;
+  bottom: 22px;
+  left: 16px;
+  display: grid;
+  gap: 13px;
+  justify-items: start;
+  text-align: left;
+}
+
 .world-hub-create-world-card h2,
 .world-hub-world-card h2 {
-  position: absolute;
-  right: 16px;
-  bottom: 17px;
-  left: 16px;
+  position: static;
   margin: 0;
   color: #ffffff;
   font-family: inherit;
@@ -216,18 +236,77 @@
 }
 
 .world-hub-create-world-card h2 {
-  position: static;
-  right: auto;
-  bottom: auto;
-  left: auto;
   font-size: clamp(24px, 1.8vw, 32px);
   line-height: 1.06;
 }
 
 .world-hub-world-card h2 {
-  bottom: 59px;
   font-size: clamp(24px, 1.8vw, 32px);
   line-height: 1.06;
+  max-width: 100%;
+}
+
+.world-hub-world-card-last-used {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: clamp(12px, 0.78vw, 14px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-shadow: 0 4px 14px rgba(0, 0, 0, 0.52);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.world-hub-world-card-manage {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 45px;
+  height: 45px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 999px;
+  color: #ffffff;
+  background: rgba(20, 20, 28, 0.58);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 12px 24px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  cursor: default;
+  pointer-events: none;
+  transform: translateX(8px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease,
+    background 150ms ease,
+    border-color 150ms ease;
+  backdrop-filter: blur(12px) saturate(1.15);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+}
+
+.world-hub-world-card-manage svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 2;
+}
+
+.world-hub-world-card:hover .world-hub-world-card-manage,
+.world-hub-world-card:focus-within .world-hub-world-card-manage {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.world-hub-world-card-manage:hover,
+.world-hub-world-card-manage:focus-visible {
+  border-color: rgba(255, 255, 255, 0.66);
+  background: rgba(30, 29, 40, 0.68);
+  outline: 0;
 }
 
 .world-hub-create-world-card p {
@@ -263,15 +342,35 @@
 }
 
 .world-hub-create-world-card:hover,
-.world-hub-create-world-card:focus-visible,
-.world-hub-world-card:hover,
-.world-hub-world-card:focus-within {
-  border-color: rgba(128, 177, 255, 0.72);
+.world-hub-create-world-card:focus-visible {
+  border-color: rgba(132, 181, 255, 0.92);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 0 0 1px rgba(92, 114, 255, 0.22),
+    inset 0 0 0 1.5px rgba(92, 114, 255, 0.24),
+    0 0 0 1.5px rgba(92, 114, 255, 0.3),
     0 18px 48px rgba(0, 0, 0, 0.34),
-    0 0 26px rgba(80, 111, 255, 0.26);
+    0 0 24px rgba(80, 111, 255, 0.34),
+    0 0 38px rgba(150, 84, 255, 0.2);
+  transform: translate3d(0, -8px, 0);
+}
+
+.world-hub-world-card:hover,
+.world-hub-world-card:focus-within {
+  z-index: 2;
+  border-color: rgba(132, 181, 255, 0.92);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1.5px rgba(92, 114, 255, 0.24),
+    0 0 0 1.5px rgba(92, 114, 255, 0.3),
+    0 18px 48px rgba(0, 0, 0, 0.34),
+    0 0 24px rgba(80, 111, 255, 0.34),
+    0 0 38px rgba(150, 84, 255, 0.2);
+  transform: translate3d(0, -8px, 0);
+}
+
+.world-hub-create-world-card:hover,
+.world-hub-create-world-card:focus-visible {
+  z-index: 2;
 }
 
 .world-hub-create-world-card:focus-visible {
@@ -339,14 +438,15 @@
     font-size: 19px;
   }
 
-  .world-hub-card-row {
+.world-hub-card-row {
     position: absolute;
     right: 18px;
-    bottom: clamp(18px, 3.8svh, 34px);
+    bottom: clamp(34px, 5.5svh, 54px);
     left: 18px;
     width: auto;
-    min-height: clamp(260px, 36svh, 300px);
+    min-height: clamp(370px, 48svh, 420px);
     margin: 0;
+    padding: 40px 0 52px;
   }
 
   .world-hub-create-world-card,
@@ -354,18 +454,23 @@
   .world-hub-empty-card,
   .world-hub-load-error {
     flex-basis: min(304px, calc(100vw - 44px));
-    height: clamp(260px, 36svh, 300px);
+    height: clamp(280px, 38svh, 324px);
   }
 
   .world-hub-create-world-card-copy {
-    bottom: 25px;
+    bottom: 20px;
   }
 
   .world-hub-create-world-card h2 {
     font-size: clamp(23px, 7vw, 29px);
   }
 
-  .world-hub-world-card h2 {
-    bottom: 55px;
+  .world-hub-world-card-copy {
+    bottom: 20px;
+  }
+
+  .world-hub-world-card-manage {
+    width: 42px;
+    height: 42px;
   }
 }

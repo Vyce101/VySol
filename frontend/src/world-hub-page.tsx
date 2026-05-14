@@ -1,4 +1,4 @@
-import { Globe2 } from "lucide-react";
+import { Globe2, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import {
@@ -16,6 +16,11 @@ const WORLD_HUB_HERO_DESCRIPTION =
   "Build a living setting for roleplay and simulation.";
 const DEFAULT_HERO_FONT_FAMILY =
   '"VySol Default Inter", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+const LAST_USED_TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+const MILLISECONDS_PER_MINUTE = 60 * 1000;
+const MILLISECONDS_PER_HOUR = 60 * MILLISECONDS_PER_MINUTE;
+const MILLISECONDS_PER_DAY = 24 * MILLISECONDS_PER_HOUR;
 
 type CommittedWorldCardState =
   | { status: "loading"; worlds: [] }
@@ -133,7 +138,19 @@ function CommittedWorldCard({ world }: { world: CommittedWorldCardResponse }) {
         draggable={false}
       />
       <div className="world-hub-world-card-shade" aria-hidden="true" />
-      <h2>{world.display_name}</h2>
+      <button
+        className="world-hub-world-card-manage"
+        type="button"
+        aria-label={`Manage World: ${world.display_name}`}
+      >
+        <SlidersHorizontal aria-hidden="true" />
+      </button>
+      <div className="world-hub-world-card-copy">
+        <h2>{world.display_name}</h2>
+        <p className="world-hub-world-card-last-used">
+          Last Used: {formatLastUsedAt(world.last_used_at)}
+        </p>
+      </div>
     </article>
   );
 }
@@ -227,4 +244,62 @@ function buildHeroFontFaceRule(world: CommittedWorldCardResponse): string {
 
 function getHeroFontFamilyName(fontAssetId: string): string {
   return `VySol Hero ${fontAssetId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+function formatLastUsedAt(lastUsedAt: string): string {
+  const parsedDate = parseUtcTimestamp(lastUsedAt);
+
+  if (parsedDate === null) {
+    return lastUsedAt;
+  }
+
+  const elapsedMilliseconds = Math.max(0, Date.now() - parsedDate.getTime());
+
+  if (elapsedMilliseconds < MILLISECONDS_PER_MINUTE) {
+    return "Just now";
+  }
+
+  if (elapsedMilliseconds < MILLISECONDS_PER_HOUR) {
+    return formatRelativeTimeUnit(
+      Math.floor(elapsedMilliseconds / MILLISECONDS_PER_MINUTE),
+      "minute",
+    );
+  }
+
+  if (elapsedMilliseconds < MILLISECONDS_PER_DAY) {
+    return formatRelativeTimeUnit(
+      Math.floor(elapsedMilliseconds / MILLISECONDS_PER_HOUR),
+      "hour",
+    );
+  }
+
+  return formatRelativeTimeUnit(
+    Math.floor(elapsedMilliseconds / MILLISECONDS_PER_DAY),
+    "day",
+  );
+}
+
+function parseUtcTimestamp(timestamp: string): Date | null {
+  const match = LAST_USED_TIMESTAMP_PATTERN.exec(timestamp);
+
+  if (match === null) {
+    return null;
+  }
+
+  const [, year, month, day, hour, minute, second] = match;
+  return new Date(
+    Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    ),
+  );
+}
+
+function formatRelativeTimeUnit(value: number, unit: string): string {
+  const suffix = value === 1 ? unit : `${unit}s`;
+  return `${value} ${suffix} ago`;
 }
