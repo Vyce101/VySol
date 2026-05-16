@@ -11,8 +11,27 @@
   position: absolute;
   inset: 0;
   z-index: -3;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(65, 130, 255, 0.2), transparent 28%),
+    radial-gradient(circle at 35% 48%, rgba(128, 54, 255, 0.18), transparent 32%),
+    #030714;
   background-position: center;
   background-size: cover;
+}
+
+.world-hub-background-layer {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-size: cover;
+}
+
+.world-hub-background-layer-enter {
+  animation: world-hub-background-enter 350ms ease both;
+}
+
+.world-hub-background-layer-exit {
+  animation: world-hub-background-exit 350ms ease both;
 }
 
 .world-hub-shade {
@@ -80,6 +99,19 @@
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+}
+
+.world-hub-hero-copy {
+  position: absolute;
+  inset: 0;
+}
+
+.world-hub-hero-copy-enter {
+  animation: world-hub-hero-copy-enter 180ms ease both;
+}
+
+.world-hub-hero-copy-exit {
+  animation: world-hub-hero-copy-exit 180ms ease both;
 }
 
 .world-hub-hero h1 {
@@ -405,6 +437,95 @@
   -webkit-user-select: none;
 }
 
+.world-hub-startup-splash {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: clamp(52px, 7.2vh, 76px);
+  background:
+    radial-gradient(circle at 50% 40%, rgba(50, 142, 255, 0.2), transparent 26%),
+    radial-gradient(circle at 44% 46%, rgba(135, 63, 255, 0.18), transparent 34%),
+    linear-gradient(180deg, #050817 0%, #020511 100%);
+  opacity: 1;
+  transition: opacity 260ms ease;
+  pointer-events: auto;
+}
+
+.world-hub-startup-splash-exit {
+  opacity: 0;
+}
+
+.world-hub-startup-logo {
+  width: clamp(134px, 13vw, 190px);
+  height: clamp(134px, 13vw, 190px);
+  object-fit: contain;
+  filter:
+    drop-shadow(0 0 24px rgba(60, 180, 255, 0.46))
+    drop-shadow(0 0 34px rgba(138, 74, 255, 0.38));
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+}
+
+.world-hub-startup-spinner {
+  width: 52px;
+  height: 52px;
+  border: 6px solid rgba(232, 247, 252, 0.24);
+  border-top-color: rgba(232, 247, 252, 0.94);
+  border-radius: 999px;
+  animation: world-hub-startup-spin 820ms linear infinite;
+  filter: drop-shadow(0 0 18px rgba(63, 172, 255, 0.38));
+}
+
+@keyframes world-hub-startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes world-hub-background-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes world-hub-background-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes world-hub-hero-copy-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes world-hub-hero-copy-exit {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
 @media (max-width: 720px) {
   .world-hub-shell {
     overflow: hidden;
@@ -438,7 +559,7 @@
     font-size: 19px;
   }
 
-.world-hub-card-row {
+  .world-hub-card-row {
     position: absolute;
     right: 18px;
     bottom: clamp(34px, 5.5svh, 54px);
