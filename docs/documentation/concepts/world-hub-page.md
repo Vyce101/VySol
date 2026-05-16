@@ -1,6 +1,6 @@
 # World Hub Page
 
-World Hub Page is VySol's default frontend landing surface for committed worlds and the current Create World entrypoint. It renders the cinematic app frame, loads committed-world data in recent-use order, uses the latest committed world for the hero area when one exists, displays each committed world as a stable image card with recent-use context, and offers a dedicated Create World card at the start of the card row.
+World Hub Page is VySol's default frontend landing surface for committed worlds and the current Create World entrypoint. It renders the cinematic app frame, loads committed-world data in recent-use order, shows a branded startup splash while committed-world data is loading, uses the latest or last-hovered committed world for the hero area when one exists, displays each committed world as a stable image card with recent-use context, and offers a dedicated Create World card at the start of the card row.
 
 This page is for developers, power users, and AI coding agents that need to understand the World Hub contract before changing committed-world visibility, card layout, asset delivery, launcher startup, or the Create World entrypoint.
 
@@ -18,8 +18,12 @@ World Hub Page owns:
 - Showing the VySol logo mark and wordmark as non-clickable branding.
 - Showing a centered `Worlds` navbar with no search or settings controls.
 - Showing the default `Create World` hero area when there are no committed worlds.
+- Showing a branded startup splash while committed-world records are loading.
 - Loading committed-world records from the backend in most-recent-use order.
-- Using the latest committed world's saved name, optional description, background, and font for the hero area.
+- Using the latest committed world's saved name, optional description, background, and font for the initial loaded hero area.
+- Switching the hero title, hero description, hero font, and page background when a committed-world card is hovered.
+- Keeping the last hovered committed world as the active hero when no committed-world card is hovered.
+- Crossfading hero title/description changes and using a slightly slower crossfade for background changes.
 - Rendering the dedicated Create World card as the first card-row item.
 - Showing the current committed-world count on the Create World card.
 - Initiating backend-owned draft creation when the Create World card is clicked.
@@ -40,8 +44,8 @@ World Hub Page does not own:
 - Uploading, selecting, deleting, or editing assets.
 - Marking committed worlds as used.
 - Showing chunk counts, chronicle counts, chat stats, graph stats, search, filters, or settings.
-- Implementing committed-world opening, hero switching from hover, or functional Manage World actions.
-- Switching the hero title, hero description, hero font, or page background from hovered or manually selected cards.
+- Implementing committed-world opening or functional Manage World actions.
+- Switching the hero from the Create World card, manual selection controls, search, settings, or any non-card route.
 - Customize, Ingestion, chat, retrieval, graph extraction, or provider behavior.
 - App logging or console diagnostics.
 
@@ -49,29 +53,29 @@ World Hub Page does not own:
 
 The frontend entrypoint renders World Hub as the default page when no world-detail route query is present. The page imports the app's built-in logo, default background image, default font, Create World card image, local tab primitives, committed-world API client, and draft-world creation flow helper.
 
-On mount, the page requests committed-world records from the backend. The backend reads committed worlds from `app.sqlite`, sorts them by `last_used_at` with the most recent world first, and returns browser-safe background and font asset URLs. Empty results leave the Create World card as the only card-row item and keep the default Create World hero.
+On mount, the page requests committed-world records from the backend and shows a branded splash instead of the default hero so a non-empty world list does not briefly flash the Create World state. The backend reads committed worlds from `app.sqlite`, sorts them by `last_used_at` with the most recent world first, and returns browser-safe background and font asset URLs. Empty results leave the Create World card as the only card-row item and keep the default Create World hero.
 
 The Create World card always renders before committed-world cards. It uses the app's default background behavior for the page, but its own card image is the dedicated Create World artwork. Clicking the card calls the draft-world flow helper, which creates a backend draft and updates browser history to the draft World Detail route without a full document reload.
 
-When committed worlds exist, the first returned world controls the hero background, title, description, and hero font. Committed-world cards render in the same backend order using their background image, saved world name, and a relative `Last Used` label derived from `last_used_at`. Hovering or focusing a committed-world card lifts it slightly, strengthens the connected outline/glow, and reveals a Manage World overlay button. The overlay is currently visual only and does not navigate, mutate state, or open a management flow. Committed-world cards do not change the hero through hover, navigate, open worlds, or display source/chunk/chat/graph stats.
+When committed worlds exist, the first returned world controls the initial loaded hero background, title, description, and hero font. Committed-world cards render in the same backend order using their background image, saved world name, and a relative `Last Used` label derived from `last_used_at`. Hovering a committed-world card immediately selects that world as the active hero, while the hero copy crossfades and the background crossfades slightly more slowly. When the pointer leaves the card, the last hovered world remains active. Hovering the Create World card does not change the active hero. Hovering or focusing a committed-world card still lifts it slightly, strengthens the connected outline/glow, and reveals a Manage World overlay button. The overlay is currently visual only and does not navigate, mutate state, or open a management flow. Committed-world cards do not navigate, open worlds, or display source/chunk/chat/graph stats.
 
 ## Inputs
 
-World Hub Page receives imported frontend defaults, the Create World card image, browser click actions, hover/focus UI state, and backend committed-world responses. Responses include committed-world identity, display name, optional description, background asset identity and URL, font asset identity and URL, and `last_used_at`.
+World Hub Page receives imported frontend defaults, the Create World card image, browser click actions, committed-world hover/focus UI state, and backend committed-world responses. Responses include committed-world identity, display name, optional description, background asset identity and URL, font asset identity and URL, and `last_used_at`.
 
 It does not receive raw local file paths, source text, chunk records, graph state, chat state, provider responses, draft IDs, uploaded file handles, or draft-world metadata.
 
 ## Outputs
 
-The system produces visible frontend UI state: brand, navbar, hero presentation, Create World card, committed-world cards, committed-card hover/focus presentation, empty-list state, and load-failure state. On Create World click it asks the Draft World Detail API to create a draft and then updates browser history to World Detail. It does not write files, create database rows directly, create committed worlds, mutate committed-world metadata, persist UI state, or emit app logs.
+The system produces visible frontend UI state: startup splash, brand, navbar, hero presentation, background presentation, Create World card, committed-world cards, committed-card hover/focus presentation, empty-list state, and load-failure state. On Create World click it asks the Draft World Detail API to create a draft and then updates browser history to World Detail. It does not write files, create database rows directly, create committed worlds, mutate committed-world metadata, persist UI state, or emit app logs.
 
 ## User-Facing Behavior
 
-Users see a cinematic World Hub with VySol branding, one content-sized `Worlds` nav item, a hero area, and a row that starts with the Create World card.
+Users first see a dark VySol-themed startup splash with the centered butterfly mark and a spinner while committed-world data loads. After loading, they see a cinematic World Hub with VySol branding, one content-sized `Worlds` nav item, a hero area, and a row that starts with the Create World card.
 
-If at least one committed world exists, the most recently used world appears first and supplies the hero background, name, optional description, and hero font. If the description is missing, the description space remains blank instead of falling back to default copy. If no committed world exists, users see the default Create World hero with the default background and font.
+If at least one committed world exists, the most recently used world appears first and supplies the initial loaded hero background, name, optional description, and hero font. Hovering another committed-world card changes the hero and full-page background to that world. The card hover effect is immediate, the hero title and description crossfade quickly, and the background crossfades a little more slowly. If the description is missing, the description space remains blank instead of falling back to default copy. If no committed world exists, users see the default Create World hero with the default background and font after loading completes.
 
-The Create World card shows its dedicated image, `Create World`, and the current committed-world count such as `5 Worlds`. Each committed-world card shows the selected/default background image, world name, and relative `Last Used` label. Hovering or keyboard-focusing a committed-world card gives it a connected blue/purple outline, soft glow, slight lift, and a subtle sliders-style Manage World overlay icon. The Manage World overlay is intentionally non-functional for the current card behavior. Current committed-world cards do not show descriptions, counts, source stats, chat stats, graph stats, or navigation behavior. Hero title, hero description, and long committed-world card titles clamp inside their reserved areas instead of expanding the layout.
+The Create World card shows its dedicated image, `Create World`, and the current committed-world count such as `5 Worlds`. Hovering it does not change the active hero; it keeps the latest committed-world hero when worlds exist. Each committed-world card shows the selected/default background image, world name, and relative `Last Used` label. Hovering or keyboard-focusing a committed-world card gives it a connected blue/purple outline, soft glow, slight lift, and a subtle sliders-style Manage World overlay icon. The Manage World overlay is intentionally non-functional for the current card behavior. Current committed-world cards do not show descriptions, counts, source stats, chat stats, graph stats, or navigation behavior. Hero title, hero description, and long committed-world card titles clamp inside their reserved areas instead of expanding the layout.
 
 If committed-world loading fails, the card row shows a quiet `Unable to load worlds.` surface while the browser console stays free of repeated frontend error spam.
 
@@ -97,7 +101,12 @@ Internal edge cases:
 
 - Empty committed-world lists render the Create World card without fake committed-world cards.
 - Failed card loading shows a quiet row-level message without adding noisy console logs.
-- The latest committed world controls the hero only after the committed-world list loads successfully.
+- The startup splash prevents the default Create World hero from flashing before a non-empty world list resolves.
+- The latest committed world controls the initial loaded hero only after the committed-world list loads successfully.
+- Hovering a committed-world card changes the active hero without marking the world as used.
+- Leaving a committed-world card keeps the last hovered committed world active.
+- Hovering the Create World card does not replace the active committed-world hero.
+- Hero copy and background changes crossfade without delaying the card hover effect.
 - Missing world descriptions render as blank hero descriptions, not default Create World descriptions.
 - Hero title text is constrained to avoid resizing the overall page layout.
 - Hero description text is constrained to avoid resizing the overall page layout.
@@ -106,10 +115,10 @@ Internal edge cases:
 - The committed-world `Last Used` label is always visible and stays aligned with the Create World count row.
 - Committed-world hover styling must not clip card text, hard-cut glow at the card row edge, or shift text baselines after hover ends.
 - The Manage World overlay appears only during committed-card hover or focus and remains non-functional until a future ticket defines its behavior.
-- The Create World card uses its dedicated image while the page background remains driven by default or latest committed-world hero behavior.
+- The Create World card uses its dedicated image while the page background remains driven by default, latest committed-world, or last-hovered committed-world hero behavior.
 - Card layout uses fixed dimensions and does not depend on hover expansion.
 - Card text uses the default app font even when the committed world has a selected font asset.
-- Hero title and description use the latest committed world's selected/default font when committed worlds exist.
+- Hero title and description use the active committed world's selected/default font when committed worlds exist.
 - Narrow browser layouts keep the app surface locked to the viewport so cards do not create vertical page scroll.
 - The hero and navbar text remain visible and non-selectable.
 - The brand area is not an anchor or button, so clicking it does not navigate.
@@ -121,7 +130,7 @@ Cross-system edge cases:
 - Create World navigation must update the frontend route without forcing a full document reload.
 - Rendering the hub must not mark committed worlds as used.
 - Rendering `Last Used` must use backend `last_used_at` values without refreshing or mutating them.
-- The Manage World overlay must not imply that committed-world management, opening, or hero switching exists before those flows are implemented.
+- The Manage World overlay must not imply that committed-world management or opening exists before those flows are implemented.
 - Card image URLs and hero font URLs must come from backend asset delivery instead of hardcoded local filesystem paths.
 - Stored asset paths must remain backend-owned so unsafe or missing assets are rejected before file serving.
 - Recent-use ordering must come from committed-world storage rather than client-side draft or display-name sorting.
@@ -136,7 +145,8 @@ Cross-system edge cases:
 - The default empty-list hero copy must remain `Create World` and `Build a living setting for roleplay and simulation.` until that default copy is intentionally changed.
 - The Create World card must remain the first card-row item.
 - The Create World card must call backend draft creation before routing to World Detail.
-- When committed worlds exist, the hero must use the most recently used committed world's saved metadata.
+- When committed worlds exist, the initial loaded hero must use the most recently used committed world's saved metadata.
+- Hovering committed-world cards must update only frontend presentation, not navigation or committed-world `last_used_at`.
 - Card rendering must use committed-world backend data, not mock frontend-only worlds.
 - Committed-world cards must show background image, name, and `Last Used` for the current card behavior.
 - The Manage World overlay must remain visual-only until a future card-action ticket defines its behavior.
