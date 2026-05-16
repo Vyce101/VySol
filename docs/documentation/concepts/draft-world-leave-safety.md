@@ -8,7 +8,7 @@ This page is for developers, power users, and AI coding agents that need to unde
 
 Creating a world has a risky gap before source text and chunks are committed to durable storage. During that gap, leaving World Detail can discard the draft name state, customization dirty state, staged source entries, and pre-commit ingestion progress. After the text/chunk commit has succeeded, leaving should not interrupt backend work just because later processing may still be running.
 
-This contract gives future UI code a simple backend-owned decision point. The UI can ask whether leaving should warn, and if the user confirms a dangerous leave, the backend can discard only the temporary draft state it owns.
+This contract gives UI code a simple backend-owned decision point. The UI can ask whether leaving should warn, and if the user confirms a dangerous leave, the backend can discard only the temporary draft state it owns.
 
 ## Ownership Boundary
 
@@ -32,11 +32,11 @@ Draft World Leave Safety does not own:
 
 ## Normal Flow
 
-World Detail or future navigation code asks the backend for the draft's leave state. The backend reads the draft world, its unsaved customization flag, and the current ingestion attempt state. If the draft has unsaved customization changes, the response says leaving should warn regardless of ingestion phase.
+World Detail navigation guard code asks the backend for the draft's leave state. The backend reads the draft world, its unsaved customization flag, and the current ingestion attempt state. If the draft has unsaved customization changes, the response says leaving should warn regardless of ingestion phase.
 
 If there are no unsaved customization changes, the ingestion phase decides the storage safety boundary. Before `text_committed`, leaving is dangerous because the draft and staged work are still temporary. At `text_committed`, source text and chunks are considered durably stored, so leaving is safe and the backend must not discard the draft through the leave endpoint.
 
-If future UI shows a warning and the user confirms leaving while the leave state is dangerous, the confirmed-leave endpoint discards the draft world and matching temporary staging context. If the leave state is safe, confirmed leave returns without discarding that state.
+If Draft Abandon Confirmation UI shows a warning and the user confirms leaving while the leave state is dangerous, the confirmed-leave endpoint discards the draft world and matching temporary staging context. If the leave state is safe, confirmed leave returns without discarding that state.
 
 ## Inputs
 
@@ -68,10 +68,11 @@ Unexpected discard-state failures must be logged at `ERROR` if backend state is 
 Draft World Leave Safety interacts with:
 
 - Draft World Detail API, which exposes the HTTP routes and the temporary unsaved customization flag.
+- Draft Abandon Confirmation UI, which presents the warning and calls confirmed-leave only after user confirmation.
 - Ingestion Attempt State, which provides the current lifecycle status and phase.
 - Temporary Source Staging State, which holds staged source entries that are discarded only after confirmed dangerous leave.
 - New World Batch Commit, which is the boundary that later ingestion code should mark as `text_committed` after text sources and chunks are durably stored.
-- World Detail Page Shell and future navigation guard UI, which can read the leave-state response without owning backend discard policy.
+- World Detail Page Shell, which hosts the parent navigation that can trigger the frontend guard.
 
 It must stay separate from asset storage, committed world index storage, committed source storage, chunk storage, graph extraction, retrieval, chat behavior, and browser prompt rendering.
 
@@ -90,6 +91,7 @@ Internal edge cases:
 Cross-system edge cases:
 
 - Switching between Customize and Ingestion tabs must not call leave-state or confirmed-leave behavior.
+- Browser refresh and tab close must not call leave-state or confirmed-leave behavior.
 - Confirmed draft discard must not delete uploaded global assets.
 - Confirmed draft discard must not delete committed worlds, committed source files, world folders, world databases, or app index rows.
 - Leave safety depends on future ingestion orchestration setting `text_committed` immediately after the atomic SQLite text/chunk commit succeeds.
@@ -110,7 +112,8 @@ Cross-system edge cases:
 - `app/draft_worlds/routes.py` owns leave-state and confirmed-leave response shaping.
 - `app/draft_worlds/registry.py` owns the in-memory draft dirty-state flag.
 - `app/ingestion/attempt_state.py` owns ingestion phase state.
-- `frontend/src/draft-world-api.ts` exposes API helpers for future navigation guard UI.
+- `frontend/src/draft-world-api.ts` exposes API helpers for navigation guard UI.
+- `frontend/src/draft-abandon-navigation.ts` owns the frontend hook that consumes leave-state and confirmed-leave.
 - `tests/test_draft_world_routes.py` covers the leave safety route contract.
 
 ## What AI/Coders Must Check Before Changing This System

@@ -17,6 +17,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Committed Source Storage](committed-source-storage.md)
 - [Committed World Folder Bootstrap](committed-world-folder-bootstrap.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
+- [Draft Abandon Confirmation UI](draft-abandon-confirmation-ui.md)
 - [Draft World Detail API](draft-world-detail-api.md)
 - [Draft World Leave Safety](draft-world-leave-safety.md)
 - [Draft World Splitter Settings](draft-world-splitter-settings.md)
