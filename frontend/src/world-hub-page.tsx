@@ -244,7 +244,7 @@ function CommittedWorldCard({
       <button
         className="world-hub-world-card-manage"
         type="button"
-        aria-label={`Open World: ${world.display_name}`}
+        aria-label={`Manage World: ${world.display_name}`}
         onClick={openWorldDetail}
         onKeyDown={handleOpenWorldDetailKeyDown}
       >
