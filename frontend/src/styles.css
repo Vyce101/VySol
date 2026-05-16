@@ -157,6 +157,11 @@ button {
   outline: 0;
 }
 
+.world-detail-up-button:disabled {
+  color: rgba(255, 255, 255, 0.56);
+  cursor: progress;
+}
+
 .world-detail-up-button svg {
   width: clamp(18px, 1.35vw, 22px);
   height: clamp(18px, 1.35vw, 22px);
@@ -282,6 +287,241 @@ button {
   font-weight: 600;
 }
 
+.world-detail-navigation-error {
+  width: min(100vw - 48px, 560px);
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(239, 68, 68, 0.38);
+  border-radius: 8px;
+  color: rgba(255, 216, 216, 0.95);
+  background: rgba(70, 16, 25, 0.52);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.draft-abandon-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.draft-abandon-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 5, 10, 0.58);
+  backdrop-filter: blur(4px) saturate(0.92);
+  -webkit-backdrop-filter: blur(4px) saturate(0.92);
+}
+
+.draft-abandon-dialog {
+  position: relative;
+  width: min(100%, 520px);
+  max-height: min(86svh, 720px);
+  padding: 30px;
+  overflow-y: auto;
+  border: 1px solid rgba(161, 95, 255, 0.72);
+  border-radius: 8px;
+  color: #ffffff;
+  background:
+    linear-gradient(145deg, rgba(20, 18, 31, 0.94), rgba(8, 10, 17, 0.96)),
+    rgba(10, 11, 18, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 0 1px rgba(80, 210, 255, 0.14),
+    0 0 34px rgba(132, 73, 255, 0.56),
+    0 28px 90px rgba(0, 0, 0, 0.64);
+}
+
+.draft-abandon-dialog-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.86);
+  background: transparent;
+  cursor: pointer;
+}
+
+.draft-abandon-dialog-close:hover,
+.draft-abandon-dialog-close:focus-visible {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  outline: 0;
+}
+
+.draft-abandon-dialog-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.draft-abandon-dialog-close svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 2;
+}
+
+.draft-abandon-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding-right: 42px;
+}
+
+.draft-abandon-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(255, 190, 107, 0.96);
+  border-radius: 999px;
+  color: #ffc26c;
+  box-shadow: 0 0 18px rgba(255, 178, 91, 0.22);
+}
+
+.draft-abandon-dialog-icon svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 2;
+}
+
+.draft-abandon-dialog h2 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.98);
+  font-size: 24px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.draft-abandon-dialog-intro {
+  margin: 28px 0 18px;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.draft-abandon-dialog-impact {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.draft-abandon-dialog-impact section + section {
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.draft-abandon-dialog-impact h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.draft-abandon-dialog-impact section:first-child h3 {
+  color: #ff9e88;
+}
+
+.draft-abandon-dialog-impact section:last-child h3 {
+  color: #89c7ff;
+}
+
+.draft-abandon-dialog-impact ul {
+  margin: 0;
+  padding-left: 22px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.draft-abandon-dialog-error {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(239, 68, 68, 0.42);
+  border-radius: 8px;
+  color: rgba(255, 221, 221, 0.96);
+  background: rgba(91, 18, 30, 0.48);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.draft-abandon-dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.draft-abandon-dialog-actions button {
+  min-height: 48px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.draft-abandon-dialog-actions button:focus-visible {
+  outline: 2px solid rgba(66, 200, 255, 0.86);
+  outline-offset: 3px;
+}
+
+.draft-abandon-dialog-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.draft-abandon-dialog-keep {
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.draft-abandon-dialog-keep:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.draft-abandon-dialog-discard {
+  border: 1px solid rgba(255, 99, 122, 0.62);
+  color: #ffffff;
+  background: linear-gradient(180deg, #e63d51 0%, #ae172b 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 16px 34px rgba(180, 24, 45, 0.34);
+}
+
+.draft-abandon-dialog-discard:hover:not(:disabled) {
+  background: linear-gradient(180deg, #f1485b 0%, #bd1d31 100%);
+}
+
+.draft-abandon-dialog-warning {
+  margin: 16px 0 0;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+}
+
 @media (max-width: 720px) {
   .world-detail-header {
     padding: 18px 18px 0;
@@ -331,5 +571,28 @@ button {
   .tabs-content {
     width: calc(100vw - 32px);
     margin-top: 28px;
+  }
+
+  .draft-abandon-dialog-layer {
+    align-items: end;
+    padding: 16px;
+  }
+
+  .draft-abandon-dialog {
+    max-height: calc(100svh - 32px);
+    padding: 24px 18px;
+  }
+
+  .draft-abandon-dialog-header {
+    gap: 14px;
+  }
+
+  .draft-abandon-dialog h2 {
+    font-size: 22px;
+  }
+
+  .draft-abandon-dialog-actions {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 }

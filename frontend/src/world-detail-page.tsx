@@ -1,7 +1,8 @@
 import { ArrowLeft, Box, GitBranch } from "lucide-react";
 import { useEffect, useState } from "react";
-import { navigateToWorldHub } from "./app-navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
+import { DraftAbandonConfirmationDialog } from "./draft-abandon-confirmation-dialog";
+import { useDraftAbandonNavigation } from "./draft-abandon-navigation";
 import {
   type DraftWorldDetailResponse,
   fetchDraftWorldDetail,
@@ -50,36 +51,70 @@ function WorldDetailTabs({
   mode: WorldMode;
   draftWorldState: DraftWorldLoadState;
 }) {
+  const draftId = draftWorldState.draftId;
+  const draftAbandonNavigation = useDraftAbandonNavigation(mode, draftId);
+
   return (
-    <Tabs defaultValue="customize" className="world-detail-tabs-root">
-      <div className="world-detail-nav-list" aria-label="World detail navigation">
-        <button
-          className="world-detail-up-button"
-          type="button"
-          onClick={navigateToWorldHub}
-          aria-label="Go to Worlds"
+    <>
+      <Tabs defaultValue="customize" className="world-detail-tabs-root">
+        <div
+          className="world-detail-nav-list"
+          aria-label="World detail navigation"
         >
-          <ArrowLeft aria-hidden="true" />
-          <span>Worlds</span>
-        </button>
-        <span className="world-detail-nav-separator" aria-hidden="true" />
-        <TabsList
-          aria-label="World detail sections"
-          className="world-detail-tabs-list"
-        >
-          <TabsTrigger value="customize">
-            <GitBranch aria-hidden="true" />
-            <span>Customize</span>
-          </TabsTrigger>
-          <TabsTrigger value="ingestion">
-            <Box aria-hidden="true" />
-            <span>Ingestion</span>
-          </TabsTrigger>
-        </TabsList>
-      </div>
-      <ShellPane tab="customize" mode={mode} draftWorldState={draftWorldState} />
-      <ShellPane tab="ingestion" mode={mode} draftWorldState={draftWorldState} />
-    </Tabs>
+          <button
+            className="world-detail-up-button"
+            type="button"
+            onClick={draftAbandonNavigation.handleWorldHubNavigation}
+            aria-label="Go to Worlds"
+            aria-busy={draftAbandonNavigation.isCheckingLeaveState}
+            disabled={
+              draftAbandonNavigation.isCheckingLeaveState ||
+              draftAbandonNavigation.isDiscardingDraft
+            }
+          >
+            <ArrowLeft aria-hidden="true" />
+            <span>Worlds</span>
+          </button>
+          <span className="world-detail-nav-separator" aria-hidden="true" />
+          <TabsList
+            aria-label="World detail sections"
+            className="world-detail-tabs-list"
+          >
+            <TabsTrigger value="customize">
+              <GitBranch aria-hidden="true" />
+              <span>Customize</span>
+            </TabsTrigger>
+            <TabsTrigger value="ingestion">
+              <Box aria-hidden="true" />
+              <span>Ingestion</span>
+            </TabsTrigger>
+          </TabsList>
+        </div>
+        {draftAbandonNavigation.navigationErrorMessage !== null ? (
+          <p className="world-detail-navigation-error" role="alert">
+            {draftAbandonNavigation.navigationErrorMessage}
+          </p>
+        ) : null}
+        <ShellPane
+          tab="customize"
+          mode={mode}
+          draftWorldState={draftWorldState}
+        />
+        <ShellPane
+          tab="ingestion"
+          mode={mode}
+          draftWorldState={draftWorldState}
+        />
+      </Tabs>
+      {draftAbandonNavigation.isAbandonDialogOpen ? (
+        <DraftAbandonConfirmationDialog
+          errorMessage={draftAbandonNavigation.dialogErrorMessage}
+          isDiscarding={draftAbandonNavigation.isDiscardingDraft}
+          onCancel={draftAbandonNavigation.closeAbandonDialog}
+          onConfirm={draftAbandonNavigation.confirmDraftAbandon}
+        />
+      ) : null}
+    </>
   );
 }
 
