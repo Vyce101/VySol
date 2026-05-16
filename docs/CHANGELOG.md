@@ -6,8 +6,9 @@ All notable changes to VySol will be documented in this file.
 
 ### Changed
 
+- Changed World Detail navigation so users can move between World Hub, draft World Detail, and committed World Detail through app-owned route controls.
 - Changed World Hub so a startup splash appears while worlds load, and hovering committed worlds crossfades the hero copy and background without opening the world.
-- Changed World Hub committed-world cards to show `Last Used`, lift with a connected outline/glow on hover, and reveal a non-functional Manage World overlay.
+- Changed World Hub committed-world cards to show `Last Used`, lift with a connected outline/glow on hover, and reveal an icon button that opens committed World Detail.
 - Changed app nav bars so their width follows their contents while height and tab text size stay consistent across pages.
 - Changed World Hub so committed worlds load in recent-use order and the latest world controls the hero background, title, description, and font.
 - Changed World Hub so committed worlds render as cinematic image cards without changing the static hero area.
