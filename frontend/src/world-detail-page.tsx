@@ -1,5 +1,6 @@
-import { Box, GitBranch } from "lucide-react";
+import { ArrowLeft, Box, GitBranch } from "lucide-react";
 import { useEffect, useState } from "react";
+import { navigateToWorldHub } from "./app-navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import {
   type DraftWorldDetailResponse,
@@ -51,16 +52,31 @@ function WorldDetailTabs({
 }) {
   return (
     <Tabs defaultValue="customize" className="world-detail-tabs-root">
-      <TabsList aria-label="World detail sections">
-        <TabsTrigger value="customize">
-          <GitBranch aria-hidden="true" />
-          <span>Customize</span>
-        </TabsTrigger>
-        <TabsTrigger value="ingestion">
-          <Box aria-hidden="true" />
-          <span>Ingestion</span>
-        </TabsTrigger>
-      </TabsList>
+      <div className="world-detail-nav-list" aria-label="World detail navigation">
+        <button
+          className="world-detail-up-button"
+          type="button"
+          onClick={navigateToWorldHub}
+          aria-label="Go to Worlds"
+        >
+          <ArrowLeft aria-hidden="true" />
+          <span>Worlds</span>
+        </button>
+        <span className="world-detail-nav-separator" aria-hidden="true" />
+        <TabsList
+          aria-label="World detail sections"
+          className="world-detail-tabs-list"
+        >
+          <TabsTrigger value="customize">
+            <GitBranch aria-hidden="true" />
+            <span>Customize</span>
+          </TabsTrigger>
+          <TabsTrigger value="ingestion">
+            <Box aria-hidden="true" />
+            <span>Ingestion</span>
+          </TabsTrigger>
+        </TabsList>
+      </div>
       <ShellPane tab="customize" mode={mode} draftWorldState={draftWorldState} />
       <ShellPane tab="ingestion" mode={mode} draftWorldState={draftWorldState} />
     </Tabs>

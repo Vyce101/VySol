@@ -327,7 +327,8 @@
 }
 
 .world-hub-world-card:hover .world-hub-world-card-manage,
-.world-hub-world-card:focus-within .world-hub-world-card-manage {
+.world-hub-world-card:focus-within .world-hub-world-card-manage,
+.world-hub-world-card-manage:focus-visible {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);

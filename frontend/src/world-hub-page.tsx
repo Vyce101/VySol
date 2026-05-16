@@ -1,10 +1,12 @@
 import { Globe2, SlidersHorizontal } from "lucide-react";
+import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import {
   type CommittedWorldCardResponse,
   fetchCommittedWorldCards,
 } from "./committed-world-api";
+import { navigateToCommittedWorldDetail } from "./app-navigation";
 import { createDraftWorldDetailFlow } from "./draft-world-api";
 import logoUrl from "../../docs/assets/Butterfly_logo_compressed_centered.png";
 import createWorldCardImageUrl from "../../docs/assets/New Create World Card.png";
@@ -209,6 +211,21 @@ function CommittedWorldCard({
   world: CommittedWorldCardResponse;
   onHover: (world: CommittedWorldCardResponse) => void;
 }) {
+  const openWorldDetail = () => {
+    navigateToCommittedWorldDetail(world.world_id);
+  };
+
+  const handleOpenWorldDetailKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    event.preventDefault();
+    openWorldDetail();
+  };
+
   return (
     <article
       className="world-hub-world-card"
@@ -227,7 +244,9 @@ function CommittedWorldCard({
       <button
         className="world-hub-world-card-manage"
         type="button"
-        aria-label={`Manage World: ${world.display_name}`}
+        aria-label={`Open World: ${world.display_name}`}
+        onClick={openWorldDetail}
+        onKeyDown={handleOpenWorldDetailKeyDown}
       >
         <SlidersHorizontal aria-hidden="true" />
       </button>

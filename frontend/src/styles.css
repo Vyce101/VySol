@@ -111,6 +111,74 @@ button {
   transform: translateX(-50%);
 }
 
+.world-detail-nav-list {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: max-content;
+  min-width: 0;
+  height: 53px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, 0.27);
+  border-radius: 999px;
+  background: rgba(19, 20, 27, 0.58);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 18px 42px rgba(0, 0, 0, 0.36);
+  user-select: none;
+  backdrop-filter: blur(18px) saturate(1.12);
+  -webkit-user-select: none;
+  -webkit-backdrop-filter: blur(18px) saturate(1.12);
+}
+
+.world-detail-up-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 41px;
+  gap: 10px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.88);
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.world-detail-up-button:hover,
+.world-detail-up-button:focus-visible {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  outline: 0;
+}
+
+.world-detail-up-button svg {
+  width: clamp(18px, 1.35vw, 22px);
+  height: clamp(18px, 1.35vw, 22px);
+  stroke-width: 2;
+}
+
+.world-detail-nav-separator {
+  width: 1px;
+  height: 31px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.tabs-list.world-detail-tabs-list {
+  height: 41px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .tabs-list {
   --tabs-active-indicator-height: 3px;
   --tabs-active-indicator-inline-inset: 14px;
@@ -232,6 +300,27 @@ button {
     width: max-content;
     min-width: 0;
     gap: 4px;
+  }
+
+  .world-detail-nav-list {
+    max-width: calc(100vw - 32px);
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .world-detail-nav-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  .world-detail-up-button {
+    gap: 7px;
+    padding: 0 12px;
+  }
+
+  .world-detail-nav-separator {
+    height: 28px;
   }
 
   .tabs-trigger {

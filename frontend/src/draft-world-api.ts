@@ -1,3 +1,8 @@
+import {
+  buildDraftWorldDetailUrl,
+  navigateToDraftWorldDetail,
+} from "./app-navigation";
+
 export type SplitterSettingsResponse = {
   chunk_size: number;
   max_lookback_size: number;
@@ -124,20 +129,10 @@ export async function confirmDraftWorldLeave(
 
 export async function createDraftWorldDetailFlow(): Promise<string> {
   const draftWorld = await createDraftWorld();
-  const draftWorldUrl = buildDraftWorldDetailUrl(draftWorld.draft_id);
-  window.history.pushState(null, "", draftWorldUrl);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-  return draftWorldUrl;
+  return navigateToDraftWorldDetail(draftWorld.draft_id);
 }
 
-export function buildDraftWorldDetailUrl(draftId: string): string {
-  const query = new URLSearchParams({
-    mode: "draft",
-    draftId,
-  });
-
-  return `/?${query.toString()}`;
-}
+export { buildDraftWorldDetailUrl };
 
 async function readDraftWorldResponse(
   response: Response,
