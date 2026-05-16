@@ -85,8 +85,7 @@
   display: grid;
   justify-items: center;
   max-width: calc(100vw - 32px);
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: visible;
   transform: translateX(-50%);
 }
 

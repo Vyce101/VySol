@@ -112,6 +112,9 @@ button {
 }
 
 .tabs-list {
+  --tabs-active-indicator-height: 3px;
+  --tabs-active-indicator-inline-inset: 14px;
+  --tabs-active-indicator-bottom: -7px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -164,10 +167,10 @@ button {
 
 .tabs-trigger[data-state="active"]::after {
   position: absolute;
-  right: 14px;
-  bottom: -7px;
-  left: 14px;
-  height: 3px;
+  right: var(--tabs-active-indicator-inline-inset);
+  bottom: var(--tabs-active-indicator-bottom);
+  left: var(--tabs-active-indicator-inline-inset);
+  height: var(--tabs-active-indicator-height);
   border-radius: 999px;
   content: "";
   background: linear-gradient(90deg, #8d42ff 0%, #42c8ff 52%, #9b46ff 100%);
