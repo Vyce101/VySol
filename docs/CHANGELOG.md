@@ -27,6 +27,8 @@ All notable changes to VySol will be documented in this file.
 
 ### Added
 
+- Added a committed World Detail data API so Manage World can load saved metadata, sources, and locked splitter settings without updating Last Used.
+- Added a Committed World Detail API concept page.
 - Added a draft abandon confirmation dialog so unsafe World Detail navigation warns before discarding temporary draft setup.
 - Added a Draft Abandon Confirmation UI concept page.
 - Added a Create World Hub card that opens backend-backed draft World Detail without reloading the page.
@@ -119,3 +121,7 @@ All notable changes to VySol will be documented in this file.
 - Added GitHub Pages documentation deployment with Retype.
 - Added starter documentation structure under `docs`.
 - Added safe launcher and update script skeletons for future app startup.
+
+### Fixed
+
+- Fixed `run.bat` startup when stale launcher state contains invalid process records.

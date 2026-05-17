@@ -87,7 +87,7 @@ World Hub Page currently interacts with:
 
 - Committed World Card API, which lists committed worlds for card rendering.
 - Draft World Detail API, which creates backend-owned draft setup when the Create World card is clicked.
-- World Detail Page Shell, which renders after the frontend route changes to draft or committed mode.
+- World Detail Page Shell, which renders after the frontend route changes to draft or committed mode and owns committed detail loading after navigation.
 - Asset File Delivery, which serves card background images and hero fonts by asset ID.
 - Committed World Index Storage, which owns the committed-world metadata behind the card API.
 - Asset Metadata Storage and Safe Asset File Storage indirectly through backend asset resolution.
@@ -133,7 +133,7 @@ Cross-system edge cases:
 - Create World navigation must update the frontend route without forcing a full document reload.
 - Rendering the hub must not mark committed worlds as used.
 - Rendering `Last Used` must use backend `last_used_at` values without refreshing or mutating them.
-- Opening committed World Detail from the card icon must route by world ID without loading committed-world data or refreshing `last_used_at`.
+- Opening committed World Detail from the card icon must route by world ID without the Hub loading committed-world detail data or refreshing `last_used_at`.
 - Card image URLs and hero font URLs must come from backend asset delivery instead of hardcoded local filesystem paths.
 - Stored asset paths must remain backend-owned so unsafe or missing assets are rejected before file serving.
 - Recent-use ordering must come from committed-world storage rather than client-side draft or display-name sorting.
@@ -161,11 +161,11 @@ Cross-system edge cases:
 
 - `frontend/src/world-hub-page.tsx` owns the World Hub composition, card loading state, and card rendering.
 - `frontend/src/world-hub-page.css` owns World Hub-specific layout, viewport locking, and card styling.
-- `frontend/src/committed-world-api.ts` owns the frontend card-list request.
+- `frontend/src/committed-world-api.ts` owns committed-world frontend request helpers; the Hub uses the card-list request.
 - `frontend/src/draft-world-api.ts` owns the Create World draft-opening helper.
 - `frontend/src/app-navigation.ts` owns frontend route helpers for Hub and World Detail navigation.
 - `frontend/src/main.tsx` owns the current route switch between Hub and World Detail.
-- `app/committed_worlds` owns the committed-world card listing route.
+- `app/committed_worlds` owns committed-world card listing and detail routes.
 - `app/storage/worlds.py` owns recent-use ordering for committed-world records.
 - `app/asset_files` owns safe browser-facing asset file delivery.
 - `frontend/vite.config.ts` proxies the frontend card and asset requests during dev startup.

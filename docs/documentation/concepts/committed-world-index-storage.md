@@ -65,6 +65,7 @@ Committed World Index Storage currently interacts with:
 - Asset Metadata Storage by storing background and font asset IDs that refer to known asset records.
 - Committed World Folder Bootstrap by producing UUID world IDs that can be used for committed world folder paths.
 - World Database Bootstrap by producing UUID world IDs that callers can use to open per-world databases.
+- Committed World Detail API by serving the global metadata part of a read-only detail load without refreshing `last_used_at`.
 - The central logger, which records committed world creation, update, last-used updates, duplicate rejection, missing world IDs, and database failures.
 
 Future World Hub, Customize, Ingestion, chat instance, and graph systems may use committed world IDs as stable references. Systems that represent real world use should call the explicit mark-used repository behavior at their own interaction boundary, but they should keep their own storage responsibilities separate.
@@ -81,6 +82,7 @@ Internal edge cases:
 - Created committed worlds receive a `last_used_at` timestamp before insert.
 - Committed world metadata updates refresh `last_used_at`.
 - Explicit mark-used calls update only `last_used_at`.
+- Read-only detail loads return the stored `last_used_at` without changing it.
 - Recent-use listing sorts UTC ISO timestamps by natural SQLite text order.
 - Missing world IDs return no record instead of creating one.
 - Updating a missing world ID returns no record before duplicate-name checks.
@@ -126,6 +128,7 @@ Before editing Committed World Index Storage, check:
 - Whether draft-world behavior is being accidentally persisted here.
 - Whether display-name uniqueness still matches the case-insensitive committed-world rule.
 - Whether `last_used_at` is refreshed only for committed-world use signals and not for unrelated storage reads.
+- Whether committed detail loads preserve `last_used_at` while still returning the stored value.
 - Whether recent-use sorting still relies on UTC ISO timestamp text order correctly.
 - Whether logs avoid sensitive local paths and other user-owned details.
 - Whether database failures are logged and re-raised without swallowing the original error.

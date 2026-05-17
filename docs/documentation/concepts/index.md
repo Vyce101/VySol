@@ -15,6 +15,7 @@ Concept pages explain system contracts and features: what each system owns, what
 - [Commit Rollback and Cleanup Helper](commit-rollback-and-cleanup-helper.md)
 - [Committed Source File Storage](committed-source-file-storage.md)
 - [Committed Source Storage](committed-source-storage.md)
+- [Committed World Detail API](committed-world-detail-api.md)
 - [Committed World Folder Bootstrap](committed-world-folder-bootstrap.md)
 - [Committed World Index Storage](committed-world-index-storage.md)
 - [Draft Abandon Confirmation UI](draft-abandon-confirmation-ui.md)
