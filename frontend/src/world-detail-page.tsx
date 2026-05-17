@@ -11,6 +11,10 @@ import {
   type DraftWorldDetailResponse,
   fetchDraftWorldDetail,
 } from "./draft-world-api";
+import {
+  type CustomizeWorldState,
+  WorldDetailCustomizeTab,
+} from "./world-detail-customize-tab";
 import logoUrl from "../../docs/assets/Butterfly_logo_compressed_centered.png";
 import backgroundUrl from "../../app/assets/images/Main World Image.png";
 
@@ -35,12 +39,16 @@ export function WorldDetailPage() {
   const worldId = readWorldId();
   const draftWorldState = useDraftWorldDetail(mode, draftId);
   const committedWorldState = useCommittedWorldDetail(mode, worldId);
+  const worldBackgroundUrl = getWorldBackgroundUrl(
+    mode,
+    committedWorldState,
+  );
 
   return (
     <main className="world-detail-shell">
       <div
         className="world-detail-background"
-        style={{ backgroundImage: `url("${backgroundUrl}")` }}
+        style={{ backgroundImage: `url("${worldBackgroundUrl}")` }}
         aria-hidden="true"
       />
       <div className="world-detail-shade" aria-hidden="true" />
@@ -148,6 +156,20 @@ function ShellPane({
   draftWorldState: DraftWorldLoadState;
   committedWorldState: CommittedWorldLoadState;
 }) {
+  if (tab === "customize") {
+    return (
+      <TabsContent value={tab} className="customize-tabs-content">
+        <WorldDetailCustomizeTab
+          state={getCustomizeWorldState(
+            mode,
+            draftWorldState,
+            committedWorldState,
+          )}
+        />
+      </TabsContent>
+    );
+  }
+
   return (
     <TabsContent value={tab}>
       <section className="world-detail-pane" aria-label={`${mode} ${tab} shell`}>
@@ -155,6 +177,51 @@ function ShellPane({
       </section>
     </TabsContent>
   );
+}
+
+function getWorldBackgroundUrl(
+  mode: WorldMode,
+  committedWorldState: CommittedWorldLoadState,
+): string {
+  if (mode === "committed" && committedWorldState.status === "loaded") {
+    return committedWorldState.detail.background_image_url;
+  }
+
+  return backgroundUrl;
+}
+
+function getCustomizeWorldState(
+  mode: WorldMode,
+  draftWorldState: DraftWorldLoadState,
+  committedWorldState: CommittedWorldLoadState,
+): CustomizeWorldState {
+  if (mode === "draft") {
+    if (draftWorldState.status === "loaded") {
+      return {
+        mode,
+        status: "loaded",
+        detail: draftWorldState.detail,
+      };
+    }
+
+    return {
+      mode,
+      status: draftWorldState.status,
+    };
+  }
+
+  if (committedWorldState.status === "loaded") {
+    return {
+      mode,
+      status: "loaded",
+      detail: committedWorldState.detail,
+    };
+  }
+
+  return {
+    mode,
+    status: committedWorldState.status,
+  };
 }
 
 function getPaneLabel(
