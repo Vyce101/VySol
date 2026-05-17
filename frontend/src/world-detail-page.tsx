@@ -1,6 +1,10 @@
 import { ArrowLeft, Box, GitBranch } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
+import {
+  type CommittedWorldDetailResponse,
+  fetchCommittedWorldDetail,
+} from "./committed-world-api";
 import { DraftAbandonConfirmationDialog } from "./draft-abandon-confirmation-dialog";
 import { useDraftAbandonNavigation } from "./draft-abandon-navigation";
 import {
@@ -17,13 +21,20 @@ type DraftWorldLoadState =
   | { status: "loading"; draftId: string; detail: null }
   | { status: "loaded"; draftId: string; detail: DraftWorldDetailResponse }
   | { status: "error"; draftId: string; detail: null };
+type CommittedWorldLoadState =
+  | { status: "idle"; worldId: null; detail: null }
+  | { status: "loading"; worldId: string; detail: null }
+  | { status: "loaded"; worldId: string; detail: CommittedWorldDetailResponse }
+  | { status: "error"; worldId: string; detail: null };
 
 const VALID_MODES = new Set<WorldMode>(["draft", "committed"]);
 
 export function WorldDetailPage() {
   const mode = readWorldMode();
   const draftId = readDraftId();
+  const worldId = readWorldId();
   const draftWorldState = useDraftWorldDetail(mode, draftId);
+  const committedWorldState = useCommittedWorldDetail(mode, worldId);
 
   return (
     <main className="world-detail-shell">
@@ -39,7 +50,11 @@ export function WorldDetailPage() {
           <span className="world-detail-brand-name">VySol</span>
         </div>
       </header>
-      <WorldDetailTabs mode={mode} draftWorldState={draftWorldState} />
+      <WorldDetailTabs
+        mode={mode}
+        draftWorldState={draftWorldState}
+        committedWorldState={committedWorldState}
+      />
     </main>
   );
 }
@@ -47,9 +62,11 @@ export function WorldDetailPage() {
 function WorldDetailTabs({
   mode,
   draftWorldState,
+  committedWorldState,
 }: {
   mode: WorldMode;
   draftWorldState: DraftWorldLoadState;
+  committedWorldState: CommittedWorldLoadState;
 }) {
   const draftId = draftWorldState.draftId;
   const draftAbandonNavigation = useDraftAbandonNavigation(mode, draftId);
@@ -99,11 +116,13 @@ function WorldDetailTabs({
           tab="customize"
           mode={mode}
           draftWorldState={draftWorldState}
+          committedWorldState={committedWorldState}
         />
         <ShellPane
           tab="ingestion"
           mode={mode}
           draftWorldState={draftWorldState}
+          committedWorldState={committedWorldState}
         />
       </Tabs>
       {draftAbandonNavigation.isAbandonDialogOpen ? (
@@ -122,15 +141,17 @@ function ShellPane({
   tab,
   mode,
   draftWorldState,
+  committedWorldState,
 }: {
   tab: WorldTab;
   mode: WorldMode;
   draftWorldState: DraftWorldLoadState;
+  committedWorldState: CommittedWorldLoadState;
 }) {
   return (
     <TabsContent value={tab}>
       <section className="world-detail-pane" aria-label={`${mode} ${tab} shell`}>
-        <p>{getPaneLabel(mode, tab, draftWorldState)}</p>
+        <p>{getPaneLabel(mode, tab, draftWorldState, committedWorldState)}</p>
       </section>
     </TabsContent>
   );
@@ -140,13 +161,13 @@ function getPaneLabel(
   mode: WorldMode,
   tab: WorldTab,
   draftWorldState: DraftWorldLoadState,
+  committedWorldState: CommittedWorldLoadState,
 ): string {
   if (mode === "draft") {
     return getDraftPaneLabel(tab, draftWorldState);
   }
 
-  const tabLabel = tab === "customize" ? "Customize" : "Ingestion";
-  return `Committed world ${tabLabel} shell`;
+  return getCommittedPaneLabel(tab, committedWorldState);
 }
 
 function getDraftPaneLabel(
@@ -172,6 +193,30 @@ function getDraftPaneLabel(
   }
 
   return `Draft world Ingestion shell. ${draftWorldState.detail.staged_sources.length} staged sources`;
+}
+
+function getCommittedPaneLabel(
+  tab: WorldTab,
+  committedWorldState: CommittedWorldLoadState,
+): string {
+  if (committedWorldState.status === "loading") {
+    return "Loading committed world setup";
+  }
+
+  if (committedWorldState.status === "error") {
+    return "Committed world setup could not be loaded";
+  }
+
+  if (committedWorldState.status !== "loaded") {
+    const tabLabel = tab === "customize" ? "Customize" : "Ingestion";
+    return `Committed world ${tabLabel} shell`;
+  }
+
+  if (tab === "customize") {
+    return `Committed world Customize shell. Saved values loaded for ${committedWorldState.detail.display_name}`;
+  }
+
+  return `Committed world Ingestion shell. ${committedWorldState.detail.committed_sources.length} committed sources`;
 }
 
 function useDraftWorldDetail(
@@ -211,12 +256,58 @@ function useDraftWorldDetail(
   return draftWorldState;
 }
 
+function useCommittedWorldDetail(
+  mode: WorldMode,
+  worldId: string | null,
+): CommittedWorldLoadState {
+  const [committedWorldState, setCommittedWorldState] =
+    useState<CommittedWorldLoadState>(getInitialCommittedWorldState(worldId));
+
+  useEffect(() => {
+    if (mode !== "committed" || worldId === null) {
+      setCommittedWorldState(getInitialCommittedWorldState(null));
+      return;
+    }
+
+    const abortController = new AbortController();
+    setCommittedWorldState({ status: "loading", worldId, detail: null });
+
+    fetchCommittedWorldDetail(worldId, abortController.signal)
+      .then((detail) => {
+        setCommittedWorldState({ status: "loaded", worldId, detail });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+
+        setCommittedWorldState({ status: "error", worldId, detail: null });
+      });
+
+    return () => {
+      abortController.abort();
+    };
+  }, [mode, worldId]);
+
+  return committedWorldState;
+}
+
 function getInitialDraftWorldState(draftId: string | null): DraftWorldLoadState {
   if (draftId === null) {
     return { status: "idle", draftId: null, detail: null };
   }
 
   return { status: "loading", draftId, detail: null };
+}
+
+function getInitialCommittedWorldState(
+  worldId: string | null,
+): CommittedWorldLoadState {
+  if (worldId === null) {
+    return { status: "idle", worldId: null, detail: null };
+  }
+
+  return { status: "loading", worldId, detail: null };
 }
 
 function readWorldMode(): WorldMode {
@@ -234,6 +325,16 @@ function readDraftId(): string | null {
 
   if (draftId && draftId.trim()) {
     return draftId;
+  }
+
+  return null;
+}
+
+function readWorldId(): string | null {
+  const worldId = new URLSearchParams(window.location.search).get("worldId");
+
+  if (worldId && worldId.trim()) {
+    return worldId;
   }
 
   return null;
