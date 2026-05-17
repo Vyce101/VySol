@@ -9,7 +9,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.storage.world_databases import (
+    MissingWorldDatabaseError,
     bootstrap_world_database,
+    open_existing_world_database,
     open_world_database,
     resolve_world_database_path,
 )
@@ -67,6 +69,24 @@ class WorldDatabaseBootstrapTests(unittest.TestCase):
             with close_after_test(open_world_database(str(uuid4()))) as connection:
                 self.assertEqual(get_world_schema_version(connection), 4)
 
+    def test_open_existing_world_database_rejects_missing_database(self) -> None:
+        with patched_repo_root() as repo_root:
+            world_id = str(uuid4())
+
+            with self.assertRaises(MissingWorldDatabaseError):
+                open_existing_world_database(world_id)
+
+            self.assertFalse((repo_root / "user" / "worlds").exists())
+
+    def test_open_existing_world_database_opens_existing_database(self) -> None:
+        with patched_repo_root():
+            world_id = str(uuid4())
+            with close_after_test(bootstrap_world_database(world_id)):
+                pass
+
+            with close_after_test(open_existing_world_database(world_id)) as connection:
+                self.assertEqual(get_world_schema_version(connection), 4)
+
     def test_existing_world_database_opens_without_reapplying_migration(self) -> None:
         with patched_repo_root():
             world_id = str(uuid4())
@@ -91,6 +111,7 @@ class WorldDatabaseBootstrapTests(unittest.TestCase):
             resolve_world_database_path,
             bootstrap_world_database,
             open_world_database,
+            open_existing_world_database,
         )
 
         for helper_function in helper_functions:
