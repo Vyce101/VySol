@@ -17,7 +17,8 @@ function Write-UpdateLog {
     )
 
     $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    $line | Tee-Object -FilePath $logFile -Append
+    Write-Host $line
+    Add-Content -Path $logFile -Value $line
 }
 
 function Assert-CommandAvailable {

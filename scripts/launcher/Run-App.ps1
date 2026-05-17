@@ -22,7 +22,8 @@ function Write-LauncherLog {
     )
 
     $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    $line | Tee-Object -FilePath $logFile -Append
+    Write-Host $line
+    Add-Content -Path $logFile -Value $line
 }
 
 function Read-Config {
@@ -201,6 +202,11 @@ function Stop-AppOwnedRecord {
         [bool]$TrustRecordedPids = $false
     )
 
+    if (-not (Test-ValidStateRecord -Record $Record)) {
+        Write-LauncherLog "Ignoring invalid launcher state record during cleanup." "WARNING"
+        return
+    }
+
     $pidValue = [int]$Record.processId
     $commandLine = Get-CommandLineByPid -ProcessId $pidValue
     if ($TrustRecordedPids -or (Test-IsAppOwned -Record $Record -CommandLine $commandLine)) {
@@ -223,32 +229,91 @@ function Stop-AppOwnedRecord {
     }
 }
 
+function Test-ValidStateRecord {
+    param([Parameter(Mandatory = $true)]$Record)
+
+    if ($null -eq $Record) {
+        return $false
+    }
+
+    $propertyNames = @($Record.PSObject.Properties.Name)
+    foreach ($requiredProperty in @("processId", "rootPath", "commandFingerprint")) {
+        if ($propertyNames -notcontains $requiredProperty) {
+            return $false
+        }
+    }
+
+    try {
+        return [int]$Record.processId -gt 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-ValidStateRecords {
+    param(
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Records = @(),
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $candidateRecords = @($Records)
+    $validRecords = @()
+    $invalidCount = 0
+    foreach ($record in $candidateRecords) {
+        if ($null -eq $record) {
+            continue
+        }
+
+        if (Test-ValidStateRecord -Record $record) {
+            $validRecords += $record
+            continue
+        }
+
+        $invalidCount += 1
+    }
+
+    if ($invalidCount -gt 0) {
+        Write-LauncherLog "Ignored $invalidCount invalid launcher state record(s) while reading $Context." "WARNING"
+    }
+
+    return $validRecords
+}
+
 function Read-StateRecords {
     if (-not (Test-Path $stateFile)) {
-        return ,@()
+        return
     }
 
     $content = Get-Content $stateFile -Raw
     if ([string]::IsNullOrWhiteSpace($content)) {
-        return ,@()
+        return
     }
 
     $records = $content | ConvertFrom-Json
     if ($null -eq $records) {
-        return ,@()
+        return
     }
 
-    return @($records)
+    return $records
 }
 
 function Write-StateRecords {
-    param([array]$Records = @())
+    param([AllowNull()][object[]]$Records = @())
 
-    $Records | ConvertTo-Json -Depth 8 | Set-Content -Path $stateFile
+    $validRecords = @(Get-ValidStateRecords -Records @($Records) -Context "state write")
+    if ($validRecords.Count -eq 0) {
+        "[]" | Set-Content -Path $stateFile
+        return
+    }
+
+    $validRecords | ConvertTo-Json -Depth 8 | Set-Content -Path $stateFile
 }
 
 function Stop-StaleAppOwnedProcesses {
-    $records = Read-StateRecords
+    $records = @(Get-ValidStateRecords -Records @(Read-StateRecords) -Context "stale state")
     foreach ($record in $records) {
         $pidValue = [int]$record.processId
         $commandLine = Get-CommandLineByPid -ProcessId $pidValue
@@ -273,7 +338,8 @@ function Assert-PortAvailableOrRecoverAppOwned {
     param(
         [Parameter(Mandatory = $true)]$Service,
         [AllowEmptyCollection()]
-        [Parameter(Mandatory = $true)][array]$KnownRecords
+        [AllowNull()]
+        [object[]]$KnownRecords = @()
     )
 
     if (-not $Service.requiredPort) {
@@ -286,7 +352,8 @@ function Assert-PortAvailableOrRecoverAppOwned {
         return
     }
 
-    $record = $KnownRecords | Where-Object { [int]$_.requiredPort -eq $port } | Select-Object -First 1
+    $validKnownRecords = @(Get-ValidStateRecords -Records @($KnownRecords) -Context "port recovery")
+    $record = $validKnownRecords | Where-Object { [int]$_.requiredPort -eq $port } | Select-Object -First 1
     if ($null -ne $record -and (Test-IsAppOwned -Record $record -CommandLine $owner.CommandLine)) {
         Stop-AppOwnedProcess -ProcessId $owner.ProcessId -Reason "recovering app-owned port $port"
         return
@@ -334,7 +401,9 @@ function Test-HealthReady {
 
 function Wait-ForReadiness {
     param(
-        [Parameter(Mandatory = $true)][array]$Services,
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Services = @(),
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
 
@@ -362,9 +431,14 @@ function Wait-ForReadiness {
 }
 
 function Update-ListeningProcessRecords {
-    param([Parameter(Mandatory = $true)][array]$Records)
+    param(
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Records = @()
+    )
 
-    foreach ($record in $Records) {
+    $validRecords = @(Get-ValidStateRecords -Records @($Records) -Context "listener update")
+    foreach ($record in $validRecords) {
         if (-not $record.requiredPort) {
             continue
         }
@@ -380,18 +454,27 @@ function Update-ListeningProcessRecords {
 }
 
 function Show-LogTailUntilExit {
-    param([Parameter(Mandatory = $true)][array]$Records)
+    param(
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Records = @()
+    )
 
     Write-LauncherLog "App is ready. Press Q in this window to shut down app-owned processes."
+    $validRecords = @(Get-ValidStateRecords -Records @($Records) -Context "log tail")
+    if ($validRecords.Count -eq 0) {
+        throw "No app-owned processes were recorded."
+    }
+
     $offsets = @{}
-    foreach ($record in $Records) {
+    foreach ($record in $validRecords) {
         foreach ($logFilePath in @($record.logFiles)) {
             $offsets[[string]$logFilePath] = 0
         }
     }
 
     while ($true) {
-        foreach ($record in $Records) {
+        foreach ($record in $validRecords) {
             foreach ($logFilePath in @($record.logFiles)) {
                 $path = [string]$logFilePath
                 if (-not (Test-Path $path)) {
@@ -422,7 +505,7 @@ function Show-LogTailUntilExit {
         }
 
         $alive = $false
-        foreach ($record in $Records) {
+        foreach ($record in $validRecords) {
             if ($null -ne (Get-Process -Id ([int]$record.processId) -ErrorAction SilentlyContinue)) {
                 $alive = $true
                 break
@@ -453,7 +536,7 @@ try {
         exit 2
     }
 
-    $knownRecords = Read-StateRecords
+    $knownRecords = @(Get-ValidStateRecords -Records @(Read-StateRecords) -Context "known state")
     foreach ($service in $enabledServices) {
         Assert-ServiceCanStart -Service $service
     }
