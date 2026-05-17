@@ -1,14 +1,14 @@
 # World Detail Page Shell
 
-World Detail Page Shell is VySol's frontend layout and route contract for a single world screen. It provides the visual frame that future Customize and Ingestion features will fill, rehydrates backend-owned draft or committed detail state when route state identifies a world, and exposes parent navigation back to World Hub.
+World Detail Page Shell is VySol's frontend layout and route contract for a single world screen. It provides the visual frame that Customize and future Ingestion features fill, rehydrates backend-owned draft or committed detail state when route state identifies a world, and exposes parent navigation back to World Hub.
 
-This page is for developers, power users, and AI coding agents that need to understand the World Detail shell before changing frontend layout, route state, world-mode presentation, default visual assets, committed detail loading, or future Customize and Ingestion tab work.
+This page is for developers, power users, and AI coding agents that need to understand the World Detail shell before changing frontend layout, route state, world-mode presentation, default visual assets, committed detail loading, Customize tab hosting, or future Ingestion tab work.
 
 ## Why It Exists
 
-VySol needs a stable world-level surface before the full Customize and Ingestion workflows exist. The shell gives draft worlds and committed worlds the same recognizable place in the app: cinematic background, VySol branding, and two top-level tabs.
+VySol needs a stable world-level surface before the full world-management workflows exist. The shell gives draft worlds and committed worlds the same recognizable place in the app: cinematic background, VySol branding, and two top-level tabs.
 
-The boundary matters because a layout shell should not accidentally become storage, ingestion, settings, upload, or source-management logic. Future tickets can add real controls inside the tab panes while keeping the outer frame consistent.
+The boundary matters because a layout shell should not accidentally become storage, ingestion, settings, upload, or source-management logic. Feature-specific tab content can live inside the shell while keeping the outer frame consistent.
 
 ## Ownership Boundary
 
@@ -23,12 +23,13 @@ World Detail Page Shell owns:
 - Reading backend committed detail when committed route state includes a world ID.
 - Routing back to World Hub through explicit parent navigation.
 - Delegating draft abandon checks to Draft Abandon Confirmation UI when parent navigation would leave an uncommitted draft.
+- Hosting World Detail Customize UI inside the Customize tab.
 - Using the app's true default world image and default font assets for the temporary visual shell.
 - Keeping the cinematic glass styling and responsive layout stable across desktop and narrow viewports.
 
 World Detail Page Shell does not own:
 
-- Customize fields, validation, saving, or asset picking.
+- Customize field behavior, validation, saving, or asset picking.
 - Ingestion controls, source staging, start, pause, retry, progress, or provider behavior.
 - Backend draft creation, draft storage, or API contracts.
 - The World Hub Create World card or draft-opening click behavior.
@@ -46,9 +47,7 @@ The frontend route switch renders the World Detail shell when route/query state 
 
 If draft mode has no draft ID, the shell keeps a draft-safe visual fallback for direct development loading without creating a frontend-only committed draft. If committed detail loading fails, the shell keeps the user on World Detail and renders visible error state instead of logging to the browser console.
 
-If the mode is `committed`, the same shell renders committed-world placeholder pane labels. Committed world data loading remains outside this shell contract until a later ticket connects it.
-
-The page always renders the same top-level frame: background image, dark cinematic overlays, non-clickable VySol branding, and a glass navigation pill containing parent `Worlds` navigation plus the `Customize` and `Ingestion` tab controls. The user can switch between `Customize` and `Ingestion`, but each tab currently shows only minimal shell state because feature controls belong to later tickets. Activating `Worlds` uses app-owned parent navigation instead of browser-history Back behavior. In committed mode it routes directly to World Hub. In draft mode with a draft ID it delegates to Draft Abandon Confirmation UI before leaving.
+The page always renders the same top-level frame: background image, dark cinematic overlays, non-clickable VySol branding, and a glass navigation pill containing parent `Worlds` navigation plus the `Customize` and `Ingestion` tab controls. The user can switch between `Customize` and `Ingestion`. The Customize tab is delegated to World Detail Customize UI, while the Ingestion tab still renders placeholder shell state. Activating `Worlds` uses app-owned parent navigation instead of browser-history Back behavior. In committed mode it routes directly to World Hub. In draft mode with a draft ID it delegates to Draft Abandon Confirmation UI before leaving.
 
 ## Inputs
 
@@ -58,7 +57,7 @@ It does not receive committed world records, raw source paths, ingestion attempt
 
 ## Outputs
 
-The system produces visible frontend UI state only. It renders the page shell, parent `Worlds` navigation, active tab state, draft loading/error state, and minimal pane copy.
+The system produces visible frontend UI state only. It renders the page shell, parent `Worlds` navigation, active tab state, draft loading/error state, Customize tab hosting, and Ingestion placeholder copy.
 
 It may read backend draft detail when a draft ID is present, read backend committed detail when a committed world ID is present, and route back to World Hub when the parent navigation is activated. It does not write files, create database rows, create drafts by rendering, persist draft data, update committed-world recent-use state, start ingestion, save settings, own backend leave-safety policy, discard drafts directly, or emit app logs.
 
@@ -66,7 +65,7 @@ It may read backend draft detail when a draft ID is present, read backend commit
 
 Users see a full-screen world detail frame with VySol branding in the top-left and a centered glass navigation pill. The pill shows `Worlds` with a left arrow, a thin separator line, and the `Customize` and `Ingestion` tabs. The `Worlds` control returns to World Hub as parent navigation, but draft routes may show Draft Abandon Confirmation UI first. Committed detail routes can show loading, loaded, or visible error state inside the pane. The brand is informational only and must not navigate or refresh the page when clicked.
 
-The `Customize` and `Ingestion` tabs are visible in both draft and committed modes. Draft panes may show minimal read-only backend state, such as loaded splitter defaults or staged-source count. The panes intentionally avoid real controls until the related feature tickets add them.
+The `Customize` and `Ingestion` tabs are visible in both draft and committed modes. Customize shows local identity fields and visual previews through World Detail Customize UI. Ingestion still avoids real controls until a related feature ticket adds them.
 
 ## System Interactions
 
@@ -79,7 +78,7 @@ World Detail Page Shell currently interacts with:
 - World Hub Page, which can create a draft, open a committed-world route, and route into this shell through client-side route updates.
 - Frontend route helpers, which build draft detail, committed detail, and Hub URLs.
 - The frontend launcher service, which can start the Vite development server when the frontend service is enabled.
-- Future Customize UI, which can place world identity and visual controls inside the Customize pane.
+- World Detail Customize UI, which places local world identity fields and visual previews inside the Customize pane.
 - Future Ingestion UI, which can place source and ingestion controls inside the Ingestion pane.
 
 It must stay separate from backend storage, draft-world registries, committed-world indexes, source staging mutation, ingestion attempt state, parsing, chunking, graph systems, and retrieval.
@@ -112,7 +111,7 @@ Cross-system edge cases:
 - Draft mode must not create committed-world records or durable folders.
 - Committed mode must not mark a world as used simply because this static shell rendered.
 - Committed mode must load committed-world data from the backend only through the committed detail API.
-- Future Customize and Ingestion work must add behavior inside the tab panes without turning the shell into storage or orchestration logic.
+- Customize and future Ingestion work must add behavior inside the tab panes without turning the shell into storage or orchestration logic.
 - Logs must remain absent unless a future UI logging standard is introduced.
 
 ## Invariants
@@ -125,7 +124,7 @@ Cross-system edge cases:
 - Parent `Worlds` navigation must route to the Hub URL directly instead of relying on browser-history Back.
 - Draft parent navigation must keep the `Worlds` label stable while leave-state checks are in flight.
 - The VySol brand must remain visible, top-left, and non-clickable.
-- The shell must not implement Customize fields or Ingestion controls by itself.
+- The shell must host Customize UI without owning its field behavior, and must not implement Ingestion controls by itself.
 - The shell must not persist draft state, committed-world state, source state, or ingestion state.
 - Rendering the shell must not create a draft; draft creation belongs to the Hub Create World entrypoint calling the backend API.
 - Rendering the shell must not discard draft state; draft discard can happen only through the dedicated confirmation UI after user confirmation.
@@ -135,6 +134,7 @@ Cross-system edge cases:
 ## Implementation Landmarks
 
 - `frontend/src/world-detail-page.tsx` owns the shell composition, mode handling, branding, and tab panes.
+- `frontend/src/world-detail-customize-tab.tsx` owns the Customize tab field and preview behavior hosted by the shell.
 - `frontend/src/committed-world-api.ts` owns committed detail API calls and response types.
 - `frontend/src/draft-abandon-navigation.ts` owns the draft parent-navigation guard hook.
 - `frontend/src/draft-abandon-confirmation-dialog.tsx` owns the draft abandon confirmation dialog.
@@ -149,7 +149,7 @@ Cross-system edge cases:
 
 Before editing World Detail Page Shell, check:
 
-- Whether the change belongs in the shell instead of a future Customize, Ingestion, storage, or backend route system.
+- Whether the change belongs in the shell instead of Customize UI, future Ingestion UI, storage, or backend route systems.
 - Whether both draft and committed modes still render the same shell structure.
 - Whether backend-backed draft route state still rehydrates from Draft World Detail API.
 - Whether backend-backed committed route state still rehydrates from Committed World Detail API without changing `last_used_at`.

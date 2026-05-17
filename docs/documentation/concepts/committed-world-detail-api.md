@@ -63,14 +63,15 @@ Detail load failures are operation failures for the requested world and are logg
 
 ## User-Facing Behavior
 
-World Detail can show loading, loaded, or error state for committed detail. The initial committed view defaults to the Customize tab. Current UI output is intentionally minimal: it proves the saved data is loaded into frontend state without building full Customize controls.
+World Detail can show loading, loaded, or error state for committed detail. The initial committed view defaults to the Customize tab, where the frontend can display saved world identity and selected visual-style previews from the committed detail response.
 
 ## System Interactions
 
 Committed World Detail API interacts with:
 
 - World Hub Page, which creates committed World Detail route state when Manage World is activated.
-- World Detail Page Shell, which calls this API in committed mode and displays loading or error state.
+- World Detail Page Shell, which calls this API in committed mode and passes loaded state to tab content.
+- World Detail Customize UI, which displays committed world identity and visual-style previews from this response.
 - Committed World Index Storage, which owns global committed metadata and `last_used_at`.
 - World Database Bootstrap, which provides guarded access to an existing world-scoped database.
 - World Splitter Settings Storage, which owns locked splitter settings.
@@ -111,7 +112,7 @@ Cross-system edge cases:
 - `app/storage/world_splitter_settings.py` owns splitter settings reads and lock state.
 - `app/storage/committed_sources.py` owns committed source summary reads.
 - `frontend/src/committed-world-api.ts` owns the frontend request helper and response types.
-- `frontend/src/world-detail-page.tsx` owns committed-mode loading, error state, and minimal display state.
+- `frontend/src/world-detail-page.tsx` owns committed-mode loading and error state.
 
 ## What AI/Coders Must Check Before Changing This System
 
