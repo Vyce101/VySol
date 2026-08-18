@@ -6,9 +6,19 @@
 
 VySol is an early-stage roleplay and world-simulation app for building believable scenes inside established fictional worlds.
 
+**Project status:** VySol is currently paused. The repository remains public as a
+record of the project and its retrieval/GraphRAG experiments.
+
+Earlier, more complete prototype iterations are preserved in this repository as
+the [`VySol-Prototype-V1`](../../tree/VySol-Prototype-V1) and
+[`VySol-Prototype-V2`](../../tree/VySol-Prototype-V2) branches.
+V1 includes a working local-first GraphRAG application with ingestion, graph
+extraction, entity resolution, embeddings, source-level graph provenance,
+context inspection, and graph-backed chat.
+
 <p align="center">
   <a href="docs/QUICKSTART.md"><img alt="QUICKSTART: Windows" src="https://img.shields.io/badge/QUICKSTART-Windows-0892D0?labelColor=4A5568"></a>
-  <img alt="Status: rebuild alpha" src="https://img.shields.io/badge/status-rebuild--alpha-F59E0B?labelColor=4A5568">
+  <img alt="Status: paused" src="https://img.shields.io/badge/status-paused-F59E0B?labelColor=4A5568">
   <a href="https://vyce101.github.io/VySol/"><img alt="Docs: latest main" src="https://img.shields.io/badge/docs-latest%20main-0892D0?labelColor=4A5568"></a>
   <img alt="License: AGPLv3" src="https://img.shields.io/badge/license-AGPLv3-0892D0?labelColor=4A5568">
 </p>
@@ -18,7 +28,7 @@ VySol is an early-stage roleplay and world-simulation app for building believabl
 - [What It Solves](#what-it-solves)
 - [What It Does](#what-it-does)
 - [Why It Is Different](#why-it-is-different)
-- [Major Milestones Roadmap](#major-milestones-roadmap)
+- [Planned Direction](#planned-direction)
 - [Links](#links)
 
 ## What It Solves
@@ -45,7 +55,9 @@ In tools like SillyTavern, long-running roleplay often depends on lorebooks, mem
 
 VySol is being built around that pain. The goal is not only to retrieve a matching chunk, but to recover the connected background that a human reader would know belongs in the scene even when the wording is not semantically similar. That same structure is also meant to support richer world simulation over time, where characters, rules, places, and past events can shape what should happen next.
 
-## Major Milestones Roadmap
+## Planned Direction
+
+The following describes the direction explored for the rebuild before development was paused; these items should not be read as currently shipped features.
 
 ### Knowledge Graph Extraction Pipeline
 
