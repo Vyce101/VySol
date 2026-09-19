@@ -1,0 +1,63 @@
+input: .
+output: .retype
+url: vyce101.github.io/VySol
+
+branding:
+  title: VySol
+  label: Docs
+  logo: images/Logo 1.png
+  logoDark: images/Logo 1.png
+  logoWidth: 34
+  logoHeight: 34
+  logoAlign: left
+  baseColor: "#b78b58"
+
+links:
+  - text: GitHub
+    link: https://github.com/Vyce101/VySol
+    icon: mark-github
+    target: blank
+
+scheme:
+  mode: system
+
+theme:
+  base:
+    base-color: "#9b7047"
+    base-bg: "#fbf8f3"
+    base-link-weight: 500
+    nav-item-text-active-weight: 700
+  dark:
+    base-color: "#d7b77f"
+    base-bg: "#0c1420"
+
+nav:
+  icons:
+    mode: folders
+
+search:
+  hotkeys:
+    - "/"
+
+toc:
+  depth: 2-3
+  label: On this page
+
+edit:
+  repo: https://github.com/Vyce101/VySol
+  base: /docs/retype
+  branch: main
+  label: Edit on GitHub
+
+labels:
+  default:
+    search_input_placeholder: Search the docs
+    toc_contents_label: On this page
+
+lastUpdated:
+  date:
+    enabled: true
+    source: committer
+
+footer:
+  copyright: "© Copyright {{ year }} VySol."
