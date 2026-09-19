@@ -37,8 +37,8 @@ Do not hard-code package versions or temporary implementation choices in this fi
 
 ## 4. Changelog Model
 
-Changelog model: None
+Changelog model: Continuous/Dated
 
-This project does not require a changelog unless the repository already contains one or the user explicitly asks for one.
+Record notable completed changes in the project changelog when they become part of the delivered project.
 
-If a changelog is introduced later, follow the format and release model established in the repository.
+Keep entries concise and user-readable. Do not record plans, experiments, or unfinished work.
