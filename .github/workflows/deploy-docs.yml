@@ -32,12 +32,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare Retype assets
-        run: |
-          mkdir -p docs/retype/static
-          cp "docs/images/Logo 1.png" docs/retype/static/logo.png
-          cp "docs/images/Transparent Hero 1.png" docs/retype/static/hero.png
-
       - name: Build Retype documentation
         id: build
         uses: retypeapp/action-build@latest
