@@ -5,9 +5,8 @@ url: https://vyce101.github.io/VySol
 branding:
   title: VySol
   label: Docs
-  logo: https://raw.githubusercontent.com/Vyce101/VySol/main/docs/images/Logo%201.png
-  logoDark: https://raw.githubusercontent.com/Vyce101/VySol/main/docs/images/Logo%201.png
-  logoWidth: 34
+  logo: static/logo.png
+  logoDark: static/logo.png
   logoHeight: 34
   logoAlign: left
   baseColor: "#b78b58"
@@ -43,11 +42,8 @@ toc:
   depth: 2-3
   label: On this page
 
-edit:
-  repo: https://github.com/Vyce101/VySol
-  base: /docs/retype
-  branch: main
-  label: Edit on GitHub
+actions:
+  enabled: false
 
 labels:
   default:
@@ -56,8 +52,4 @@ labels:
 
 lastUpdated:
   date:
-    enabled: true
-    source: committer
-
-footer:
-  copyright: "© Copyright {{ year }} VySol."
+    enabled: false
