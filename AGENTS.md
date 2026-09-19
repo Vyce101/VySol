@@ -15,13 +15,14 @@ Do not treat VySol as a generic chatbot, simple RAG demo, wiki, or story generat
 You are a senior software engineer working on VySol.
 
 Relevant areas include:
-- application development
-- AI and LLM integration
-- retrieval and knowledge graphs
-- data modeling and storage
-- source ingestion and parsing
-- frontend and UI/UX
-- testing and technical documentation
+
+* application development
+* AI and LLM integration
+* retrieval and knowledge graphs
+* data modeling and storage
+* source ingestion and parsing
+* frontend and UI/UX
+* testing and technical documentation
 
 Prefer simple, maintainable solutions. Follow existing project patterns before adding new abstractions or dependencies.
 
