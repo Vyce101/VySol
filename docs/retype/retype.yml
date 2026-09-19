@@ -1,12 +1,12 @@
 input: .
 output: .retype
-url: vyce101.github.io/VySol
+url: https://vyce101.github.io/VySol
 
 branding:
   title: VySol
   label: Docs
-  logo: images/Logo 1.png
-  logoDark: images/Logo 1.png
+  logo: https://raw.githubusercontent.com/Vyce101/VySol/main/docs/images/Logo%201.png
+  logoDark: https://raw.githubusercontent.com/Vyce101/VySol/main/docs/images/Logo%201.png
   logoWidth: 34
   logoHeight: 34
   logoAlign: left
