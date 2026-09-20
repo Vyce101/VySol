@@ -26,6 +26,12 @@ VySol is under active development. The current `main` branch is the foundation o
 
 Earlier prototypes are preserved in separate branches as previous iterations of the project. They should not be treated as a specification for how the new version will work.
 
+## Get started
+
+The current local app lets you create worlds, import TXT or EPUB books, and browse your collection. AI roleplay is not available yet.
+
+Follow the [Quickstart](docs/retype/quickstart.md) to run it on Windows. Usage details and supported behavior are covered in the documentation.
+
 ## Documentation
 
 - [Changelog](docs/CHANGELOG.md)
