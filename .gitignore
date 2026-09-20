@@ -1,0 +1,14 @@
+/data/
+/.venv/
+/.pytest_cache/
+/build/
+/dist/
+/.coverage
+/htmlcov/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+/frontend/.vite/

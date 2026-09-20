@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vysol"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4==4.14.3",
+    "defusedxml==0.7.1",
+    "fastapi==0.135.1",
+    "filelock==3.20.3",
+    "uvicorn==0.41.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "pytest==8.4.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
