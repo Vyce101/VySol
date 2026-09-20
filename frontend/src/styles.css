@@ -456,3 +456,493 @@ main {
     transform: rotate(360deg);
   }
 }
+.settings-view {
+  width: min(850px, 85vw);
+  margin: clamp(95px, 15vh, 180px) auto 90px;
+}
+.settings-view h1 {
+  font-size: 35px;
+  margin-bottom: 35px;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: 155px 1fr;
+  gap: 35px;
+}
+.settings-layout aside {
+  color: var(--gold);
+  padding-top: 3px;
+}
+.settings-content {
+  border-left: 1px solid #e4e9ef25;
+  padding-left: 34px;
+}
+.settings-content h2 {
+  font-size: 24px;
+  margin-bottom: 26px;
+}
+.settings-content fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+.settings-content legend {
+  font-size: 20px;
+  padding: 0;
+  margin-bottom: 8px;
+}
+.settings-content p {
+  font-size: 16px;
+}
+@media (min-width: 1800px) {
+  .world-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1000px) {
+  .app-header {
+    gap: 26px;
+  }
+  .app-header nav {
+    gap: 20px;
+  }
+  .search {
+    width: 210px;
+  }
+  .header-tools {
+    gap: 12px;
+  }
+  .world-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hero-title {
+    height: 40vh;
+  }
+  .create-view {
+    padding-left: 10vw;
+  }
+  .world-card {
+    height: 260px;
+  }
+}
+@media (max-width: 680px) {
+  .app-header {
+    height: 140px;
+    flex-wrap: wrap;
+    padding: 16px 6vw;
+    gap: 12px 24px;
+  }
+  .brand {
+    font-size: 28px;
+  }
+  .brand img {
+    width: 34px;
+    height: 34px;
+  }
+  .app-header nav {
+    margin-left: auto;
+    gap: 18px;
+    align-self: auto;
+  }
+  .app-header nav button {
+    font-size: 17px;
+  }
+  .header-tools {
+    width: 100%;
+    gap: 18px;
+  }
+  .search {
+    width: 100%;
+  }
+  .header-tools .settings-button {
+    flex-shrink: 0;
+  }
+  .worlds-view {
+    padding: 0 6vw;
+  }
+  .hero-title {
+    height: 35vh;
+    padding-bottom: 28px;
+  }
+  .hero-title h1 {
+    max-width: 100%;
+    font-size: 36px;
+  }
+  .collection-heading h2 {
+    font-size: 26px;
+  }
+  .world-grid {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+  .world-card {
+    height: 260px;
+  }
+  .create-view {
+    padding: 65px 7vw 60px;
+  }
+  .creation-form {
+    width: 100%;
+    max-width: none;
+  }
+  .creation-form h1 {
+    font-size: 30px;
+  }
+  .settings-view {
+    width: auto;
+    margin: 65px 7vw;
+  }
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+  .settings-content {
+    border: 0;
+    padding: 0;
+  }
+  .settings-content h2 {
+    margin-bottom: 22px;
+  }
+  .backdrop-image {
+    background-position: 58% center;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *:before,
+  *:after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .world-card:hover > img,
+  .world-card:focus-visible > img {
+    transform: none;
+  }
+}
+
+/* Search keeps its existing rounded boundary, without an inner focus box. */
+.search input:focus-visible {
+  outline: none;
+}
+.search:focus-within {
+  border-color: rgba(228, 233, 243, 0.48);
+}
+/* A readable surface keeps detailed artwork from competing with settings. */
+.settings-view {
+  padding: 34px 40px 38px;
+  background: rgba(10, 17, 27, 0.91);
+  backdrop-filter: blur(18px);
+  border-radius: 12px;
+  box-shadow: 0 12px 70px rgba(3, 8, 15, 0.24);
+}
+@media (max-width: 680px) {
+  .settings-view {
+    padding: 26px 22px;
+    margin-left: 5vw;
+    margin-right: 5vw;
+  }
+}
+
+.search-area {
+  position: relative;
+}
+.search-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 100%;
+  padding: 7px;
+  border-radius: 10px;
+  background: rgba(10, 17, 27, 0.97);
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.3);
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid rgba(228, 233, 243, 0.13);
+}
+.search-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+.search-dropdown button:hover,
+.search-dropdown button[aria-selected="true"] {
+  background: rgba(228, 233, 243, 0.09);
+}
+.search-dropdown p {
+  color: var(--muted);
+  padding: 10px 12px;
+}
+@media (max-width: 680px) {
+  .search-area {
+    flex: 1;
+    min-width: 0;
+  }
+}
+/* Viewport proportions keep the scenery and collection balanced on shorter screens. */
+:root {
+  --header-height: clamp(72px, 10svh, 108px);
+  --card-height: clamp(170px, 28svh, 300px);
+  --space: clamp(14px, 2.2svh, 26px);
+}
+.app-header {
+  height: var(--header-height);
+  padding-block: 12px;
+  gap: clamp(22px, 3vw, 45px);
+}
+.brand {
+  font-size: clamp(28px, 3.5svh, 38px);
+}
+.brand img {
+  width: clamp(36px, 5.5svh, 55px);
+  height: clamp(36px, 5.5svh, 55px);
+}
+main {
+  min-height: calc(100svh - var(--header-height));
+}
+.fit-home {
+  height: calc(100svh - var(--header-height));
+}
+.fitted-worlds {
+  height: calc(100svh - var(--header-height));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.fitted-worlds .hero-title {
+  flex: 1;
+  height: auto;
+  min-height: 90px;
+}
+.hero-title {
+  padding-bottom: clamp(18px, 3.5svh, 38px);
+}
+.hero-title h1 {
+  font-size: clamp(30px, min(3.1vw, 5.2svh), 52px);
+}
+.collection-heading {
+  margin-bottom: var(--space);
+}
+.collection-heading h2 {
+  font-size: clamp(24px, 3svh, 30px);
+}
+.world-card {
+  height: var(--card-height);
+  flex-shrink: 0;
+}
+.world-card h3 {
+  font-size: clamp(23px, min(2.3vw, 3.5svh), 33px);
+  left: var(--space);
+  bottom: var(--space);
+}
+.world-grid {
+  gap: var(--space);
+}
+.world-grid.short-collection {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.world-shelf,
+.world-shelf.short-collection {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: var(--space);
+  overscroll-behavior: contain;
+  scroll-snap-type: none;
+  scrollbar-width: thin;
+  scrollbar-color: #dce3ef45 transparent;
+  padding: 5px 2px 12px;
+  margin: -5px -2px 0;
+  flex-shrink: 0;
+}
+.world-shelf .world-card {
+  width: calc((100% - 3 * var(--space)) / 4);
+  min-width: 230px;
+  scroll-snap-align: start;
+}
+.worlds-view footer {
+  padding: clamp(14px, 2.5svh, 28px) 0;
+  font-size: clamp(16px, 2svh, 19px);
+}
+.welcome-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 24px;
+  padding-bottom: clamp(65px, 15svh, 170px);
+}
+.welcome-state h1 {
+  font-size: clamp(32px, 4.5svh, 46px);
+}
+.name-input:focus-visible {
+  outline: none;
+  border-color: #edf0f2a0;
+}
+.settings-view {
+  width: min(1180px, 88vw);
+  min-height: min(580px, 70svh);
+  margin: clamp(24px, 5svh, 65px) auto;
+  padding: clamp(26px, 4svh, 48px) clamp(25px, 3vw, 50px);
+}
+.settings-view h1 {
+  font-size: clamp(32px, 4svh, 42px);
+  margin-bottom: clamp(25px, 4svh, 45px);
+}
+.settings-layout {
+  grid-template-columns: minmax(140px, 20%) 1fr;
+  gap: clamp(25px, 4vw, 65px);
+}
+.settings-layout nav {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.settings-layout nav button {
+  text-align: left;
+  padding: 11px 14px;
+  border-radius: 5px;
+  color: var(--muted);
+}
+.settings-layout nav button[aria-pressed="true"] {
+  color: #f1e5cf;
+  background: #ffffff09;
+}
+.settings-content {
+  padding-left: 0;
+  border: 0;
+}
+.settings-content h2 {
+  margin-bottom: 18px;
+  font-size: 27px;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 25px;
+  padding: 24px 0;
+  border-bottom: 1px solid #e4e9ef12;
+}
+.setting-row label {
+  font-size: 20px;
+}
+.setting-row label span {
+  display: block;
+  color: var(--muted);
+  font-size: 16px;
+  margin-top: 7px;
+  max-width: 330px;
+}
+.setting-row select {
+  font: inherit;
+  color: #e7e5e1;
+  background: #18212e;
+  border: 1px solid #dbe1eb30;
+  border-radius: 5px;
+  padding: 9px 12px;
+  width: 185px;
+  flex-shrink: 0;
+}
+.setting-row select:focus-visible {
+  outline: 1px solid #e7e5e1;
+  outline-offset: 3px;
+}
+@media (max-width: 900px) {
+  .setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 15px;
+  }
+  .world-grid.short-collection {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .short-collection:not(.world-shelf) {
+    --card-height: clamp(150px, 23svh, 220px);
+  }
+}
+@media (max-width: 680px) {
+  :root {
+    --header-height: 140px;
+    --card-height: clamp(190px, 29svh, 270px);
+  }
+  .app-header {
+    padding: 16px 6vw;
+    gap: 12px 20px;
+  }
+  .header-tools {
+    justify-content: flex-end;
+  }
+  .brand {
+    font-size: 28px;
+  }
+  .brand img {
+    width: 34px;
+    height: 34px;
+  }
+  .settings-view {
+    width: 90vw;
+    min-height: 0;
+    margin: 20px auto;
+    padding: 26px 22px;
+  }
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+  .settings-layout nav {
+    flex-direction: row;
+  }
+  .setting-row select {
+    width: 100%;
+  }
+  .world-card h3 {
+    font-size: 23px;
+  }
+  .world-shelf .world-card {
+    width: 78vw;
+  }
+  .fitted-worlds .hero-title {
+    min-height: 75px;
+  }
+  .hero-title h1 {
+    font-size: 32px;
+  }
+}
+/* Extremely short windows retain readable controls instead of shrinking indefinitely. */
+@media (max-height: 540px) {
+  .fit-home {
+    height: auto;
+  }
+  .fitted-worlds {
+    height: auto;
+    min-height: calc(100svh - var(--header-height));
+  }
+  .fitted-worlds .hero-title {
+    min-height: 100px;
+  }
+}
+.worlds-view {
+  min-width: 0;
+}
+.world-grid {
+  min-width: 0;
+}
+.create-view {
+  padding-top: clamp(60px, 16svh, 180px);
+}
+.creation-form {
+  width: clamp(330px, 26vw, 440px);
+}
+.creation-form h1 {
+  font-size: clamp(30px, 3.8svh, 38px);
+}
+@media (max-width: 680px) {
+  .creation-form {
+    width: 100%;
+  }
+}
