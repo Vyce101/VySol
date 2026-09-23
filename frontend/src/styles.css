@@ -1031,3 +1031,84 @@ main {
 .return-to-creation {
   margin-bottom: 25px;
 }
+
+.selection-books {
+  position: relative;
+  list-style: none;
+  margin: 18px 0;
+  padding: 0;
+}
+.selection-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 8px;
+  border-bottom: 1px solid #ffffff18;
+  transition:
+    transform 180ms ease,
+    scale 140ms ease,
+    box-shadow 140ms ease,
+    background 140ms ease;
+}
+.selection-row.is-dragging {
+  z-index: 2;
+  scale: 1.015;
+  background: #202c3b;
+  box-shadow: 0 10px 24px #0007;
+  border-radius: 5px;
+  transition:
+    scale 140ms ease,
+    box-shadow 140ms ease,
+    background 140ms ease;
+}
+.selection-row[data-drop-before]::before,
+.selection-row[data-drop-after]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #e7e5e1;
+  box-shadow: 0 0 7px #e7e5e155;
+  z-index: 3;
+}
+.selection-row[data-drop-before]::before {
+  top: -1px;
+}
+.selection-row[data-drop-after]::after {
+  bottom: -1px;
+}
+.selection-row:first-child {
+  border-top: 1px solid #ffffff18;
+}
+.book-number {
+  color: var(--muted);
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.book-selection-name {
+  flex: 1;
+  min-width: 0;
+}
+.book-selection-name > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.book-selection-name small {
+  color: var(--muted);
+  font-size: 14px;
+  display: block;
+}
+.reorder-handle {
+  touch-action: none;
+  cursor: grab;
+  color: var(--muted);
+}
+.reorder-handle:active {
+  cursor: grabbing;
+  color: var(--gold);
+}
