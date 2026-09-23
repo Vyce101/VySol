@@ -1,43 +1,28 @@
-"""Loopback application API and static frontend; uploads stream before conversion."""
+"""Loopback application API and static frontend with durable world creation."""
 
 from contextlib import asynccontextmanager
-import hashlib
 import json
 import os
-import sqlite3
 from pathlib import Path
+import sqlite3
 from typing import Literal
-from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from filelock import FileLock, Timeout
-from pydantic import BaseModel, Field, field_validator
-from starlette.concurrency import run_in_threadpool
+from filelock import Timeout
+from pydantic import BaseModel
 
-from .books import import_books, Upload, ImportLimits
-from .books.import_logging import import_logger
+from .books import ImportLimits
 from .books.models import ImportFailure
+from .books.import_logging import import_logger
 from .creation import Creation
 from .creation_api import creation_routes
 from .creation_store import CreationConflict
 from .credentials import FileCredentialVault
-from .worlds import WorldStore, atomic_json
-
-
-class NewWorld(BaseModel):
-    id: UUID
-    name: str = Field(min_length=1, max_length=200)
-
-    @field_validator("name")
-    @classmethod
-    def valid_name(cls, value):
-        if not value.strip():
-            raise ValueError("Give your world a name.")
-        return value.strip()
+from .worlds import WorldStore
 
 
 class Settings(BaseModel):
@@ -52,7 +37,6 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
     store = WorldStore(root)
     vault = vault or FileCredentialVault(root)
     creation = Creation(root, vault, embedder, limits)
-    limits = limits or ImportLimits()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -119,77 +103,14 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
         return store.list_worlds()
 
     @app.post("/api/worlds")
-    def create(world: NewWorld):
-        result = store.create(str(world.id), world.name)
-        app.state.logger.info("World available world_id=%s", world.id)
-        return result
+    @app.put("/api/worlds/{world_id}/imports/{operation_id}")
+    def retired_creation():
+        raise HTTPException(410, "Use the creation flow to submit and accept a complete world.")
 
     @app.get("/api/worlds/{world_id}/books")
     def books(world_id: UUID):
         require_world(world_id)
         return store.books(str(world_id))
-
-    # Client-generated operation IDs allow exact reconciliation after a lost response.
-    def operation_path(world_id: UUID, operation_id: UUID):
-        folder = store.directory(str(world_id)) / "imports"
-        folder.mkdir(exist_ok=True)
-        return folder / f"{operation_id}.json"
-
-    @app.get("/api/worlds/{world_id}/imports/{operation_id}")
-    def import_status(world_id: UUID, operation_id: UUID):
-        require_world(world_id)
-        path = operation_path(world_id, operation_id)
-        if not path.exists():
-            return {"status": "unknown"}
-        result = json.loads(path.read_text(encoding="utf-8"))
-        if result["status"] == "pending":
-            # Recover a committed import whose result record was interrupted.
-            for book in store.books(str(world_id)):
-                if (book["comparison_name"] == result["comparison_name"]
-                        and store.original_digest(str(world_id), book) == result.get("content_digest")):
-                    return {"status": "done", "filename": result["filename"], "book_id": book["id"], "error": None}
-            lock = FileLock(str(path) + ".lock", timeout=0)
-            try:
-                with lock:
-                    return {"status": "unknown"}
-            except Timeout:
-                pass
-        return result
-
-    def convert(world_id: UUID, operation_id: UUID, filename: str, content: bytes):
-        from .books.storage import validate_upload
-        from .books.models import ImportFailure
-        path = operation_path(world_id, operation_id)
-        with (FileLock(root / "locks" / f"api-import-{world_id}.lock", timeout=30),
-              FileLock(str(path) + ".lock", timeout=30)):
-            if path.exists():
-                prior = import_status(world_id, operation_id)
-                if prior["status"] == "done":
-                    return prior
-            try:
-                comparison, _ = validate_upload(Upload(filename, content))
-            except ImportFailure:
-                comparison = ""
-            existing = any(b["comparison_name"] == comparison for b in store.books(str(world_id)))
-            if not existing:
-                atomic_json(path, {"status": "pending", "filename": filename, "comparison_name": comparison,
-                                   "content_digest": hashlib.sha256(content).hexdigest()})
-            outcome = import_books(str(world_id), [Upload(filename, content)], data_dir=root, limits=limits)[0]
-            result = {"status": "done", "filename": filename, "book_id": outcome.book.book_id if outcome.book else None,
-                      "error": outcome.error, "message": outcome.message}
-            atomic_json(path, result)
-            return result
-
-    @app.put("/api/worlds/{world_id}/imports/{operation_id}")
-    async def upload(world_id: UUID, operation_id: UUID, request: Request):
-        require_world(world_id)
-        filename = unquote(request.headers.get("x-filename", ""))
-        chunks = bytearray()
-        async for chunk in request.stream():
-            if len(chunks) + len(chunk) > limits.max_upload_bytes:
-                return JSONResponse({"status": "done", "error": "size_limit", "message": "This book exceeds the 100 MiB upload limit."}, status_code=413)
-            chunks.extend(chunk)
-        return await run_in_threadpool(convert, world_id, operation_id, filename, bytes(chunks))
 
     @app.get("/api/settings")
     def settings():
@@ -198,7 +119,7 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
     @app.put("/api/settings")
     def update_settings(value: Settings):
         result = store.save_settings(value.background_speed, value.world_layout)
-        app.state.logger.info("Background transition preference saved speed=%s", value.background_speed)
+        app.state.logger.info("Appearance preferences saved")
         return result
 
     @app.get("/api/worlds/{world_id}/artwork")

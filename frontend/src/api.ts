@@ -43,13 +43,24 @@ export type Providers = {
   defaults: { model: string; key_id: string };
 };
 
-export type Outcome = {
-  status: "done" | "pending" | "unknown";
-  error?: string | null;
-  message?: string;
-  book_id?: string;
-};
+export function attemptLabel(attempt: CreationAttempt): string {
+  if (attempt.state === "complete") return "Ready";
+  if (attempt.state === "failed") return "Attention";
+  if (attempt.state === "paused") return "Paused";
+  if (attempt.state === "pausing") return "Pausing…";
+  return "Creating";
+}
 
+export function attemptProgress(attempt: CreationAttempt): string {
+  if (attempt.state === "complete")
+    return `${attempt.books.length} books · ${attempt.chunks_total} chunks embedded`;
+  if (attempt.phase === "embedding")
+    return `${attempt.chunks_done} of ${attempt.chunks_total} chunks embedded`;
+  if (attempt.phase === "publishing") return "Saving your world…";
+  if (attempt.phase === "uploading")
+    return `${attempt.books.filter((book) => book.uploaded).length} of ${attempt.books.length} books uploaded`;
+  return `${attempt.books.filter((book) => ["prepared", "embedding", "done"].includes(book.state)).length} of ${attempt.books.length} books prepared`;
+}
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, init);
   if (!response.ok) {
@@ -68,32 +79,3 @@ export const jsonRequest = (method: string, body: unknown): RequestInit => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
-
-export async function sendBook(
-  worldId: string,
-  operationId: string,
-  file: File,
-): Promise<Outcome> {
-  const path = `/worlds/${worldId}/imports/${operationId}`;
-  try {
-    return await api<Outcome>(path, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "X-Filename": encodeURIComponent(file.name),
-      },
-      body: file,
-    });
-  } catch (error) {
-    // Never blindly retry a request that may already have committed on the server.
-    for (let attempt = 0; attempt < 15; attempt++) {
-      const result = await api<Outcome>(path).catch(() => null);
-      if (result?.status === "done") return result;
-      if (result?.status === "unknown") throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    throw new Error(
-      "Could not confirm the import. Retry to check it again safely.",
-    );
-  }
-}

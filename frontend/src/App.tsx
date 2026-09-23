@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { GearSix } from "@phosphor-icons/react";
+import { GearSix, Plus } from "@phosphor-icons/react";
 import {
   api,
   type Settings,
   type Speed,
   type WorldLayout,
   type World,
+  type CreationAttempt,
+  attemptLabel,
+  attemptProgress,
 } from "./api";
 import { Background } from "./Background";
-import { LegacyCreateWorld as CreateWorld } from "./CreateWorld";
+import { CreateWorld } from "./CreateWorld";
 import { SettingsView } from "./SettingsView";
 import { WorldSearch } from "./WorldSearch";
 import {
@@ -18,7 +21,7 @@ import {
   type PreviewWorld,
 } from "./collectionPreview";
 
-type View = "worlds" | "create" | "settings";
+type View = "worlds" | "settings";
 export function App() {
   const homeRef = useRef<HTMLElement>(null);
   const shelfRef = useRef<HTMLDivElement>(null);
@@ -34,17 +37,23 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [draftKey, setDraftKey] = useState(0);
-  const [created, setCreated] = useState(false);
+  const [creationOpen, setCreationOpen] = useState(false);
+  const [attempt, setAttempt] = useState<CreationAttempt | null>(null);
+  const [manageKeys, setManageKeys] = useState(false);
+  const [progressError, setProgressError] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [searchEpoch, setSearchEpoch] = useState(0);
   async function load() {
     setError("");
     setLoading(true);
     try {
-      const [records, settings] = await Promise.all([
+      const [records, settings, savedAttempt] = await Promise.all([
         api<World[]>("/worlds"),
         api<Settings>("/settings"),
+        api<CreationAttempt | null>("/creation"),
       ]);
       setWorlds(records);
+      setAttempt(savedAttempt);
       setPreview((previous) => previous ?? records[0] ?? null);
       setSpeed(settings.background_speed);
       setLayout(settings.world_layout ?? "shelf");
@@ -62,12 +71,82 @@ export function App() {
     void load();
   }, []);
   function navigate(next: View) {
-    if (next === "create" && view !== "create" && created) {
-      setDraftKey((key) => key + 1);
-      setCreated(false);
-    }
     setView(next);
   }
+  function openCreation() {
+    if (attempt?.state === "complete") {
+      setAttempt(null);
+      setDraftKey((key) => key + 1);
+    }
+    setCreationOpen(true);
+  }
+  useEffect(() => {
+    if (!attempt || attempt.state === "complete") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const value = await api<CreationAttempt>(`/creation/${attempt!.id}`);
+        if (!cancelled) {
+          setAttempt((previous) =>
+            previous?.id === value.id && previous.revision <= value.revision
+              ? value
+              : previous,
+          );
+          setProgressError("");
+        }
+      } catch {
+        if (!cancelled)
+          setProgressError(
+            "Could not refresh creation progress. Reconnecting…",
+          );
+      }
+      if (!cancelled) timer = setTimeout(poll, 1000);
+    }
+    timer = setTimeout(poll, 1000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [attempt?.id, attempt?.state]);
+  useEffect(() => {
+    if (attempt?.state !== "complete") return;
+    api<World[]>("/worlds")
+      .then(setWorlds)
+      .catch(() =>
+        setError(
+          "Your world is ready, but the collection could not refresh. Try again.",
+        ),
+      );
+  }, [attempt?.id, attempt?.state]);
+  const pendingWorld: PreviewWorld | null =
+    attempt && attempt.state !== "complete"
+      ? {
+          id: attempt.id,
+          name: attempt.name,
+          created_at: attempt.created_at,
+          last_used_at: null,
+          artwork: "frostwake",
+          artworkUrl: "/assets/frostwake.png",
+        }
+      : null;
+  const displayedAttempt =
+    attempt && uploading ? { ...attempt, state: "running" as const } : attempt;
+  const savedCollection: PreviewWorld[] = pendingWorld
+    ? [pendingWorld, ...worlds.filter((world) => world.id !== pendingWorld.id)]
+    : attempt?.state === "complete" &&
+        !worlds.some((world) => world.id === attempt.id)
+      ? [
+          {
+            id: attempt.id,
+            name: attempt.name,
+            created_at: attempt.updated_at,
+            last_used_at: null,
+            artwork: "frostwake",
+          },
+          ...worlds,
+        ]
+      : worlds;
   const collection =
     collectionPreview === "empty"
       ? []
@@ -75,7 +154,7 @@ export function App() {
         ? sampleWorlds(worlds).slice(0, 4)
         : collectionPreview === "sample"
           ? sampleWorlds(worlds)
-          : worlds;
+          : savedCollection;
   useEffect(() => {
     const home = homeRef.current;
     if (!home || view !== "worlds" || layout !== "shelf") return;
@@ -167,16 +246,9 @@ export function App() {
           >
             Worlds
           </button>
-          <button
-            className={view === "create" ? "active" : ""}
-            aria-current={view === "create" ? "page" : undefined}
-            onClick={() => navigate("create")}
-          >
-            Create World
-          </button>
         </nav>
         <div className="header-tools">
-          {view !== "create" && (
+          {!creationOpen && (
             <WorldSearch
               key={`${collectionPreview}-${searchEpoch}`}
               worlds={collection}
@@ -226,6 +298,14 @@ export function App() {
           {collection.length > 0 && (
             <div className="collection-heading">
               <h2>Your Worlds</h2>
+              <button
+                className="icon-button create-world-button"
+                aria-label="Create World"
+                title="Create world"
+                onClick={openCreation}
+              >
+                <Plus size={24} />
+              </button>
               <span />
             </div>
           )}
@@ -243,10 +323,7 @@ export function App() {
           ) : collection.length === 0 ? (
             <div className="welcome-state">
               <h1>Create Your First World</h1>
-              <button
-                className="primary-button"
-                onClick={() => navigate("create")}
-              >
+              <button className="primary-button" onClick={openCreation}>
                 Create World
               </button>
             </div>
@@ -261,7 +338,23 @@ export function App() {
                   key={world.id}
                   className="world-card"
                   id={`world-card-${world.id}`}
-                  aria-label={`Preview ${world.name}`}
+                  aria-label={
+                    world.id === pendingWorld?.id
+                      ? `${attemptLabel(displayedAttempt!)} ${world.name}`
+                      : `Preview ${world.name}`
+                  }
+                  onClick={
+                    world.id === pendingWorld?.id ? openCreation : undefined
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      world.id === pendingWorld?.id &&
+                      (event.key === "Enter" || event.key === " ")
+                    ) {
+                      event.preventDefault();
+                      openCreation();
+                    }
+                  }}
                   onMouseEnter={() => setPreview(world)}
                   onFocus={() => setPreview(world)}
                   onTouchStart={() => setPreview(world)}
@@ -280,27 +373,58 @@ export function App() {
                   />
                   <div className="card-shade" />
                   <h3>{world.name}</h3>
+                  {world.id === pendingWorld?.id && attempt && (
+                    <div className={`card-progress ${attempt.state}`}>
+                      <strong>{attemptLabel(displayedAttempt!)}</strong>
+                      <span>{attemptProgress(attempt)}</span>
+                      <progress
+                        aria-label={`Progress for ${world.name}`}
+                        max={Math.max(
+                          1,
+                          attempt.phase === "embedding"
+                            ? attempt.chunks_total
+                            : attempt.books.length,
+                        )}
+                        value={
+                          attempt.phase === "embedding"
+                            ? attempt.chunks_done
+                            : attempt.books.filter((book) =>
+                                attempt.phase === "uploading"
+                                  ? book.uploaded
+                                  : ["prepared", "embedding", "done"].includes(
+                                      book.state,
+                                    ),
+                              ).length
+                        }
+                      />
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
           )}
           <footer>Stories live longer here.</footer>
+          {progressError && (
+            <p role="status" className="progress-connection-error">
+              {progressError}
+            </p>
+          )}
         </section>
         <CreateWorld
           key={draftKey}
-          visible={view === "create"}
-          onCreated={(world) => {
-            setWorlds((previous) => [
-              world,
-              ...previous.filter((item) => item.id !== world.id),
-            ]);
-          }}
-          onFinished={setCreated}
-          onComplete={(world) => {
-            setPreview(world);
+          visible={creationOpen}
+          attempt={attempt}
+          onUploading={setUploading}
+          onAttempt={(value) => {
+            setAttempt(value);
             setCollectionPreview("saved");
-            setSearchEpoch((value) => value + 1);
-            setView("worlds");
+            setSearchEpoch((epoch) => epoch + 1);
+          }}
+          onClose={() => setCreationOpen(false)}
+          onManageKeys={() => {
+            setCreationOpen(false);
+            setManageKeys(true);
+            setView("settings");
           }}
         />
         <SettingsView
@@ -313,6 +437,12 @@ export function App() {
           }}
           collectionPreview={collectionPreview}
           onCollectionPreview={changeCollection}
+          manageKeys={manageKeys}
+          onReturnToCreation={() => {
+            setManageKeys(false);
+            setView("worlds");
+            setCreationOpen(true);
+          }}
         />
       </main>
     </>

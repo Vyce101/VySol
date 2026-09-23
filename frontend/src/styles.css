@@ -1393,6 +1393,49 @@ progress::-webkit-progress-value {
 .return-to-creation {
   margin-bottom: 25px;
 }
+.collection-heading .create-world-button {
+  padding: 4px;
+  color: var(--gold);
+  flex-shrink: 0;
+}
+.collection-heading > span {
+  flex: 0 1 140px;
+}
+.world-card:has(.card-progress) {
+  cursor: pointer;
+}
+.world-card:has(.card-progress) h3 {
+  bottom: 92px;
+}
+.card-progress {
+  position: absolute;
+  bottom: 15px;
+  left: 22px;
+  right: 22px;
+  padding-top: 7px;
+  display: grid;
+  gap: 3px;
+  font-size: 14px;
+  text-shadow: 0 1px 5px #000;
+}
+.card-progress strong {
+  color: #f1e5cf;
+  font-weight: 400;
+  font-size: 17px;
+}
+.card-progress.failed strong {
+  color: #f18d8d;
+}
+.attention-label {
+  color: #f18d8d;
+}
+.card-progress progress {
+  margin-top: 5px;
+}
+.progress-connection-error {
+  font-size: 14px;
+  color: var(--muted);
+}
 select:focus-visible,
 .reorder-handle:focus-visible {
   outline: 2px solid var(--gold);

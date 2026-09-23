@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { App } from "./App";
+import type { CreationAttempt } from "./api";
 
 const world = {
   id: "one",
@@ -18,25 +19,98 @@ const world = {
   artwork: "frostwake",
 };
 let records: unknown[];
+let creationRecord: CreationAttempt | null;
 beforeEach(() => {
   records = [world];
+  creationRecord = null;
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute("open");
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
-      const payload = url.endsWith("/settings")
-        ? {
-            world_layout: init?.body
-              ? JSON.parse(init.body as string).world_layout
-              : "shelf",
-            background_speed: init?.body
-              ? JSON.parse(init.body as string).background_speed
-              : "normal",
-          }
-        : init?.method === "POST"
-          ? { ...world, ...JSON.parse(init.body as string) }
-          : records;
+      const payload = url.includes("/creation")
+        ? creationRecord
+        : url.endsWith("/providers")
+          ? {
+              keys: [],
+              models: [],
+              defaults: { model: "gemini-embedding-2", key_id: "" },
+            }
+          : url.endsWith("/settings")
+            ? {
+                world_layout: init?.body
+                  ? JSON.parse(init.body as string).world_layout
+                  : "shelf",
+                background_speed: init?.body
+                  ? JSON.parse(init.body as string).background_speed
+                  : "normal",
+              }
+            : init?.method === "POST"
+              ? { ...world, ...JSON.parse(init.body as string) }
+              : records;
       return { ok: true, json: async () => payload };
     }),
+  );
+});
+
+test("pending card reopens creation and becomes a single completed card without navigation", async () => {
+  creationRecord = {
+    id: "pending",
+    name: "Northern Tales",
+    revision: 1,
+    state: "paused",
+    phase: "uploading",
+    created_at: "",
+    updated_at: "",
+    message: "",
+    config: { model: "gemini-embedding-2", size: 8000, search: 1000 },
+    key_id: "key",
+    books: [],
+    books_done: 0,
+    chunks_total: 0,
+    chunks_done: 0,
+  };
+  render(<App />);
+  const card = await screen.findByLabelText("Paused Northern Tales");
+  fireEvent.keyDown(card, { key: "Enter" });
+  expect(screen.getByRole("dialog", { name: "Northern Tales" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Close creation" }));
+  fireEvent.keyDown(card, { key: "Enter" });
+  expect(screen.getByRole("dialog", { name: "Northern Tales" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Close creation" }));
+  records = [world, { ...world, id: "pending", name: "Northern Tales" }];
+  creationRecord = { ...creationRecord, state: "complete", phase: "complete" };
+  await screen.findByLabelText("Preview Northern Tales", {}, { timeout: 2500 });
+  expect(screen.getAllByRole("article")).toHaveLength(2);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("provider settings round trip preserves the setup step and files", async () => {
+  render(<App />);
+  await screen.findByLabelText("Preview Frostwake");
+  fireEvent.click(screen.getByRole("button", { name: "Create World" }));
+  fireEvent.change(screen.getByLabelText("World name"), {
+    target: { value: "Draft" },
+  });
+  fireEvent.change(screen.getByLabelText("Choose books"), {
+    target: { files: [new File(["Text"], "Draft.txt")] },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Manage API keys" }));
+  expect(
+    await screen.findByRole("heading", { name: "Providers" }),
+  ).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "← Return to creation" }));
+  expect(screen.getByLabelText("Maximum chunk size")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "← Back" }));
+  expect(screen.getByText("Draft.txt")).toBeTruthy();
+  expect((screen.getByLabelText("World name") as HTMLInputElement).value).toBe(
+    "Draft",
   );
 });
 afterEach(() => {
@@ -56,24 +130,21 @@ test("search shows a dropdown without changing cards or the selected title", asy
   ).toBeTruthy();
 });
 
-test("draft survives tabs and empty world creation succeeds", async () => {
+test("closing clears an unsubmitted name and validation error", async () => {
   render(<App />);
   await screen.findByLabelText("Preview Frostwake");
   fireEvent.click(screen.getByRole("button", { name: "Create World" }));
-  expect(screen.queryByLabelText("Search worlds")).toBeNull();
   fireEvent.change(screen.getByLabelText("World name"), {
     target: { value: "New world" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
+  fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+  expect(screen.getByRole("alert").textContent).toContain("at least one book");
+  fireEvent.click(screen.getByRole("button", { name: "Close creation" }));
   fireEvent.click(screen.getByRole("button", { name: "Create World" }));
   expect((screen.getByLabelText("World name") as HTMLInputElement).value).toBe(
-    "New world",
+    "",
   );
-  fireEvent.submit(screen.getByLabelText("World name").closest("form")!);
-  await screen.findByLabelText("Preview New world");
-  expect(
-    screen.getByRole("button", { name: "Worlds" }).getAttribute("aria-current"),
-  ).toBe("page");
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
 test("settings save speed without changing world preview", async () => {
@@ -102,11 +173,11 @@ test("empty collection offers first-world action", async () => {
   records = [];
   render(<App />);
   await screen.findByRole("heading", { name: "Create Your First World" });
-  fireEvent.click(screen.getAllByRole("button", { name: "Create World" })[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Create World" }));
   expect(screen.getByLabelText("World name")).toBeTruthy();
 });
 
-test("selected files survive clearing the native picker and tab navigation", async () => {
+test("closing clears selected files and resets processing settings", async () => {
   render(<App />);
   await screen.findByLabelText("Preview Frostwake");
   fireEvent.click(screen.getByRole("button", { name: "Create World" }));
@@ -117,9 +188,33 @@ test("selected files survive clearing the native picker and tab navigation", asy
     },
   });
   expect(screen.getByText("Story.txt")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
+  fireEvent.change(screen.getByLabelText("World name"), {
+    target: { value: "Story" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Continue →" }));
+  fireEvent.change(screen.getByLabelText("Maximum chunk size"), {
+    target: { value: "4000" },
+  });
+  fireEvent.change(screen.getByLabelText("Boundary search distance"), {
+    target: { value: "500" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Close creation" }));
   fireEvent.click(screen.getByRole("button", { name: "Create World" }));
-  expect(screen.getByText("Story.txt")).toBeTruthy();
+  expect(screen.queryByText("Story.txt")).toBeNull();
+  fireEvent.change(screen.getByLabelText("World name"), {
+    target: { value: "Another world" },
+  });
+  fireEvent.change(screen.getByLabelText("Choose books"), {
+    target: { files: [new File(["New text"], "Another.txt")] },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Continue →" }));
+  expect(
+    (screen.getByLabelText("Maximum chunk size") as HTMLInputElement).value,
+  ).toBe("8000");
+  expect(
+    (screen.getByLabelText("Boundary search distance") as HTMLInputElement)
+      .value,
+  ).toBe("1000");
 });
 
 test("failed settings save retains the saved preference", async () => {
@@ -210,33 +305,41 @@ test("world display saves and switches the collection layout", async () => {
   expect(document.querySelector(".world-shelf")).toBeNull();
 });
 
-test("wheel scrolls the shelf from the homepage and leaves browser zoom alone", async () => {
-  render(<App />);
-  await screen.findByLabelText("Preview Frostwake");
-  const shelf = document.querySelector(".world-shelf") as HTMLElement;
-  Object.defineProperty(shelf, "scrollWidth", { value: 1800 });
-  Object.defineProperty(shelf, "clientWidth", { value: 800 });
-  shelf.scrollTo = vi.fn((options?: ScrollToOptions | number) => {
-    shelf.scrollLeft = typeof options === "number" ? options : options?.left ?? 0;
-  });
-  const home = document.querySelector(".worlds-view")!;
-  const wheel = new WheelEvent("wheel", {
-    deltaY: 120,
-    bubbles: true,
-    cancelable: true,
-  });
-  fireEvent(home, wheel);
-  expect(shelf.scrollLeft).toBe(180);
-  expect(wheel.defaultPrevented).toBe(true);
-  expect(shelf.scrollTo).toHaveBeenLastCalledWith({
-    left: 180,
-    behavior: "smooth",
-  });
-  fireEvent.wheel(home, { deltaY: 2, deltaMode: 1 });
-  expect(shelf.scrollLeft).toBe(252);
-  fireEvent.wheel(home, { deltaY: 120, ctrlKey: true });
-  expect(shelf.scrollLeft).toBe(252);
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.wheel(home, { deltaY: 120 });
-  expect(shelf.scrollLeft).toBe(252);
-});
+test.each([false, true])(
+  "shelf respects reduced motion (%s) and leaves browser zoom alone",
+  async (reducedMotion) => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: reducedMotion })),
+    );
+    render(<App />);
+    await screen.findByLabelText("Preview Frostwake");
+    const shelf = document.querySelector(".world-shelf") as HTMLElement;
+    Object.defineProperty(shelf, "scrollWidth", { value: 1800 });
+    Object.defineProperty(shelf, "clientWidth", { value: 800 });
+    shelf.scrollTo = vi.fn((options?: ScrollToOptions | number) => {
+      shelf.scrollLeft =
+        typeof options === "number" ? options : (options?.left ?? 0);
+    });
+    const home = document.querySelector(".worlds-view")!;
+    const wheel = new WheelEvent("wheel", {
+      deltaY: 120,
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(home, wheel);
+    expect(shelf.scrollLeft).toBe(180);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(shelf.scrollTo).toHaveBeenLastCalledWith({
+      left: 180,
+      behavior: reducedMotion ? "instant" : "smooth",
+    });
+    fireEvent.wheel(home, { deltaY: 2, deltaMode: 1 });
+    expect(shelf.scrollLeft).toBe(252);
+    fireEvent.wheel(home, { deltaY: 120, ctrlKey: true });
+    expect(shelf.scrollLeft).toBe(252);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.wheel(home, { deltaY: 120 });
+    expect(shelf.scrollLeft).toBe(252);
+  },
+);
