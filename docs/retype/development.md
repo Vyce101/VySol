@@ -28,66 +28,93 @@ The frontend is served from `frontend/dist/client/`. Rebuild after frontend chan
 
 | Area | Responsibility |
 | --- | --- |
-| `frontend/src/` | Navigation, draft/file selections, import progress, search, artwork previews, and settings controls. |
-| `src/vysol/server.py` | Local HTTP boundary, bounded upload reading, import receipts/reconciliation, and static frontend/artwork delivery. |
-| `src/vysol/worlds.py` | World identity, metadata, listing order, and saved settings. |
-| `src/vysol/books/` | Strict format conversion and per-book publication, independently callable from Python. |
-| `launcher/` | Windows preparation, readiness checks, and ownership of app subprocesses. |
+| `frontend/src/CreateWorld.tsx` | Unsubmitted setup, ordered selections, modal steps, uploads, and progress. |
+| `frontend/src/ProvidersView.tsx` | Named credential metadata and write-only secret entry. |
+| `src/vysol/server.py` | Loopback HTTP boundary, lifecycle, static frontend, and artwork. |
+| `src/vysol/creation_api.py` | Validated attempt, upload, and credential contracts. |
+| `src/vysol/creation.py` | Single worker, submission locking, recovery, and whole-world publication. |
+| `src/vysol/creation_store.py` | SQLite checkpoints, operation IDs, ordered chunks, and vectors. |
+| `src/vysol/embeddings.py` | Gemini requests, input formatting, vector validation, and bounded retries. |
+| `src/vysol/credentials.py` | Injectable credential adapter and atomic local key files. |
+| `src/vysol/books/` | Strict TXT/EPUB conversion, deterministic chunking, and legacy importer. |
+| `src/vysol/worlds.py` | World metadata, listing, accepted book order, and settings. |
+| `launcher/` | Windows preparation, readiness checks, and subprocess ownership. |
 
-The browser creates a world, then uploads its selected books individually. Synchronous import work runs through `run_in_threadpool`, outside the API event loop. The API enforces the upload bound while consuming request chunks, before constructing the importer's in-memory `Upload`.
+The browser submits a manifest, uploads all missing files, then starts processing. The submitted manifest cannot subsequently be edited. Bounded uploads and synchronous storage run outside the event loop. A backend thread processes independently of the browser; a lifetime file lock prevents a second worker service on the same runtime directory. An in-process guard serializes starts, key changes, and publication.
 
-Conversion does not perform AI processing or produce structured story data. TXT decoding is in `books/text.py`; EPUB extraction uses ZIP reading, defusedxml package parsing, and Beautiful Soup content extraction in `books/epub.py`. Storage and coordination remain in separate modules.
+Every book must upload, validate, convert, and chunk before embedding begins. Preparation failures are recorded per book and prevent all embedding requests. TXT decoding and EPUB extraction reuse the existing converters. Scene extraction and graph processing are not implemented.
+
+The splitter preserves every Unicode code point of the working TXT in contiguous slices. It searches backward from the size limit, preferring paragraph boundaries, then line breaks, then `?`, `!`, or `.`, then whitespace, and finally a hard split. Within a boundary level it chooses the latest match. Punctuation stays in the preceding chunk; matching is character-based, without sentence parsing or abbreviation detection. Offsets count Python Unicode code points, not UTF-8 bytes or JavaScript UTF-16 units. Chunk settings satisfy `size > 0` and `0 <= search < size`.
+
+`CHUNKER_VERSION` is 2; version 2 adds punctuation between line breaks and whitespace in the boundary priority. `CreationStore.add_chunks` records the version in each chunk's processing profile, which also contributes to its stable ID. Resume skips splitting for books already marked `chunked` and reuses their stored chunks and completed vectors. Updating the splitter does not automatically regenerate those chunks or rebuild accepted worlds. Newly generated chunks, including smaller replacements for an oversized input, use the current version.
+
+The backend sends one chunk per Gemini request with retrieval-document formatting, `autoTruncate: false`, and 768 dimensions. The formatting prefix is separate from stored chunk text. Explicit size errors split only the affected chunk using the same boundary rules. Valid finite vectors are normalized and stored as little-endian float32 values. Transient failures retry at most four requests with cancellable backoff; other failures require attention. See Google's [embedding guide](https://ai.google.dev/gemini-api/docs/embeddings) and [REST configuration](https://ai.google.dev/api/embeddings#EmbedContentConfig).
 
 ## Persistence and recovery
 
-World display names are not storage identities. The UI generates a UUID per creation draft; repeated creation requests with that UUID return the existing world. Reusing an ID with a different name does not rename it. Separate worlds may share a display name.
-
 ```text
 data/
+  processing.sqlite3               # Attempts, chunks, vectors, labels, preferences, operation IDs
+  credentials/
+    .gitignore                     # Ignores all contents, including temporary writes
+    <credential UUID>.key          # Plain-text secret; never returned by the API
+  creations/<attempt UUID>/
+    books/<book UUID>/source        # Original uploaded bytes
+    books/<book UUID>/text          # UTF-8 working text
+    world/                         # Complete directory prepared for publication
   worlds/<SHA-256 of world ID>/
     world.json
-    artwork.png                    # Only for a world with custom runtime artwork
+    artwork.png                    # Optional runtime artwork
     books/<SHA-256 of comparison name>/
       original/<uploaded filename>
       text/<working filename>
       metadata.json
-    imports/<operation UUID>.json
   settings.json
   locks/
-  staging/
+  staging/                         # Legacy standalone importer
   logs/
   frontend-build.json
 ```
 
-World metadata records `id`, `name`, `created_at`, `last_used_at`, and `artwork`. Book metadata records `book_id`, `world_id`, `original_filename`, `text_filename`, `comparison_name`, and `converter_version`. These records contain import identity, not story structure.
+The attempt UUID becomes the world ID. Stable book IDs survive reordering. Chunk IDs derive from the book, source span, text digest, and processing profile. SQLite stores explicit positions, offsets, source text digests, model, dimensions, and processing versions. These are source locations, not fictional chronology.
 
-The importer locks a world while checking duplicate names, converting, and publishing. It prepares the original, working text, and metadata in one staging directory, then renames that directory into the destination. Handled failures clean up their staging directory and do not reserve a book name. A forcibly terminated process may leave unaccepted staging files; they are not treated as imported books. Do not replace this publication step with separate visible writes of the two copies.
+Before submission, setup values and File objects exist only in the mounted creation component. Close, the X button, and Escape clear the name, files, step, validation errors, and selected processing settings. Reopening loads the last submitted model/key defaults and the standard chunk settings. **Manage API keys** temporarily hides the modal without clearing that state so **Return to creation** can restore the same step and selections. A page reload loses unsubmitted setup.
 
-World metadata and settings use locking and atomic JSON replacement. Settings default to `background_speed: normal` and `world_layout: shelf`; older files missing a setting receive its default. A speed-only update preserves the saved layout.
+Submission begins durable recovery by saving the manifest before uploading books. Closing the modal while submission is in flight does not reset its state or interrupt the uploads. Once an attempt exists, closing preserves it; deletion requires the separate confirmed discard action.
 
-Each HTTP book attempt has a UUID. A pending receipt records its comparison name and original-content SHA-256 digest. Reconciliation can recognize a published book after interruption of the final receipt write only when both match. A completed receipt returns its recorded outcome; an active attempt remains pending, and an unconfirmed inactive attempt is unknown. A definitive failed attempt gets a new UUID when retried; an uncertain response keeps its UUID for reconciliation. Successful imports are not resent.
+Mutation commands carry a stable operation UUID and an expected revision. Replaying the same command returns saved state; reuse with different input or a stale revision is rejected. The browser retries an uncertain upload with the same operation ID. Incomplete uploads can retry while the browser retains their File objects; after reload, unavailable files require discarding and starting again.
 
-The React creation view stays mounted across tabs to retain files and foreground progress. File objects are never persisted across reloads. Creation and import success returns to Worlds; partial failure leaves the form available against the existing world.
+Successful vectors checkpoint individually. Startup reconciles an interrupted directory publication by its creation ID; otherwise interrupted running work becomes paused without making API requests. A response lost before its checkpoint can cause a repeated billable request. Completed work is reused on resume. Submitted manifests are immutable: new save commands are rejected even while paused or failed. Exact operation replays still reconcile uncertain responses. Changing sources, order, or configuration requires discarding and starting a new attempt. The secret of the selected named credential may be replaced while processing is stopped.
+
+Publication verifies text coverage and file digests, then atomically renames a complete prepared world directory into `worlds/`. The final SQLite checkpoint may be recovered from that directory. `sources_locked` prevents the shared importer from appending to accepted worlds. Old worlds retain their existing files and are not migrated or embedded. Discard stops the worker before deleting only the attempt's owned directory and cascading its SQLite records.
+
+Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite and API responses contain identifiers and labels only. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault` and `embedder` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
 
 ## Local API contract
 
-Paths below are relative to the server. Responses expose public identifiers, filenames, and user-readable outcomes; the HTTP layer does not return the importer's private filesystem paths.
+Paths below are relative to the server. Responses contain public IDs, sanitized errors, per-book states, and aggregate progress; they never contain saved secrets.
 
 | Method and path | Contract |
 | --- | --- |
-| `GET /api/health` | Returns `status: ready` and `app: vysol`. |
-| `GET /api/worlds` | Lists world records, prioritizing recorded last-use time, otherwise creation time. |
-| `POST /api/worlds` | JSON `{id, name}`. `id` is a UUID; `name` is nonblank, at most 200 characters, and stored with surrounding whitespace trimmed. Creation is idempotent by ID. |
-| `GET /api/worlds/{world_id}/books` | Lists `id`, `filename`, and `comparison_name` for accepted books. |
-| `PUT /api/worlds/{world_id}/imports/{operation_id}` | Raw file bytes; percent-encoded filename in `X-Filename`. Normal result contains `status: done`, `filename`, `book_id`, `error`, and `message`. |
-| `GET /api/worlds/{world_id}/imports/{operation_id}` | Reconciles an attempt; status is `unknown`, `pending`, or `done`. Clients must not assume every status has the same fields. |
-| `GET /api/settings` | Returns `background_speed` and `world_layout`. |
-| `PUT /api/settings` | Requires `background_speed` (`fast`, `normal`, `slow`); optional `world_layout` (`shelf`, `grid`). Returns saved settings. |
-| `GET /api/worlds/{world_id}/artwork` | Serves the registered runtime artwork or bundled Frostwake; accepts no arbitrary filesystem path. |
+| `GET /api/health` | `status: ready`, `app: vysol`. |
+| `GET /api/worlds` | Accepted worlds only, ordered by last use or creation. |
+| `GET /api/worlds/{id}/books` | Book metadata, ordered by explicit positions where available. |
+| `GET /api/creation` | Current unfinished attempt or null. |
+| `GET /api/creation/{id}` | Specific attempt, including completed state for reconciliation. |
+| `PUT /api/creation/{id}` | Manifest: operation ID, revision, name, key ID, config `{model,size,search}`, ordered books `{id,filename,size}`. |
+| `PUT /api/creation/{id}/books/{book_id}` | Raw bytes, percent-encoded `X-Filename`, query `revision` and `operation_id`. |
+| `POST /api/creation/{id}/start` | Start/resume with revision and operation ID. |
+| `POST /api/creation/{id}/pause` | Pause with revision. |
+| `DELETE /api/creation/{id}` | Discard with revision query; accepted worlds reject this action. |
+| `GET /api/providers` | Credential metadata, supported models, and last submitted model/key defaults. |
+| `PUT /api/providers/keys/{id}` | Name, provider `google`, and optional write-only secret; a new key requires a secret. |
+| `DELETE /api/providers/keys/{id}` | Delete secret and metadata unless used by running work. |
+| `GET`, `PUT /api/settings` | Existing background speed and shelf/grid settings. |
+| `GET /api/worlds/{id}/artwork` | Registered artwork or bundled Frostwake. |
 
-HTTP 200 does not guarantee book success: inspect `error` in the result. Exceeding the stream limit returns HTTP 413. Invalid request fields produce 422, missing worlds produce 404, and handled storage failures produce 503 with a public message.
+The old `POST /api/worlds` and `PUT /api/worlds/{id}/imports/{operation_id}` mutations return 410. They cannot bypass the new acceptance rules. Revision conflicts return 409; stream limits return 413; invalid input returns 422; handled storage failures return 503. The UI polls attempt state while work is pending.
 
-The server binds to loopback through the supported commands. Middleware validates the host and rejects cross-origin/cross-site browser requests. This is a local application boundary, not an authentication system for public hosting.
+The supported launcher binds to loopback. Middleware validates hosts and rejects cross-origin/cross-site browser requests. This is a local application boundary, not public-hosting authentication.
 
 ### Python importer
 
@@ -109,7 +136,7 @@ for result in results:
 
 `import_books(world_id, uploads, *, data_dir="data", limits=None)` processes uploads in input order and returns an `ImportResult` per file. Successful entries contain an `ImportedBook` with `book_id`, `world_id`, `original_path`, and `text_path`. Failed entries contain an error code and message. Earlier successes are retained.
 
-The standalone importer accepts a 1–128 character world ID beginning with an ASCII letter or digit, followed by letters, digits, underscores, or hyphens, excluding reserved names. It does not create application world metadata. The HTTP application uses UUIDs and must create its world first.
+The standalone importer accepts a 1–128 character world ID beginning with an ASCII letter or digit, followed by letters, digits, underscores, or hyphens, excluding reserved names. It does not create application world metadata. The HTTP application uses UUID creation attempts instead. This low-level importer is retained for existing callers and rejects worlds marked `sources_locked`; it is not the application creation flow.
 
 Errors are `duplicate_name`, `unsupported_format`, `invalid_encoding`, `invalid_epub`, `invalid_input`, `empty_book`, `size_limit`, and `storage_failure`. Pass an `ImportLimits` instance to configure `max_upload_bytes`, `max_archive_entries`, or `max_uncompressed_bytes`; all must be positive. The API factory also accepts `limits` for embedded callers and tests.
 
@@ -131,7 +158,7 @@ npm run build --prefix frontend
 
 Tests are grouped under `tests/books/`, `tests/application/`, and `tests/launcher/`; frontend component tests live beside their features. Windows-specific lifecycle checks skip on other operating systems. Use synthetic books and temporary data directories.
 
-When changing imports, preserve original bytes, strict decoding, per-world name collisions, complete-directory publication, and digest-based reconciliation. Exercise interrupted writes and concurrent attempts, not only successful conversion.
+When changing creation, preserve exact text reconstruction, original bytes, whole-batch acceptance, immutable sources, per-world name collisions, complete-directory publication, and digest-based reconciliation. Test retries, oversized-input splitting, missing credentials, submitted-manifest locking, restart recovery, and safe discard. Provider tests use synthetic text and mocked HTTP; an optional real-key smoke test must send only synthetic text and must not print the credential. Exercise interrupted writes and concurrent attempts, not only successful conversion.
 
 When changing the UI, check rapid artwork switching and failed image loads: stale completions must not replace a newer preview. Leaving a card retains the preview, and search hover must not change it. Outgoing views must keep their geometry during fades. Check shelf/grid fit at both shorter desktop and narrow viewports, keyboard access, and reduced motion. Developer collection previews are session-only fixtures and must never seed or delete real worlds.
 

@@ -28,7 +28,7 @@ Earlier prototypes are preserved in separate branches as previous iterations of 
 
 ## Get started
 
-The current local app lets you create worlds, import TXT or EPUB books, and browse your collection. AI roleplay is not available yet.
+The current local app creates worlds from ordered TXT or EPUB books, splits their text into chunks, and saves Gemini embeddings with resumable processing. Named API keys are managed in Settings. Retrieval and AI roleplay are not available yet.
 
 Follow the [Quickstart](docs/retype/quickstart.md) to run it on Windows. Usage details and supported behavior are covered in the documentation.
 

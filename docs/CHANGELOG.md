@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-23
+
+### Added
+
+- Added lossless book chunking and Gemini Embedding 2 embeddings. Chunking prefers paragraph breaks, line breaks, sentence punctuation, then spaces within a configurable search window.
+- Added creation progress on world cards, pause/resume, saved processing checkpoints, and confirmed discard. Interrupted processing resumes only when requested.
+- Added Providers settings for named Google API keys, with secrets stored in ignored local plain-text files.
+
+### Changed
+
+- Replaced the Create World tab with a Books, Processing, and Review modal opened from Worlds. Books can be reordered before submission; closing unsubmitted setup clears it.
+- Required every book to finish conversion, chunking, and embedding before accepting a world. Submitted attempts cannot be edited, and accepted book text and order stay fixed. Existing worlds are preserved without automatic embedding.
+
 ## 2026-09-20
 
 - Added TXT and EPUB book imports with preserved originals, separate text copies, and per-world duplicate checks.

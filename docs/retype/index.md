@@ -12,7 +12,7 @@ Follow the [Quickstart](quickstart.md) to launch VySol on Windows and reach the 
 
 ## Create a world
 
-The [Create a world guide](create-world.md) covers naming a world, adding optional books, and handling unsuccessful imports.
+The [Create a world guide](create-world.md) covers naming a world, arranging books, configuring embeddings, and recovering unfinished attempts.
 
 ## Look up supported behavior
 

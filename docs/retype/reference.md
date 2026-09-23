@@ -38,17 +38,38 @@ For example, `Book.epub`, `book.txt`, and ` book .TXT` conflict. `Book.Part.1.ep
 
 This compares filenames, not book contents. Importing the same book into another world creates independent copies there. Files with directory components, unsafe characters, or reserved Windows filenames are rejected.
 
+## Creation processing settings
+
+These fields appear in the **Processing** step of Create World.
+
+| Field | Supported values | Default | Meaning |
+| --- | --- | --- | --- |
+| Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for later retrieval. Retrieval is not available yet. |
+| API key | A saved Google AI Studio / Gemini API key | Last submitted key, if still available | The named credential used for embedding requests. A valid selection is required before submission. |
+| Maximum chunk size (chars) | Whole number from 1 to 1,000,000 | 8,000 | Maximum characters in each text chunk before any further splitting required by the model. |
+| Boundary search distance (chars) | Whole number from 0 to one less than Maximum chunk size | 1,000 | How far backward from the size limit VySol searches for a suitable break. Zero disables this search. |
+
+Characters include spaces and line breaks. VySol counts Unicode code points rather than bytes; some displayed symbols contain more than one code point. Chunks are contiguous and do not overlap. Joining their text reproduces the working TXT exactly.
+
+Within the search window, the splitter prefers paragraph breaks, then line breaks, then `?`, `!`, or `.`, then spaces or other whitespace. It chooses the latest break at the highest available priority. Punctuation stays with the preceding text. This is punctuation matching, so a period in an abbreviation or number can also become a break.
+
+If no suitable break is found, VySol cuts at **Maximum chunk size**. For example, an 8,000-character maximum with a 7,000-character search looks backward through the last 7,000 characters before that limit. A preferred break near character 1,000 can produce a much shorter chunk; with no break, the cut stays at 8,000, not 7,000. The final chunk can be shorter simply because the book ends.
+
+Gemini embeddings use a fixed 768 dimensions. If Google explicitly rejects a chunk as too large, VySol splits that chunk into smaller pieces using the same boundary priorities and retries. It saves the smaller chunks and updates the total chunk count without dropping text.
+
 ## Saved files
 
 Each accepted upload produces an untouched original and a separate UTF-8 TXT working copy, including when the upload is already TXT. `Story.epub` becomes `Story.txt`; `Story.Part.1.epub` becomes `Story.Part.1.txt`. Originals are copied, never moved or altered.
 
 The Windows launcher stores runtime data in the repository's `data/` folder by default. Books are inside `data/worlds/<world key>/books/<book key>/`, with `original/` and `text/` subfolders. The generated keys are internal identifiers, so folder names do not match world titles. Metadata records the correspondence.
 
-Worlds, book copies, settings, custom artwork, logs, and temporary import data remain under the configured runtime directory. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory.
+Worlds, book copies, settings, custom artwork, logs, and creation staging files remain under the configured runtime directory. `processing.sqlite3` stores creation checkpoints, source offsets, chunk text, vectors, and credential labels. `creations/` holds attempt files. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory. API key secrets are plain-text files under `credentials/` and are included in a full runtime backup. Keep that folder and its backups private. The credentials folder has its own ignore file so keys and temporary writes remain ignored even with a custom runtime directory.
 
 ## Browsing worlds
 
 World names must be nonblank and at most 200 characters. Separate worlds can share the same display name.
+
+A pending world card shows creation progress and opens its unfinished attempt. Accepted cards currently preview artwork without opening a reader or detail page.
 
 Hovering, keyboard-focusing, or touching a card previews its title and background. Leaving it retains that preview. Search matches world names without case sensitivity and lists suggestions without rearranging the cards. Hovering or using arrow keys in search does not change the preview; selecting a result focuses and scrolls to its card.
 
@@ -58,10 +79,11 @@ Frostwake is the default artwork for new worlds and the empty homepage. Artwork 
 
 ## Settings
 
-The gear opens **Settings**. Use the **Worlds** or **Create World** tab to leave it.
+The gear opens **Settings**. Use **Worlds** to leave it, or **Return to creation** when you arrived from the creation modal.
 
 | Section / setting | Choices | Initial value | Persistence |
 | --- | --- | --- | --- |
+| Providers / API keys | Add, rename, replace, or delete named Google keys | No keys | Labels in SQLite; plain-text secrets in the ignored credentials folder |
 | Appearance / World display | Horizontal shelf; Grid | Horizontal shelf | Saved automatically |
 | Developer / Background transition speed | Fast — 150 ms; Normal — 300 ms; Slow — 600 ms | Normal — 300 ms | Saved automatically |
 | Developer / Homepage preview | Your saved worlds; 4 sample worlds; 12 sample worlds; Empty homepage | Your saved worlds | Resets on reload |

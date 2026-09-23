@@ -28,7 +28,7 @@ The launcher installs the locked dependencies and builds the interface when nece
 
 ## Confirm it works
 
-You should see the **Worlds** and **Create World** tabs. A new installation shows **Create Your First World** over the default background. Existing local data shows your saved worlds instead.
+You should see the **Worlds** homepage and a Settings gear. A new installation shows **Create Your First World** over the default background. Existing local data shows your saved worlds instead.
 
 If the browser does not open but the launcher says VySol is ready, visit `http://127.0.0.1:8765/` yourself. If startup fails, the launcher window stays open with the error. Check that the required tools are installed and available before trying again. If the port is already in use, close the other VySol launcher or select another port as described in [Reference](reference.md#startup-options).
 
@@ -36,4 +36,4 @@ If the browser does not open but the launcher says VySol is ready, visit `http:/
 
 Close the launcher window to stop its server and other app-owned processes. Closing just the browser tab leaves the server running. Closing the launcher does not close your browser.
 
-Next, [create a world](create-world.md). You can try this without any books.
+Next, [create a world](create-world.md). You will need at least one TXT or EPUB book, an internet connection, and a Google AI Studio / Gemini API key. Closing the launcher pauses unfinished processing; restart and choose **Resume** to continue.
