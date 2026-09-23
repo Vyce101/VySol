@@ -4,12 +4,14 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
@@ -18,6 +20,11 @@ from starlette.concurrency import run_in_threadpool
 
 from .books import import_books, Upload, ImportLimits
 from .books.import_logging import import_logger
+from .books.models import ImportFailure
+from .creation import Creation
+from .creation_api import creation_routes
+from .creation_store import CreationConflict
+from .credentials import FileCredentialVault
 from .worlds import WorldStore, atomic_json
 
 
@@ -39,21 +46,28 @@ class Settings(BaseModel):
 
 
 def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
-               limits: ImportLimits | None = None) -> FastAPI:
+               limits: ImportLimits | None = None, *, vault=None, embedder=None) -> FastAPI:
     root = (data_dir or Path(os.environ.get("VYSOL_DATA_DIR", "data"))).resolve()
     frontend = frontend_dir or Path(__file__).resolve().parents[2] / "frontend" / "dist" / "client"
     store = WorldStore(root)
+    vault = vault or FileCredentialVault(root)
+    creation = Creation(root, vault, embedder, limits)
     limits = limits or ImportLimits()
 
     @asynccontextmanager
     async def lifespan(app):
         with import_logger(root) as logger:
             app.state.logger = logger
+            creation.start_service(logger)
             logger.info("Application started")
-            yield
-            logger.info("Application stopped")
+            try:
+                yield
+            finally:
+                creation.close()
+                logger.info("Application stopped")
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.state.creation = creation
 
     @app.middleware("http")
     async def local_browser(request: Request, call_next):
@@ -69,16 +83,32 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
 
     @app.exception_handler(OSError)
     @app.exception_handler(Timeout)
+    @app.exception_handler(sqlite3.Error)
     @app.exception_handler(json.JSONDecodeError)
     async def storage_error(request, exc):
         app.state.logger.error("Application storage operation failed type=%s", type(exc).__name__)
         return JSONResponse({"detail": "Storage is unavailable. Please try again."}, status_code=503)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # Default validation responses include inputs, which may contain secrets.
+        return JSONResponse({"detail": "Check the required fields and their allowed values."}, status_code=422)
+
+    @app.exception_handler(CreationConflict)
+    async def conflict(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(ImportFailure)
+    async def invalid_book(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=422)
 
     def require_world(world_id: UUID):
         try:
             return store.get(str(world_id))
         except FileNotFoundError:
             raise HTTPException(404, "World not found.") from None
+
+    app.include_router(creation_routes(creation))
 
     @app.get("/api/health")
     def health():

@@ -55,6 +55,9 @@ def world_storage(root: Path, world_id: str):
     if lock_path.is_symlink():
         raise ImportFailure(ErrorCode.STORAGE_FAILURE, "Invalid storage lock path.")
     with FileLock(lock_path, timeout=30):
+        metadata = root / "worlds" / world_key / "world.json"
+        if metadata.exists() and json.loads(metadata.read_text(encoding="utf-8")).get("sources_locked"):
+            raise ImportFailure(ErrorCode.INVALID_INPUT, "This world's source books are fixed.")
         books = safe_directory(root, "worlds", world_key, "books")
         yield books
 

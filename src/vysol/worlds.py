@@ -63,8 +63,8 @@ class WorldStore:
         for path in (self.directory(world_id) / "books").glob("*/metadata.json"):
             record = json.loads(path.read_text(encoding="utf-8"))
             records.append({"id": record["book_id"], "filename": record["original_filename"],
-                            "comparison_name": record["comparison_name"]})
-        return records
+                            "comparison_name": record["comparison_name"], "position": record.get("position")})
+        return sorted(records, key=lambda book: book["position"]) if all(b["position"] is not None for b in records) else records
 
     def original_digest(self, world_id: str, book: dict) -> str:
         key = hashlib.sha256(book["comparison_name"].encode()).hexdigest()
