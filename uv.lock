@@ -360,12 +360,12 @@ dependencies = [
     { name = "defusedxml" },
     { name = "fastapi" },
     { name = "filelock" },
+    { name = "httpx" },
     { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -375,11 +375,9 @@ requires-dist = [
     { name = "defusedxml", specifier = "==0.7.1" },
     { name = "fastapi", specifier = "==0.135.1" },
     { name = "filelock", specifier = "==3.20.3" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "uvicorn", specifier = "==0.41.0" },
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = "==0.28.1" },
-    { name = "pytest", specifier = "==8.4.2" },
-]
+dev = [{ name = "pytest", specifier = "==8.4.2" }]
