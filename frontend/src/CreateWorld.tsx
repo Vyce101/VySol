@@ -1,6 +1,87 @@
 import { useRef, useState } from "react";
-import { Check, FileText, Plus, SpinnerGap, X } from "@phosphor-icons/react";
-import { api, jsonRequest, sendBook, type World } from "./api";
+import { Check, FileText, Plus, SpinnerGap, WarningCircle, X } from "@phosphor-icons/react";
+import { api, jsonRequest, sendBook, type World, type CreationAttempt } from "./api";
+
+const stageNames: Record<string, string> = {
+  waiting: "Waiting for upload",
+  uploaded: "Uploaded",
+  converting: "Converting text…",
+  chunking: "Splitting text…",
+  prepared: "",
+  embedding: "Embedding…",
+  done: "Complete",
+  failed: "",
+};
+
+export function CreationProgress({ attempt }: { attempt: CreationAttempt }) {
+  return (
+    <div className="creation-progress">
+      <p>
+        {attempt.books_done} of {attempt.books.length} books complete
+      </p>
+      <p className="muted">
+        {attempt.chunks_done} of {attempt.chunks_total} chunks embedded
+      </p>
+      {attempt.chunks_total > 0 && (
+        <progress
+          aria-label="Embedding progress"
+          max={attempt.chunks_total}
+          value={attempt.chunks_done}
+        />
+      )}
+      <ol className="processing-books">
+        {attempt.books.map((book) => (
+          <li
+            key={book.id}
+            className={book.state === "failed" ? "has-error" : ""}
+          >
+            {book.state === "done" ? (
+              <Check aria-label="Complete" />
+            ) : book.state === "failed" ? (
+              <WarningCircle aria-label="Failed" />
+            ) : (
+              <FileText />
+            )}
+            <div>
+              <strong>{book.filename}</strong>
+              <p className="muted">
+                {stageNames[book.state] ?? book.state}
+                {book.chunks_total > 0
+                  ? `${stageNames[book.state] ? " · " : ""}${book.chunks_done} of ${book.chunks_total} chunks embedded`
+                  : ""}
+              </p>
+              {book.message && (
+                <p className="error-message">
+                  {book.message.replace(/\s*Resume later\./g, "")}
+                </p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+      {attempt.state === "failed" &&
+        attempt.message &&
+        !attempt.books.some((book) => book.message) && (
+          <p
+            className={attempt.state === "failed" ? "error-message" : ""}
+            role={attempt.state === "failed" ? "alert" : "status"}
+          >
+            {attempt.state === "failed" && (
+              <WarningCircle aria-label="Failed" />
+            )}
+            {attempt.message}
+          </p>
+        )}
+      {attempt.state !== "complete" && (
+        <p className="muted progress-note">
+          You can close this window while VySol works. Your progress is saved
+          locally.
+        </p>
+      )}
+    </div>
+  );
+}
+
 
 type BookChoice = {
   id: string;
@@ -222,3 +303,4 @@ export function CreateWorld({
     </section>
   );
 }
+

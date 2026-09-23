@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { CreateWorld } from "./CreateWorld";
-import { api, sendBook } from "./api";
+import { CreateWorld, CreationProgress } from "./CreateWorld";
+import { api, sendBook, type CreationAttempt } from "./api";
 vi.mock("./api", () => ({
   api: vi.fn(),
   sendBook: vi.fn(),
@@ -53,3 +53,50 @@ test("retry imports only failed books into the same world", async () => {
     ["one", "Bad.txt"],
   ]);
 });
+
+const saved: CreationAttempt = {
+  id: "attempt",
+  name: "Saved world",
+  revision: 4,
+  state: "failed",
+  phase: "preparing",
+  created_at: "",
+  updated_at: "",
+  message: "Some books need attention.",
+  config: { model: "gemini-embedding-2", size: 8000, search: 1000 },
+  key_id: "key",
+  books_done: 0,
+  chunks_total: 0,
+  chunks_done: 0,
+  books: [
+    {
+      id: "book",
+      filename: "Lost.txt",
+      size: 4,
+      position: 1,
+      state: "failed",
+      message: "Unreadable text",
+      uploaded: false,
+      chunks_total: 0,
+      chunks_done: 0,
+    },
+  ],
+};
+test("failed progress shows ordered counts and a single book error without editing", async () => {
+  render(<CreationProgress attempt={{
+    ...saved,
+    message: "Google is unavailable. Resume later.",
+    books: [
+      { ...saved.books[0], message: "Google is unavailable. Resume later." },
+    ],
+  }} />);
+  expect(await screen.findByText("Google is unavailable.")).toBeTruthy();
+  expect(screen.queryByText(/Resume later/)).toBeNull();
+  expect(screen.queryByText("Some books need attention.")).toBeNull();
+  expect(screen.queryByText("A world begins with its stories")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Edit attempt" })).toBeNull();
+  const progress = document.querySelector(".creation-progress")!;
+  expect(progress.children[0].textContent).toBe("0 of 1 books complete");
+  expect(progress.children[1].textContent).toBe("0 of 0 chunks embedded");
+});
+

@@ -8,6 +8,34 @@ export type World = {
 export type Speed = "fast" | "normal" | "slow";
 export type WorldLayout = "shelf" | "grid";
 export type Settings = { background_speed: Speed; world_layout: WorldLayout };
+export type ProcessingConfig = { model: string; size: number; search: number };
+export type CreationBook = {
+  id: string;
+  filename: string;
+  size: number;
+  position: number;
+  uploaded: boolean;
+  state: string;
+  message: string;
+  chunks_total: number;
+  chunks_done: number;
+};
+export type CreationAttempt = {
+  id: string;
+  name: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  state: "paused" | "running" | "pausing" | "failed" | "complete";
+  phase: string;
+  message: string;
+  config: ProcessingConfig;
+  key_id: string;
+  books: CreationBook[];
+  books_done: number;
+  chunks_total: number;
+  chunks_done: number;
+};
 export type ProviderKey = { id: string; name: string; provider: string };
 export type Providers = {
   keys: ProviderKey[];

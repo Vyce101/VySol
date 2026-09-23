@@ -1112,3 +1112,56 @@ main {
   cursor: grabbing;
   color: var(--gold);
 }
+
+progress {
+  width: 100%;
+  height: 5px;
+  border: 0;
+  border-radius: 5px;
+  accent-color: var(--gold);
+  background: #ffffff20;
+}
+progress::-webkit-progress-bar {
+  background: #ffffff20;
+  border-radius: 5px;
+}
+progress::-webkit-progress-value {
+  background: #cdb487;
+  border-radius: 5px;
+}
+.processing-books {
+  list-style: none;
+  margin: 22px 0;
+  padding: 0;
+}
+.processing-books li {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 15px 8px;
+  border-bottom: 1px solid #ffffff14;
+}
+.processing-books li > svg {
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+.processing-books strong {
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.processing-books li p {
+  font-size: 15px;
+  margin-top: 4px;
+}
+.processing-books .has-error {
+  border-left: 2px solid #cf8d81;
+  background: #d96d5810;
+}
+.has-error > svg {
+  color: #f0b4a6;
+}
+.progress-note {
+  margin-top: 20px;
+  font-size: 15px;
+  line-height: 1.45;
+}
