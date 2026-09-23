@@ -10,6 +10,8 @@ Keep source-grounded information distinguishable from inference, generated mater
 
 Do not treat VySol as a generic chatbot, simple RAG demo, wiki, or story generator.
 
+VySol is meant for non-technical users. This is very important. This is meant for average people.
+
 ## 2. Assistant Role
 
 You are a senior software engineer working on VySol.
