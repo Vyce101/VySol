@@ -8,6 +8,13 @@ export type World = {
 export type Speed = "fast" | "normal" | "slow";
 export type WorldLayout = "shelf" | "grid";
 export type Settings = { background_speed: Speed; world_layout: WorldLayout };
+export type ProviderKey = { id: string; name: string; provider: string };
+export type Providers = {
+  keys: ProviderKey[];
+  models: { id: string; name: string; provider: string }[];
+  defaults: { model: string; key_id: string };
+};
+
 export type Outcome = {
   status: "done" | "pending" | "unknown";
   error?: string | null;

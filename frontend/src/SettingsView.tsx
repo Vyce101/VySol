@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ProvidersView } from "./ProvidersView";
 import {
   api,
   jsonRequest,
@@ -15,6 +16,8 @@ export function SettingsView({
   onSaved,
   collectionPreview,
   onCollectionPreview,
+  manageKeys,
+  onReturnToCreation,
 }: {
   visible: boolean;
   speed: Speed;
@@ -22,8 +25,13 @@ export function SettingsView({
   onSaved: (settings: Settings) => void;
   collectionPreview: CollectionPreview;
   onCollectionPreview: (preview: CollectionPreview) => void;
+  manageKeys?: boolean;
+  onReturnToCreation?: () => void;
 }) {
   const [section, setSection] = useState("appearance");
+  useEffect(() => {
+    if (manageKeys) setSection("providers");
+  }, [manageKeys]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   async function save(next: Settings) {
@@ -44,21 +52,41 @@ export function SettingsView({
       inert={!visible}
     >
       <h1>Settings</h1>
+      {manageKeys && (
+        <button
+          className="text-action return-to-creation"
+          onClick={onReturnToCreation}
+        >
+          ← Return to creation
+        </button>
+      )}
       <div className="settings-layout">
         <nav aria-label="Settings categories">
-          {(["appearance", "developer"] as const).map((item) => (
+          {(["appearance", "providers", "developer"] as const).map((item) => (
             <button
               key={item}
               aria-pressed={section === item}
               onClick={() => setSection(item)}
             >
-              {item === "appearance" ? "Appearance" : "Developer"}
+              {item === "appearance"
+                ? "Appearance"
+                : item === "providers"
+                  ? "Providers"
+                  : "Developer"}
             </button>
           ))}
         </nav>
         <div className="settings-content">
-          <h2>{section === "appearance" ? "Appearance" : "Developer"}</h2>
-          {section === "appearance" ? (
+          <h2>
+            {section === "appearance"
+              ? "Appearance"
+              : section === "providers"
+                ? "Providers"
+                : "Developer"}
+          </h2>
+          {section === "providers" ? (
+            visible && <ProvidersView />
+          ) : section === "appearance" ? (
             <div className="setting-row">
               <label htmlFor="world-layout">
                 World display<span>Choose how you browse your collection.</span>
