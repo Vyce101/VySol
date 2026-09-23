@@ -8,7 +8,7 @@ import {
   type World,
 } from "./api";
 import { Background } from "./Background";
-import { CreateWorld } from "./CreateWorld";
+import { LegacyCreateWorld as CreateWorld } from "./CreateWorld";
 import { SettingsView } from "./SettingsView";
 import { WorldSearch } from "./WorldSearch";
 import {
