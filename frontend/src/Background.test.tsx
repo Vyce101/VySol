@@ -57,6 +57,22 @@ test("rapid return to a previous image keeps layers until the new fade finishes"
   ).toContain("/first.png");
 });
 
+test("a failed fallback keeps the last loaded artwork after cleanup", () => {
+  const { container, rerender } = render(
+    <Background url="/good.png" speed="normal" />,
+  );
+  act(() => images[0].onload!());
+  act(() => vi.advanceTimersByTime(400));
+  rerender(<Background url="/missing.png" speed="normal" />);
+  act(() => images[1].onerror!());
+  act(() => images[2].onerror!());
+  act(() => vi.advanceTimersByTime(2500));
+  expect(
+    container.querySelector<HTMLElement>(".backdrop-image")!.style
+      .backgroundImage,
+  ).toContain("/good.png");
+});
+
 test.each([
   ["fast", 150],
   ["normal", 300],

@@ -26,15 +26,26 @@ export function Background({ url, speed }: { url: string; speed: Speed }) {
           setLayers([{ source, id: generation }]);
       }, durations[speed] + 80);
     };
-    const image = new Image();
-    image.onload = () => show(url);
-    image.onerror = () => show(fallback);
-    image.src = url;
+    const pending: HTMLImageElement[] = [];
+    const load = (source: string) => {
+      const image = new Image();
+      pending.push(image);
+      image.onload = () => show(source);
+      image.onerror = () => {
+        if (generation === request.current && source !== fallback)
+          load(fallback);
+        // Retain the last good layer if even the default artwork cannot load.
+      };
+      image.src = source;
+    };
+    load(url);
     return () => {
       request.current++;
       clearTimeout(cleanup);
-      image.onload = null;
-      image.onerror = null;
+      pending.forEach((image) => {
+        image.onload = null;
+        image.onerror = null;
+      });
     };
   }, [url, speed]);
   return (
