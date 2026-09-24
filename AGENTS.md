@@ -28,7 +28,7 @@ Relevant areas include:
 
 Prefer simple, maintainable solutions. Follow existing project patterns before adding new abstractions or dependencies.
 
-Treat the current repository and tests as the source of truth. Planning notes may contain old or abandoned decisions, so verify them against the repo before using them as requirements.
+Treat the current repository and tests as the source of truth.
 
 ## 3. Project Tech Stack
 
@@ -45,3 +45,13 @@ Changelog model: Continuous/Dated
 Record notable completed changes in the project changelog when they become part of the delivered project.
 
 Keep entries concise and user-readable. Do not record plans, experiments, or unfinished work.
+
+## 5. Misc.
+
+Use Title Case for page headings, sections, fields, and named navigation destinations:
+
+Create World, World Name, Stories, Processing, AI Connection, Embedding Model, Advanced Settings, Maximum Chunk Size, Boundary Search Distance, Settings, General, AI Connections, Developer.
+
+Use normal sentence case for descriptions and statuses:
+
+Ready, Creating, Attention, 2 books, Add books, Save changes.
