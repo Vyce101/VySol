@@ -103,7 +103,7 @@ test("provider settings round trip preserves the setup step and files", async ()
   fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
   fireEvent.click(screen.getByRole("button", { name: "Manage API keys" }));
   expect(
-    await screen.findByRole("heading", { name: "Providers" }),
+    await screen.findByRole("heading", { name: "AI Connections" }),
   ).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "← Return to creation" }));
   expect(screen.getByLabelText("Maximum chunk size")).toBeTruthy();
@@ -151,15 +151,14 @@ test("settings save speed without changing world preview", async () => {
   render(<App />);
   await screen.findByLabelText("Preview Frostwake");
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("button", { name: "Developer" }));
-  fireEvent.change(screen.getByLabelText(/Background transition speed/), {
+  fireEvent.change(screen.getByLabelText(/Background Transition Speed/), {
     target: { value: "slow" },
   });
   await waitFor(() =>
     expect(
       (
         screen.getByLabelText(
-          /Background transition speed/,
+          /Background Transition Speed/,
         ) as HTMLSelectElement
       ).value,
     ).toBe("slow"),
@@ -225,13 +224,12 @@ test("failed settings save retains the saved preference", async () => {
     ok: false,
     json: async () => ({ detail: "Unavailable" }),
   } as Response);
-  fireEvent.click(screen.getByRole("button", { name: "Developer" }));
-  fireEvent.change(screen.getByLabelText(/Background transition speed/), {
+  fireEvent.change(screen.getByLabelText(/Background Transition Speed/), {
     target: { value: "slow" },
   });
   await screen.findByText("Your setting could not be saved. Please try again.");
   expect(
-    (screen.getByLabelText(/Background transition speed/) as HTMLSelectElement)
+    (screen.getByLabelText(/Background Transition Speed/) as HTMLSelectElement)
       .value,
   ).toBe("normal");
 });
@@ -241,7 +239,7 @@ test("Developer collection previews never mutate saved worlds", async () => {
   await screen.findByLabelText("Preview Frostwake");
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   fireEvent.click(screen.getByRole("button", { name: "Developer" }));
-  fireEvent.change(screen.getByLabelText(/Homepage preview/), {
+  fireEvent.change(screen.getByLabelText(/Homepage Preview/), {
     target: { value: "sample" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
@@ -252,7 +250,7 @@ test("Developer collection previews never mutate saved worlds", async () => {
   expect(screen.getAllByRole("article")).toHaveLength(12);
   expect(screen.getAllByRole("option")).toHaveLength(2);
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText(/Homepage preview/), {
+  fireEvent.change(screen.getByLabelText(/Homepage Preview/), {
     target: { value: "empty" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
@@ -261,7 +259,7 @@ test("Developer collection previews never mutate saved worlds", async () => {
   ).toBeTruthy();
   expect(screen.queryByText("Your Worlds")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText(/Homepage preview/), {
+  fireEvent.change(screen.getByLabelText(/Homepage Preview/), {
     target: { value: "saved" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
@@ -293,12 +291,12 @@ test("world display saves and switches the collection layout", async () => {
   await screen.findByLabelText("Preview Frostwake");
   expect(document.querySelector(".world-shelf")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText(/World display/), {
+  fireEvent.change(screen.getByLabelText(/World Display/), {
     target: { value: "grid" },
   });
   await waitFor(() =>
     expect(
-      (screen.getByLabelText(/World display/) as HTMLSelectElement).value,
+      (screen.getByLabelText(/World Display/) as HTMLSelectElement).value,
     ).toBe("grid"),
   );
   fireEvent.click(screen.getByRole("button", { name: "Worlds" }));

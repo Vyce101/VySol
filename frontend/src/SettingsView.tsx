@@ -9,6 +9,8 @@ import {
 } from "./api";
 import type { CollectionPreview } from "./collectionPreview";
 
+type SettingsSection = "general" | "connections" | "developer";
+
 export function SettingsView({
   visible,
   speed,
@@ -26,14 +28,17 @@ export function SettingsView({
   collectionPreview: CollectionPreview;
   onCollectionPreview: (preview: CollectionPreview) => void;
   manageKeys?: boolean;
+  onClose?: () => void;
   onReturnToCreation?: () => void;
 }) {
-  const [section, setSection] = useState("appearance");
-  useEffect(() => {
-    if (manageKeys) setSection("providers");
-  }, [manageKeys]);
+  const [section, setSection] = useState<SettingsSection>("general");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (manageKeys) setSection("connections");
+  }, [manageKeys]);
+
   async function save(next: Settings) {
     setSaving(true);
     setError("");
@@ -45,73 +50,84 @@ export function SettingsView({
       setSaving(false);
     }
   }
+
   return (
     <section
-      className={`view settings-view ${visible ? "is-visible" : ""}`}
+      className={`view settings-view settings-redesign ${visible ? "is-visible" : ""}`}
       aria-hidden={!visible}
       inert={!visible}
     >
-      <h1>Settings</h1>
-      {manageKeys && (
-        <button
-          className="text-action return-to-creation"
-          onClick={onReturnToCreation}
-        >
-          ← Return to creation
-        </button>
-      )}
+      <header className="settings-page-header">
+        <h1>Settings</h1>
+        {manageKeys && onReturnToCreation && (
+          <button className="text-action return-to-creation" onClick={onReturnToCreation}>
+            ← Return to creation
+          </button>
+        )}
+      </header>
+
       <div className="settings-layout">
-        <nav aria-label="Settings categories">
-          {(["appearance", "providers", "developer"] as const).map((item) => (
+        <nav className="settings-navigation" aria-label="Settings sections">
+          {(
+            [
+              ["general", "General"],
+              ["connections", "AI Connections"],
+              ["developer", "Developer"],
+            ] as const
+          ).map(([id, label]) => (
             <button
-              key={item}
-              aria-pressed={section === item}
-              onClick={() => setSection(item)}
+              key={id}
+              type="button"
+              aria-current={section === id ? "page" : undefined}
+              onClick={() => setSection(id)}
             >
-              {item === "appearance"
-                ? "Appearance"
-                : item === "providers"
-                  ? "Providers"
-                  : "Developer"}
+              {label}
             </button>
           ))}
         </nav>
-        <div className="settings-content">
+
+        <div className="settings-content" key={section}>
           <h2>
-            {section === "appearance"
-              ? "Appearance"
-              : section === "providers"
-                ? "Providers"
+            {section === "general"
+              ? "General"
+              : section === "connections"
+                ? "AI Connections"
                 : "Developer"}
           </h2>
-          {section === "providers" ? (
-            visible && <ProvidersView />
-          ) : section === "appearance" ? (
-            <div className="setting-row">
-              <label htmlFor="world-layout">
-                World display<span>Choose how you browse your collection.</span>
-              </label>
-              <select
-                id="world-layout"
-                value={layout}
-                disabled={saving}
-                onChange={(event) =>
-                  save({
-                    background_speed: speed,
-                    world_layout: event.target.value as WorldLayout,
-                  })
-                }
-              >
-                <option value="shelf">Horizontal shelf</option>
-                <option value="grid">Grid</option>
-              </select>
-            </div>
-          ) : (
-            <>
-              <div className="setting-row">
+
+          {section === "general" && (
+            <div className="settings-options">
+              <div className="settings-option">
+                <label htmlFor="world-layout">
+                  <span className="settings-option-title">World Display</span>
+                  <span className="settings-option-description">
+                    Choose how you browse your collection.
+                  </span>
+                </label>
+                <select
+                  id="world-layout"
+                  value={layout}
+                  disabled={saving}
+                  onChange={(event) =>
+                    save({
+                      background_speed: speed,
+                      world_layout: event.target.value as WorldLayout,
+                    })
+                  }
+                >
+                  <option value="shelf">Shelf</option>
+                  <option value="grid">Grid</option>
+                </select>
+              </div>
+
+              <div className="settings-option">
                 <label htmlFor="transition-speed">
-                  Background transition speed
-                  <span>How gently one world gives way to another.</span>
+                  <span className="settings-option-title">
+                    Background Transition Speed
+                  </span>
+                  <span className="settings-option-description">
+                    Set how quickly the artwork changes between worlds.
+                  </span>
                 </label>
                 <select
                   id="transition-speed"
@@ -124,16 +140,25 @@ export function SettingsView({
                     })
                   }
                 >
-                  <option value="fast">Fast — 150 ms</option>
-                  <option value="normal">Normal — 300 ms</option>
-                  <option value="slow">Slow — 600 ms</option>
+                  <option value="fast">Fast</option>
+                  <option value="normal">Normal</option>
+                  <option value="slow">Slow</option>
                 </select>
               </div>
-              <div className="setting-row">
+            </div>
+          )}
+
+          {section === "connections" && (
+            visible && <ProvidersView />
+          )}
+
+          {section === "developer" && (
+            <div className="settings-options">
+              <div className="settings-option">
                 <label htmlFor="homepage-preview">
-                  Homepage preview
-                  <span>
-                    Temporary samples. Your saved worlds stay untouched.
+                  <span className="settings-option-title">Homepage Preview</span>
+                  <span className="settings-option-description">
+                    Show temporary examples while you work on the app.
                   </span>
                 </label>
                 <select
@@ -143,16 +168,17 @@ export function SettingsView({
                     onCollectionPreview(event.target.value as CollectionPreview)
                   }
                 >
-                  <option value="saved">Your saved worlds</option>
-                  <option value="four">4 sample worlds</option>
-                  <option value="sample">12 sample worlds</option>
-                  <option value="empty">Empty homepage</option>
+                  <option value="saved">Your Saved Worlds</option>
+                  <option value="four">4 Sample Worlds</option>
+                  <option value="sample">12 Sample Worlds</option>
+                  <option value="empty">Empty Homepage</option>
                 </select>
               </div>
-            </>
+            </div>
           )}
+
           {error && (
-            <p className="error-message" role="alert">
+            <p className="settings-error" role="alert">
               {error}
             </p>
           )}
