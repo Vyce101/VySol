@@ -92,6 +92,15 @@ def test_atomic_creation_order_source_lock_and_vectors(setup, tmp_path):
     books = client.get(f"/api/worlds/{attempt['id']}/books").json()
     assert [b["position"] for b in books] == [1, 2]
     assert [b["filename"] for b in books] == ["First.txt", "Second.txt"]
+    detail = client.get(f"/api/worlds/{attempt['id']}").json()
+    assert detail["state"] == "complete"
+    assert detail["book_count"] == 2
+    assert [book["position"] for book in detail["books"]] == [1, 2]
+    assert [book["filename"] for book in detail["books"]] == ["First.txt", "Second.txt"]
+    assert detail["progress"] == {"chunks_done": 2, "chunks_total": 2, "books_done": 2, "books_total": 2}
+    assert detail["processing"] == {
+        "model": "gemini-embedding-2", "max_chunk_size": 8000, "boundary_search_distance": 1000,
+    }
     assert embeddings.calls == ["First story", "Second story"]
     manager = client.app.state.creation
     with manager.store.connect() as db:
@@ -144,16 +153,66 @@ def test_oversized_chunks_split_losslessly(setup):
     assert all(len(text) <= 4 for text in embeddings.calls)
 
 
-def test_manifest_idempotency_stale_revision_and_single_attempt(setup):
+def test_manifest_idempotency_stale_revision_and_multiple_attempts(setup):
     client, _, _ = setup
     attempt, body, _ = manifest(client)
     replay = client.put(f"/api/creation/{attempt['id']}", json=body).json()
     assert replay["revision"] == attempt["revision"]
     body["operation_id"] = str(uuid4())
     assert client.put(f"/api/creation/{attempt['id']}", json=body).status_code == 409
-    assert client.put(f"/api/creation/{uuid4()}", json=body).status_code == 409
+    second_id = str(uuid4())
+    second = client.put(f"/api/creation/{second_id}", json=body)
+    assert second.status_code == 200
+    assert {item["id"] for item in client.get("/api/creations").json()} == {attempt["id"], second_id}
     assert client.delete(f"/api/creation/{attempt['id']}?revision={attempt['revision']}").status_code == 200
+    assert client.delete(f"/api/creation/{second_id}?revision={second.json()['revision']}").status_code == 200
     assert client.get("/api/creation").json() is None
+
+
+def test_world_creation_workers_run_and_pause_independently(setup):
+    client, _, embeddings = setup
+    entered_both = threading.Event()
+    release_second = threading.Event()
+    entered = 0
+    entered_lock = threading.Lock()
+
+    def blocking(text, secret, stop, logger):
+        nonlocal entered
+        with entered_lock:
+            entered += 1
+            if entered == 2:
+                entered_both.set()
+        while not release_second.wait(0.01):
+            if stop.is_set():
+                raise ProcessingPaused()
+        return [1.0] + [0.0] * (DIMENSIONS - 1)
+
+    embeddings.embed = blocking
+    attempts = []
+    for _ in range(2):
+        attempt, _, files = manifest(client, [(f"Book-{len(attempts)}.txt", b"Independent world")])
+        attempts.append(upload_all(client, attempt, files))
+    assert {item["id"] for item in client.get("/api/creations").json()} == {item["id"] for item in attempts}
+
+    started = []
+    for attempt in attempts:
+        response = client.post(f"/api/creation/{attempt['id']}/start",
+                               json={"revision": attempt["revision"], "operation_id": str(uuid4())})
+        assert response.status_code == 200
+        started.append(response.json())
+    assert entered_both.wait(5)
+    workers = dict(client.app.state.creation.threads)
+
+    paused = client.post(f"/api/creation/{started[0]['id']}/pause", json={"revision": started[0]["revision"]})
+    assert paused.status_code == 200 and paused.json()["state"] == "pausing"
+    workers[started[0]["id"]].join(5)
+    assert client.get(f"/api/creation/{started[0]['id']}").json()["state"] == "paused"
+    assert client.get(f"/api/creation/{started[1]['id']}").json()["state"] == "running"
+
+    release_second.set()
+    workers[started[1]["id"]].join(5)
+    assert client.get(f"/api/creation/{started[1]['id']}").json()["state"] == "complete"
+    assert client.get("/api/creations").json()[0]["id"] == started[0]["id"]
 
 
 def test_credentials_never_return_or_persist_in_sqlite(setup, tmp_path, capsys):
@@ -282,7 +341,7 @@ def test_failure_before_publication_is_invisible_and_retry_reuses_vectors(setup,
     manager = client.app.state.creation
     attempt, _, files = manifest(client)
     original = manager.publish
-    def fail(value):
+    def fail(value, stop):
         raise OSError("publication interrupted")
     monkeypatch.setattr(manager, "publish", fail)
     attempt = run(client, upload_all(client, attempt, files))
@@ -319,9 +378,9 @@ def test_changed_working_text_cannot_publish_with_stale_vectors(setup, monkeypat
     manager = client.app.state.creation
     attempt, _, files = manifest(client)
     original = manager.publish
-    def corrupt(value):
+    def corrupt(value, stop):
         (manager.book_directory(value["id"], value["books"][0]["id"]) / "text").write_bytes(b"Changed text")
-        original(value)
+        original(value, stop)
     monkeypatch.setattr(manager, "publish", corrupt)
     result = run(client, upload_all(client, attempt, files))
     assert result["state"] == "failed" and "changed on disk" in result["message"]

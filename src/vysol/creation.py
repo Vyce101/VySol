@@ -1,4 +1,4 @@
-"""One resumable creation worker, publishing only complete immutable worlds."""
+"""Resumable per-world creation workers, publishing only complete immutable worlds."""
 
 import hashlib
 import json
@@ -33,9 +33,12 @@ class Creation:
         self.embedder = embedder or GeminiEmbeddings()
         self.limits = limits or ImportLimits()
         self.guard = threading.RLock()
+        self.stops = {}
+        self.threads = {}
+        self.discarding = set()
+        # Keep the most recently started worker available to older callers.
         self.stop = threading.Event()
         self.thread = None
-        self.discarding = False
         self.lease = FileLock(root / "locks" / "creation-worker.lock", timeout=0)
         self.logger = logging.getLogger("vysol.creation")
 
@@ -43,10 +46,9 @@ class Creation:
         self.lease.acquire()
         self.logger = logger
         try:
-            value = self.store.get()
-            if value:
+            for value in self.store.pending():
                 if self.reconcile(value):
-                    return
+                    continue
                 if value["state"] in BUSY:
                     self.store.update(value["id"], state="paused", message="Processing paused when VySol stopped.")
                     logger.info("Creation recovered as paused attempt_id=%s", value["id"])
@@ -55,9 +57,13 @@ class Creation:
             raise
 
     def close(self):
-        self.stop.set()
-        if self.thread:
-            self.thread.join()
+        with self.guard:
+            stops = list(self.stops.values())
+            threads = list(self.threads.values())
+            for stop in stops:
+                stop.set()
+        for thread in threads:
+            thread.join()
         self.lease.release()
 
     def directory(self, attempt_id: str) -> Path:
@@ -69,7 +75,7 @@ class Creation:
         return safe_directory(self.root, "creations", attempt_id, "books", book_id)
 
     def require(self, attempt_id, revision=None, editable=False, db=None):
-        if self.discarding:
+        if attempt_id in self.discarding:
             raise CreationConflict("The previous attempt is being discarded. Try again shortly.")
         value = self.store.get(attempt_id, db=db)
         if value is None:
@@ -92,8 +98,6 @@ class Creation:
                 if not self.store.command(db, attempt_id, command_id, payload):
                     return self.store.public(existing)
                 raise CreationConflict("Submitted attempts cannot be edited. Discard this attempt and start again.")
-            if self.store.get(db=db):
-                raise CreationConflict("Finish or discard the current attempt before starting another.")
             if manifest["revision"] != 0:
                 raise CreationConflict("This creation attempt no longer exists.")
             if not self.store.enabled_key(manifest["key_id"], db=db):
@@ -159,31 +163,33 @@ class Creation:
 
     def start(self, attempt_id, revision, operation_id):
         with self.guard:
-            return self._start(attempt_id, revision, operation_id)
-
-    def _start(self, attempt_id, revision, operation_id):
-        with self.guard, self.store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            existing = self.store.get(attempt_id, db=db)
-            if not existing:
-                raise CreationConflict("This attempt no longer exists.")
-            if not self.store.command(db, attempt_id, operation_id, {"action": "start", "revision": revision}):
-                return self.store.public(existing)
-            value = self.require(attempt_id, revision, True, db)
-            if self.thread and self.thread.is_alive():
-                raise CreationConflict("The previous worker is still stopping. Try again shortly.")
-            if not all(b["uploaded"] for b in value["books"]):
-                raise CreationConflict("Some uploads are missing. Discard this attempt and start again if the files are no longer available.")
-            if not any(key["id"] == value["key_id"] for key in self.store.keys()) or not self.vault.read(value["key_id"]):
-                raise CreationConflict("The selected API key is unavailable. Restore its secret in Providers, or discard this attempt and start again.")
-            value.update(state="running", message="", revision=value["revision"] + 1)
-            self.store.put(db, value)
-            db.execute("INSERT INTO preferences VALUES('processing',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-                       (json.dumps({"model": value["config"]["model"], "key_id": value["key_id"]}),))
-        with self.guard:
-            self.stop.clear()
-            self.thread = threading.Thread(target=self.run, args=(attempt_id,), name="world-creation", daemon=True)
-            self.thread.start()
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                existing = self.store.get(attempt_id, db=db)
+                if not existing:
+                    raise CreationConflict("This attempt no longer exists.")
+                if not self.store.command(db, attempt_id, operation_id, {"action": "start", "revision": revision}):
+                    return self.store.public(existing)
+                value = self.require(attempt_id, revision, True, db)
+                active_thread = self.threads.get(attempt_id)
+                if active_thread and active_thread.is_alive():
+                    raise CreationConflict("This world is still stopping. Try again shortly.")
+                if not all(b["uploaded"] for b in value["books"]):
+                    raise CreationConflict("Some uploads are missing. Discard this attempt and start again if the files are no longer available.")
+                if not any(key["id"] == value["key_id"] for key in self.store.keys()) or not self.vault.read(value["key_id"]):
+                    raise CreationConflict("The selected API key is unavailable. Restore its secret in Providers, or discard this attempt and start again.")
+                value.update(state="running", message="", revision=value["revision"] + 1)
+                self.store.put(db, value)
+                db.execute("INSERT INTO preferences VALUES('processing',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                           (json.dumps({"model": value["config"]["model"], "key_id": value["key_id"]}),))
+            stop = threading.Event()
+            thread = threading.Thread(target=self.run, args=(attempt_id, stop),
+                                      name=f"world-creation-{attempt_id[:8]}", daemon=True)
+            self.stops[attempt_id] = stop
+            self.threads[attempt_id] = thread
+            self.stop = stop
+            self.thread = thread
+            thread.start()
         self.logger.info("Creation started attempt_id=%s", attempt_id)
         return self.store.public(value)
 
@@ -192,15 +198,19 @@ class Creation:
             value = self.require(attempt_id, revision)
             if value["state"] in BUSY:
                 self.store.update(attempt_id, state="pausing", revision=value["revision"] + 1)
-                self.stop.set()
+                stop = self.stops.get(attempt_id)
+                if stop:
+                    stop.set()
             return self.store.public(self.store.get(attempt_id))
 
     def discard(self, attempt_id, revision):
         with self.guard:
             self.require(attempt_id, revision)
-            self.discarding = True
-            self.stop.set()
-            thread = self.thread
+            self.discarding.add(attempt_id)
+            stop = self.stops.get(attempt_id)
+            if stop:
+                stop.set()
+            thread = self.threads.get(attempt_id)
         try:
             if thread:
                 thread.join()
@@ -217,11 +227,13 @@ class Creation:
                     db.execute("DELETE FROM attempts WHERE id=?", (attempt_id,))
         finally:
             with self.guard:
-                self.discarding = False
+                self.discarding.discard(attempt_id)
+                self.stops.pop(attempt_id, None)
+                self.threads.pop(attempt_id, None)
         self.logger.info("Creation discarded attempt_id=%s", attempt_id)
 
-    def check_stop(self):
-        if self.stop.is_set():
+    def check_stop(self, stop):
+        if stop.is_set():
             raise ProcessingPaused()
 
     def reconcile(self, value):
@@ -234,7 +246,7 @@ class Creation:
         self.store.update(value["id"], state="complete", phase="complete", message="Your world is ready.")
         return True
 
-    def run(self, attempt_id):
+    def run(self, attempt_id, stop):
         current_book = None
         try:
             value = self.store.get(attempt_id)
@@ -243,7 +255,7 @@ class Creation:
             failed = False
             self.store.update(attempt_id, phase="preparing")
             for book in value["books"]:
-                self.check_stop()
+                self.check_stop(stop)
                 current_book = book["id"]
                 try:
                     folder = self.book_directory(attempt_id, current_book)
@@ -275,12 +287,12 @@ class Creation:
                 raise EmbeddingFailure("credentials", "The selected API key is missing. Restore it in Providers, or discard this attempt and start again.")
             for book in value["books"]:
                 current_book = book["id"]
-                self.check_stop()
+                self.check_stop(stop)
                 self.store.update_book(attempt_id, current_book, state="embedding", message="")
                 while chunk := self.store.pending_chunk(attempt_id, current_book):
-                    self.check_stop()
+                    self.check_stop(stop)
                     try:
-                        vector = self.embedder.embed(chunk["text"], secret, self.stop, self.logger)
+                        vector = self.embedder.embed(chunk["text"], secret, stop, self.logger)
                         self.store.save_vector(chunk["id"], vector)
                     except InputTooLarge:
                         size = len(chunk["text"]) // 2
@@ -291,9 +303,9 @@ class Creation:
                                                          offset=chunk["start"]), value["config"], replace_id=chunk["id"])
                         self.logger.warning("Oversized chunk split attempt_id=%s book_id=%s", attempt_id, current_book)
                 self.store.update_book(attempt_id, current_book, state="done")
-            self.check_stop()
+            self.check_stop(stop)
             current_book = None
-            self.publish(self.store.get(attempt_id))
+            self.publish(self.store.get(attempt_id), stop)
             self.logger.info("World creation succeeded attempt_id=%s", attempt_id)
         except ProcessingPaused:
             self.store.update(attempt_id, state="paused", message="Progress saved. Resume when you are ready.")
@@ -309,10 +321,15 @@ class Creation:
                 self.store.update(attempt_id, state="failed", message=message)
             finally:
                 self.logger.error("Creation failed attempt_id=%s type=%s", attempt_id, type(exc).__name__)
+        finally:
+            with self.guard:
+                if self.threads.get(attempt_id) is threading.current_thread():
+                    self.threads.pop(attempt_id, None)
+                    self.stops.pop(attempt_id, None)
 
-    def publish(self, value):
+    def publish(self, value, stop):
         with self.guard:
-            self.check_stop()
+            self.check_stop(stop)
             self.store.update(value["id"], phase="publishing")
             prepared = self.directory(value["id"]) / "world"
             prepared.mkdir(exist_ok=True)
@@ -323,7 +340,7 @@ class Creation:
                 if old.is_dir() and old.resolve().is_relative_to(prepared.resolve()):
                     shutil.rmtree(old)
             for book in value["books"]:
-                self.check_stop()
+                self.check_stop(stop)
                 comparison, text_name = validate_upload(Upload(book["filename"], b""))
                 source = self.book_directory(value["id"], book["id"])
                 self.verify_book(value["id"], book, source)
