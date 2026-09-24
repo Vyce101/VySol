@@ -108,7 +108,7 @@ test("provider settings round trip preserves the setup step and files", async ()
   fireEvent.click(screen.getByRole("button", { name: "← Return to creation" }));
   expect(screen.getByLabelText("Maximum chunk size")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "← Back" }));
-  expect(screen.getByText("Draft.txt")).toBeTruthy();
+  expect(screen.getByText("Draft")).toBeTruthy();
   expect((screen.getByLabelText("World name") as HTMLInputElement).value).toBe(
     "Draft",
   );
@@ -186,7 +186,7 @@ test("closing clears selected files and resets processing settings", async () =>
       files: [new File(["Story"], "Story.txt", { type: "text/plain" })],
     },
   });
-  expect(screen.getByText("Story.txt")).toBeTruthy();
+  expect(screen.getByText("Story")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("World name"), {
     target: { value: "Story" },
   });
@@ -199,7 +199,7 @@ test("closing clears selected files and resets processing settings", async () =>
   });
   fireEvent.click(screen.getByRole("button", { name: "Close creation" }));
   fireEvent.click(screen.getByRole("button", { name: "Create World" }));
-  expect(screen.queryByText("Story.txt")).toBeNull();
+  expect(screen.queryByText("Story")).toBeNull();
   fireEvent.change(screen.getByLabelText("World name"), {
     target: { value: "Another world" },
   });

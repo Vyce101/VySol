@@ -70,7 +70,7 @@ test("no processing until review submission, with keyboard reorder and exact set
   );
   expect(
     document.querySelectorAll(".book-selection-name > span")[0].textContent,
-  ).toBe("Second.epub");
+  ).toBe("Second");
   expect(screen.queryByText("Converting text…")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Continue →" }));
   expect(
