@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { GearSix, Plus } from "@phosphor-icons/react";
+import { ArrowRight, GearSix, Plus, X } from "@phosphor-icons/react";
 import {
   api,
+  jsonRequest,
+  type CreationAttempt,
   type Settings,
   type Speed,
-  type WorldLayout,
   type World,
-  type CreationAttempt,
+  type WorldDetail,
+  type WorldLayout,
+  bookCountLabel,
   attemptLabel,
   attemptProgress,
 } from "./api";
 import { Background } from "./Background";
-import { CreateWorld } from "./CreateWorld";
+import { CreateWorld, WorldOverview } from "./CreateWorld";
 import { SettingsView } from "./SettingsView";
 import { WorldSearch } from "./WorldSearch";
 import {
@@ -21,39 +24,96 @@ import {
   type PreviewWorld,
 } from "./collectionPreview";
 
-type View = "worlds" | "settings";
+type View = "worlds" | "settings" | "create" | "overview";
+type PageView = Exclude<View, "settings">;
+
+function pendingBookCount(attempt: CreationAttempt) {
+  return attempt.books.length;
+}
+
+function worldForAttempt(attempt: CreationAttempt): PreviewWorld {
+  return {
+    id: attempt.id,
+    name: attempt.name,
+    created_at: attempt.created_at,
+    last_used_at: null,
+    artwork: "frostwake",
+    artworkUrl: "/assets/frostwake.png",
+    book_count: pendingBookCount(attempt),
+  };
+}
+
 export function App() {
   const homeRef = useRef<HTMLElement>(null);
   const shelfRef = useRef<HTMLDivElement>(null);
   const edgeAnimation = useRef<Animation | null>(null);
+  const resumeAttemptRef = useRef<
+    ((attempt: CreationAttempt) => Promise<CreationAttempt>) | null
+  >(null);
   useEffect(() => () => edgeAnimation.current?.cancel(), []);
   const [view, setView] = useState<View>("worlds");
+  const [previousView, setPreviousView] = useState<PageView>("worlds");
   const [worlds, setWorlds] = useState<World[]>([]);
   const [preview, setPreview] = useState<PreviewWorld | null>(null);
+  const [selectedWorldId, setSelectedWorldId] = useState<string | null>(null);
+  const [worldDetail, setWorldDetail] = useState<WorldDetail | null>(null);
+  const [detailError, setDetailError] = useState("");
   const [collectionPreview, setCollectionPreview] =
     useState<CollectionPreview>("saved");
   const [speed, setSpeed] = useState<Speed>("normal");
   const [layout, setLayout] = useState<WorldLayout>("shelf");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [draftKey, setDraftKey] = useState(0);
-  const [creationOpen, setCreationOpen] = useState(false);
-  const [attempt, setAttempt] = useState<CreationAttempt | null>(null);
+  const [attempts, setAttempts] = useState<CreationAttempt[]>([]);
   const [manageKeys, setManageKeys] = useState(false);
   const [progressError, setProgressError] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [uploadingIds, setUploadingIds] = useState<Set<string>>(() => new Set());
+  const [attemptBusyIds, setAttemptBusyIds] = useState<Set<string>>(() => new Set());
   const [searchEpoch, setSearchEpoch] = useState(0);
+  const [overviewHandoff, setOverviewHandoff] = useState(false);
+  const [settingsReturning, setSettingsReturning] = useState(false);
+  const completedAttemptIds = useRef(new Set<string>());
+  const discardedAttemptIds = useRef(new Set<string>());
+
+  function updateAttempt(value: CreationAttempt) {
+    if (discardedAttemptIds.current.has(value.id)) return;
+    setAttempts((previous) => {
+      const existing = previous.find((item) => item.id === value.id);
+      if (existing && existing.revision > value.revision) return previous;
+      return existing
+        ? previous.map((item) => (item.id === value.id ? value : item))
+        : [value, ...previous];
+    });
+  }
+
+  useEffect(() => {
+    if (!overviewHandoff) return;
+    const timer = setTimeout(() => setOverviewHandoff(false), 290);
+    return () => clearTimeout(timer);
+  }, [overviewHandoff]);
+
+  useEffect(() => {
+    if (!settingsReturning) return;
+    const timer = setTimeout(() => setSettingsReturning(false), 210);
+    return () => clearTimeout(timer);
+  }, [settingsReturning]);
+
   async function load() {
     setError("");
     setLoading(true);
     try {
-      const [records, settings, savedAttempt] = await Promise.all([
+      const [records, settings, savedAttemptsResponse] = await Promise.all([
         api<World[]>("/worlds"),
         api<Settings>("/settings"),
-        api<CreationAttempt | null>("/creation"),
+        api<CreationAttempt[]>("/creations").catch(() => null),
       ]);
+      const savedAttempts = Array.isArray(savedAttemptsResponse)
+        ? savedAttemptsResponse
+        : await api<CreationAttempt | null>("/creation").then((saved) =>
+            saved ? [saved] : [],
+          );
       setWorlds(records);
-      setAttempt(savedAttempt);
+      setAttempts(savedAttempts);
       setPreview((previous) => previous ?? records[0] ?? null);
       setSpeed(settings.background_speed);
       setLayout(settings.world_layout ?? "shelf");
@@ -70,37 +130,30 @@ export function App() {
   useEffect(() => {
     void load();
   }, []);
-  function navigate(next: View) {
-    setView(next);
-  }
-  function openCreation() {
-    if (attempt?.state === "complete") {
-      setAttempt(null);
-      setDraftKey((key) => key + 1);
-    }
-    setCreationOpen(true);
-  }
+
+  const pollableAttemptIds = attempts
+    .filter((attempt) => attempt.state !== "complete")
+    .map((attempt) => attempt.id);
+  const pollableAttemptKey = pollableAttemptIds.join("|");
   useEffect(() => {
-    if (!attempt || attempt.state === "complete") return;
+    if (!pollableAttemptIds.length) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
-      try {
-        const value = await api<CreationAttempt>(`/creation/${attempt!.id}`);
-        if (!cancelled) {
-          setAttempt((previous) =>
-            previous?.id === value.id && previous.revision <= value.revision
-              ? value
-              : previous,
-          );
-          setProgressError("");
-        }
-      } catch {
-        if (!cancelled)
-          setProgressError(
-            "Could not refresh creation progress. Reconnecting…",
-          );
+      const results = await Promise.allSettled(
+        pollableAttemptIds.map((id) =>
+          api<CreationAttempt>(`/creation/${id}`),
+        ),
+      );
+      if (cancelled) return;
+      let failed = false;
+      for (const result of results) {
+        if (result.status === "fulfilled") updateAttempt(result.value);
+        else failed = true;
       }
+      setProgressError(
+        failed ? "Could not refresh creation progress. Reconnecting…" : "",
+      );
       if (!cancelled) timer = setTimeout(poll, 1000);
     }
     timer = setTimeout(poll, 1000);
@@ -108,45 +161,62 @@ export function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [attempt?.id, attempt?.state]);
+  }, [pollableAttemptKey]);
+
   useEffect(() => {
-    if (attempt?.state !== "complete") return;
+    const newlyCompleted = attempts.filter(
+      (attempt) =>
+        attempt.state === "complete" &&
+        !completedAttemptIds.current.has(attempt.id),
+    );
+    if (!newlyCompleted.length) return;
+    for (const attempt of newlyCompleted)
+      completedAttemptIds.current.add(attempt.id);
     api<World[]>("/worlds")
       .then(setWorlds)
       .catch(() =>
-        setError(
-          "Your world is ready, but the collection could not refresh. Try again.",
-        ),
+        setError("Your world is ready, but the collection could not refresh. Try again."),
       );
-  }, [attempt?.id, attempt?.state]);
-  const pendingWorld: PreviewWorld | null =
-    attempt && attempt.state !== "complete"
-      ? {
-          id: attempt.id,
-          name: attempt.name,
-          created_at: attempt.created_at,
-          last_used_at: null,
-          artwork: "frostwake",
-          artworkUrl: "/assets/frostwake.png",
-        }
-      : null;
-  const displayedAttempt =
-    attempt && uploading ? { ...attempt, state: "running" as const } : attempt;
-  const savedCollection: PreviewWorld[] = pendingWorld
-    ? [pendingWorld, ...worlds.filter((world) => world.id !== pendingWorld.id)]
-    : attempt?.state === "complete" &&
-        !worlds.some((world) => world.id === attempt.id)
-      ? [
-          {
-            id: attempt.id,
-            name: attempt.name,
-            created_at: attempt.updated_at,
-            last_used_at: null,
-            artwork: "frostwake",
-          },
-          ...worlds,
-        ]
-      : worlds;
+  }, [attempts]);
+
+  useEffect(() => {
+    if (view !== "overview" || !selectedWorldId) return;
+    let cancelled = false;
+    setWorldDetail(null);
+    setDetailError("");
+    api<WorldDetail>(`/worlds/${selectedWorldId}`)
+      .then((detail) => {
+        if (!cancelled) setWorldDetail(detail);
+      })
+      .catch((cause) => {
+        if (!cancelled)
+          setDetailError(
+            cause instanceof Error
+              ? cause.message
+              : "World details could not be loaded. Please try again.",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, selectedWorldId]);
+
+  const displayedAttempts = attempts.map((attempt) =>
+    uploadingIds.has(attempt.id) && attempt.state !== "complete"
+      ? { ...attempt, state: "running" as const }
+      : attempt,
+  );
+  const attemptWorlds = displayedAttempts
+    .filter(
+      (attempt) =>
+        attempt.state !== "complete" ||
+        !worlds.some((world) => world.id === attempt.id),
+    )
+    .map(worldForAttempt);
+  const savedCollection: PreviewWorld[] = [
+    ...attemptWorlds,
+    ...worlds.filter((world) => !attemptWorlds.some((attempt) => attempt.id === world.id)),
+  ];
   const collection =
     collectionPreview === "empty"
       ? []
@@ -155,6 +225,96 @@ export function App() {
         : collectionPreview === "sample"
           ? sampleWorlds(worlds)
           : savedCollection;
+
+  function openWorld(world: PreviewWorld) {
+    if (
+      !worlds.some((saved) => saved.id === world.id) &&
+      !attempts.some((attempt) => attempt.id === world.id)
+    ) return;
+    setPreview(world);
+    setSelectedWorldId(world.id);
+    setWorldDetail(null);
+    setDetailError("");
+    setOverviewHandoff(false);
+    setView("overview");
+  }
+
+  function openCreateWorld() {
+    setOverviewHandoff(false);
+    setSelectedWorldId(null);
+    setWorldDetail(null);
+    setView("create");
+  }
+
+  function openSettings(from: PageView = view === "settings" ? previousView : view) {
+    setSettingsReturning(false);
+    setPreviousView(from);
+    setManageKeys(false);
+    setView("settings");
+  }
+
+  function returnFromSettings() {
+    setManageKeys(false);
+    setSettingsReturning(true);
+    setView(previousView);
+  }
+
+  async function handleAttemptAction(
+    attemptId: string,
+    action: "pause" | "resume" | "discard",
+  ) {
+    const attempt = attempts.find((item) => item.id === attemptId);
+    if (!attempt || attemptBusyIds.has(attemptId)) return;
+    setAttemptBusyIds((current) => new Set(current).add(attemptId));
+    try {
+      if (action === "discard") {
+        await api(`/creation/${attempt.id}?revision=${attempt.revision}`, {
+          method: "DELETE",
+        });
+        discardedAttemptIds.current.add(attempt.id);
+        setAttempts((previous) => previous.filter((item) => item.id !== attempt.id));
+        setUploadingIds((current) => {
+          const next = new Set(current);
+          next.delete(attempt.id);
+          return next;
+        });
+        if (selectedWorldId === attempt.id) {
+          setSelectedWorldId(null);
+          setWorldDetail(null);
+          setView("worlds");
+        }
+        return;
+      }
+      if (action === "resume" && resumeAttemptRef.current) {
+        const value = await resumeAttemptRef.current(attempt);
+        updateAttempt(value);
+        return;
+      }
+      const value = await api<CreationAttempt>(
+        `/creation/${attempt.id}/${action === "pause" ? "pause" : "start"}`,
+        jsonRequest("POST", {
+          revision: attempt.revision,
+          ...(action === "resume" ? { operation_id: crypto.randomUUID() } : {}),
+        }),
+      );
+      updateAttempt(value);
+    } catch (cause) {
+      setDetailError(
+        cause instanceof Error ? cause.message : "This action could not be completed.",
+      );
+      const saved = await api<CreationAttempt>(`/creation/${attempt.id}`).catch(
+        () => null,
+      );
+      if (saved) updateAttempt(saved);
+    } finally {
+      setAttemptBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(attempt.id);
+        return next;
+      });
+    }
+  }
+
   useEffect(() => {
     const home = homeRef.current;
     if (!home || view !== "worlds" || layout !== "shelf") return;
@@ -181,8 +341,6 @@ export function App() {
       event.preventDefault();
       const now = performance.now();
       const direction = Math.sign(delta);
-      // Accumulate wheel bursts without losing distance during an unfinished glide.
-      // Reversing direction starts from the visible position for immediate response.
       if (now - lastWheelAt > wheelBurstGapMs || direction !== lastDirection)
         target = shelf.scrollLeft;
       target = Math.max(
@@ -220,6 +378,7 @@ export function App() {
     home.addEventListener("wheel", scrollShelf, { passive: false });
     return () => home.removeEventListener("wheel", scrollShelf);
   }, [view, layout]);
+
   function changeCollection(next: CollectionPreview) {
     setCollectionPreview(next);
     setPreview(
@@ -230,60 +389,83 @@ export function App() {
           : (worlds[0] ?? null),
     );
   }
+
+  const selectedWorld =
+    collection.find((world) => world.id === selectedWorldId) ??
+    attemptWorlds.find((world) => world.id === selectedWorldId) ??
+    worlds.find((world) => world.id === selectedWorldId) ??
+    null;
+  const selectedAttempt =
+    displayedAttempts.find((attempt) => attempt.id === selectedWorldId) ?? null;
+  const routeTitle = view === "create" ? "Create World" : selectedWorld?.name;
+
   return (
     <>
       <Background url={artworkUrl(preview)} speed={speed} />
-      <header className="app-header">
+      <header className={`app-header ${view !== "worlds" ? "app-header-subpage" : ""}`}>
         <div className="brand">
           <img src="/assets/logo.png" alt="" />
           <span>VySol</span>
         </div>
-        <nav aria-label="Main navigation">
-          <button
-            className={view === "worlds" ? "active" : ""}
-            aria-current={view === "worlds" ? "page" : undefined}
-            onClick={() => navigate("worlds")}
-          >
-            Worlds
-          </button>
-        </nav>
+        {view !== "settings" && (
+          <nav aria-label="Main navigation" className="route-navigation">
+            <button
+              className={view === "worlds" ? "active" : ""}
+              aria-current={view === "worlds" ? "page" : undefined}
+              onClick={() => setView("worlds")}
+            >
+              Worlds
+            </button>
+            {view !== "worlds" && (
+              <>
+                <ArrowRight size={16} aria-hidden="true" />
+                <button className="active" aria-current="page">
+                  {routeTitle}
+                </button>
+              </>
+            )}
+          </nav>
+        )}
         <div className="header-tools">
-          {!creationOpen && (
-            <WorldSearch
-              key={`${collectionPreview}-${searchEpoch}`}
-              worlds={collection}
-              disabled={view !== "worlds"}
-              onSelect={(world) => {
-                const card = document.getElementById(`world-card-${world.id}`);
-                card?.focus({ preventScroll: true });
-                card?.scrollIntoView({
-                  block: "nearest",
-                  behavior: window.matchMedia?.(
-                    "(prefers-reduced-motion: reduce)",
-                  ).matches
-                    ? "instant"
-                    : "smooth",
-                });
-              }}
-            />
+          {view === "worlds" && (
+            <>
+              <WorldSearch
+                key={`${collectionPreview}-${searchEpoch}`}
+                worlds={collection}
+                disabled={false}
+                onSelect={openWorld}
+              />
+              <button
+                className="icon-button settings-button"
+                aria-label="Settings"
+                onClick={() => openSettings("worlds")}
+              >
+                <GearSix size={25} weight="light" />
+              </button>
+            </>
           )}
-          <button
-            className="icon-button settings-button"
-            aria-label="Settings"
-            aria-pressed={view === "settings"}
-            onClick={() => navigate("settings")}
-          >
-            <GearSix size={25} weight="light" />
-          </button>
+          {(view === "overview" || view === "create") && (
+            <button
+              className="icon-button close-world-button"
+              aria-label={view === "create" ? "Close Create World" : "Back to Worlds"}
+              onClick={() => setView("worlds")}
+            >
+              <X size={24} weight="light" />
+            </button>
+          )}
+          {view === "settings" && (
+            <button
+              className="icon-button close-settings-button"
+              aria-label="Close Settings"
+              title="Close Settings"
+              onClick={returnFromSettings}
+            >
+              <X size={24} weight="light" />
+            </button>
+          )}
         </div>
       </header>
-      <main
-        className={
-          view === "worlds" && (layout === "shelf" || collection.length <= 4)
-            ? "fit-home"
-            : ""
-        }
-      >
+      <main className={`${view === "worlds" && (layout === "shelf" || collection.length <= 4) ? "fit-home" : ""} ${settingsReturning ? "settings-returning" : ""}`}>
         <section
           ref={homeRef}
           className={`view worlds-view ${layout === "shelf" || collection.length <= 4 ? "fitted-worlds" : ""} ${view === "worlds" ? "is-visible" : ""}`}
@@ -299,134 +481,162 @@ export function App() {
             <div className="collection-heading">
               <h2>Your Worlds</h2>
               <button
-                className="icon-button create-world-button"
-                aria-label="Create World"
-                title="Create world"
-                onClick={openCreation}
+                className="create-world-button"
+                aria-label="New World"
+                onClick={openCreateWorld}
               >
-                <Plus size={24} />
+                <Plus size={15} aria-hidden="true" /> <span>New World</span>
               </button>
               <span />
             </div>
           )}
           {loading ? (
-            <div className="empty-state" role="status">
-              Gathering your worlds…
-            </div>
+            <div className="empty-state" role="status">Gathering your worlds…</div>
           ) : error ? (
             <div className="empty-state">
               <p role="alert">{error}</p>
-              <button className="text-action" onClick={load}>
-                Try again
-              </button>
+              <button className="text-action" onClick={load}>Try again</button>
             </div>
           ) : collection.length === 0 ? (
             <div className="welcome-state">
               <h1>Create Your First World</h1>
-              <button className="primary-button" onClick={openCreation}>
-                Create World
-              </button>
+              <button className="primary-button" onClick={openCreateWorld}>Create World</button>
             </div>
           ) : (
             <div
               className={`world-grid ${layout === "shelf" ? "world-shelf" : ""} ${collection.length <= 4 ? "short-collection" : ""}`}
               ref={shelfRef}
             >
-              {collection.map((world) => (
-                <article
-                  tabIndex={0}
-                  key={world.id}
-                  className="world-card"
-                  id={`world-card-${world.id}`}
-                  aria-label={
-                    world.id === pendingWorld?.id
-                      ? `${attemptLabel(displayedAttempt!)} ${world.name}`
-                      : `Preview ${world.name}`
-                  }
-                  onClick={
-                    world.id === pendingWorld?.id ? openCreation : undefined
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      world.id === pendingWorld?.id &&
-                      (event.key === "Enter" || event.key === " ")
-                    ) {
-                      event.preventDefault();
-                      openCreation();
-                    }
-                  }}
-                  onMouseEnter={() => setPreview(world)}
-                  onFocus={() => setPreview(world)}
-                  onTouchStart={() => setPreview(world)}
-                >
-                  <img
-                    src={artworkUrl(world)}
-                    alt=""
-                    onError={(event) => {
-                      if (
-                        !event.currentTarget.src.endsWith(
-                          "/assets/frostwake.png",
-                        )
-                      )
-                        event.currentTarget.src = "/assets/frostwake.png";
+              {collection.map((world) => {
+                const isSamplePreview = collectionPreview === "sample" || collectionPreview === "four";
+                const cardAttempt = displayedAttempts.find((attempt) => attempt.id === world.id) ?? null;
+                const isPending = !!cardAttempt && cardAttempt.state !== "complete";
+                const bookCount = isPending
+                  ? pendingBookCount(cardAttempt!)
+                  : (world.book_count ?? 0);
+                const state = cardAttempt?.state ?? "complete";
+                return (
+                  <article
+                    tabIndex={isSamplePreview ? undefined : 0}
+                    role={isSamplePreview ? undefined : "button"}
+                    key={world.id}
+                    className={`world-card ${isPending ? "is-pending" : ""} ${isSamplePreview ? "is-preview-card" : ""}`}
+                    id={`world-card-${world.id}`}
+                    aria-label={isSamplePreview ? `${world.name}, sample preview` : `${world.name}, ${isPending ? attemptLabel(cardAttempt!) : "Ready"}, ${bookCountLabel(bookCount)}`}
+                    onClick={isSamplePreview ? undefined : () => openWorld(world)}
+                    onKeyDown={isSamplePreview ? undefined : (event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openWorld(world);
+                      }
                     }}
-                  />
-                  <div className="card-shade" />
-                  <h3>{world.name}</h3>
-                  {world.id === pendingWorld?.id && attempt && (
-                    <div className={`card-progress ${attempt.state}`}>
-                      <strong>{attemptLabel(displayedAttempt!)}</strong>
-                      <span>{attemptProgress(attempt)}</span>
-                      <progress
-                        aria-label={`Progress for ${world.name}`}
-                        max={Math.max(
-                          1,
-                          attempt.phase === "embedding"
-                            ? attempt.chunks_total
-                            : attempt.books.length,
+                    onMouseEnter={() => setPreview(world)}
+                    onFocus={() => setPreview(world)}
+                    onTouchStart={() => setPreview(world)}
+                  >
+                    <img
+                      src={artworkUrl(world)}
+                      alt=""
+                      onError={(event) => {
+                        if (!event.currentTarget.src.endsWith("/assets/frostwake.png"))
+                          event.currentTarget.src = "/assets/frostwake.png";
+                      }}
+                    />
+                    <div className="card-shade" />
+                    {isSamplePreview && <span className="world-card-preview-label">Preview</span>}
+                    <div className="world-card-copy">
+                      <h3>{world.name}</h3>
+                      <div className="world-card-meta">
+                        <span className={`card-status status-${state}`}>
+                          <span className="status-dot" aria-hidden="true" />
+                          {isPending ? attemptLabel(cardAttempt!) : "Ready"}
+                        </span>
+                        <span className="card-book-count">{bookCountLabel(bookCount)}</span>
+                        {cardAttempt && cardAttempt.state !== "complete" && (
+                          <progress
+                            className="card-progress-line"
+                            max={Math.max(1, cardAttempt.chunks_total)}
+                            value={cardAttempt.chunks_done}
+                            aria-label={`Creation progress for ${world.name}`}
+                          />
                         )}
-                        value={
-                          attempt.phase === "embedding"
-                            ? attempt.chunks_done
-                            : attempt.books.filter((book) =>
-                                attempt.phase === "uploading"
-                                  ? book.uploaded
-                                  : ["prepared", "embedding", "done"].includes(
-                                      book.state,
-                                    ),
-                              ).length
-                        }
-                      />
+                      </div>
+                      {cardAttempt && (
+                        <span className="sr-only">{attemptProgress(cardAttempt)}</span>
+                      )}
                     </div>
-                  )}
-                </article>
-              ))}
+                  </article>
+                );
+              })}
             </div>
           )}
           <footer>Stories live longer here.</footer>
-          {progressError && (
-            <p role="status" className="progress-connection-error">
-              {progressError}
-            </p>
-          )}
+          {progressError && <p role="status" className="progress-connection-error">{progressError}</p>}
         </section>
+
         <CreateWorld
-          key={draftKey}
-          visible={creationOpen}
-          attempt={attempt}
-          onUploading={setUploading}
+          visible={view === "create"}
+          handoffTransition={overviewHandoff}
           onAttempt={(value) => {
-            setAttempt(value);
+            updateAttempt(value);
             setCollectionPreview("saved");
             setSearchEpoch((epoch) => epoch + 1);
           }}
-          onClose={() => setCreationOpen(false)}
+          onCreated={(value) => {
+            setOverviewHandoff(true);
+            setSelectedWorldId(value.id);
+            setWorldDetail(null);
+            setPreview({
+              id: value.id,
+              name: value.name,
+              created_at: value.created_at,
+              last_used_at: null,
+              artwork: "frostwake",
+              artworkUrl: "/assets/frostwake.png",
+              book_count: value.books.length,
+            });
+            setView("overview");
+          }}
+          onUploading={(attemptId, value) => {
+            setUploadingIds((current) => {
+              const next = new Set(current);
+              if (value) next.add(attemptId);
+              else next.delete(attemptId);
+              return next;
+            });
+          }}
+          onResumeHandler={(resume) => {
+            resumeAttemptRef.current = resume;
+          }}
           onManageKeys={() => {
-            setCreationOpen(false);
+            setPreviousView("create");
             setManageKeys(true);
             setView("settings");
           }}
         />
+
+        {detailError && view === "overview" && (
+          <p role="alert" className="detail-load-error">{detailError}</p>
+        )}
+        <WorldOverview
+          visible={view === "overview"}
+          handoffTransition={overviewHandoff}
+          world={selectedWorld}
+          detail={worldDetail}
+          attempt={selectedAttempt}
+          uploading={selectedAttempt ? uploadingIds.has(selectedAttempt.id) : false}
+          busy={selectedAttempt ? attemptBusyIds.has(selectedAttempt.id) : false}
+          onPause={() => {
+            if (selectedAttempt) void handleAttemptAction(selectedAttempt.id, "pause");
+          }}
+          onResume={() => {
+            if (selectedAttempt) void handleAttemptAction(selectedAttempt.id, "resume");
+          }}
+          onDiscard={() => {
+            if (selectedAttempt) void handleAttemptAction(selectedAttempt.id, "discard");
+          }}
+        />
+
         <SettingsView
           visible={view === "settings"}
           speed={speed}
@@ -438,11 +648,7 @@ export function App() {
           collectionPreview={collectionPreview}
           onCollectionPreview={changeCollection}
           manageKeys={manageKeys}
-          onReturnToCreation={() => {
-            setManageKeys(false);
-            setView("worlds");
-            setCreationOpen(true);
-          }}
+          onClose={returnFromSettings}
         />
       </main>
     </>

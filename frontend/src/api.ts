@@ -4,6 +4,7 @@ export type World = {
   created_at: string;
   last_used_at: string | null;
   artwork: string;
+  book_count?: number;
 };
 export type Speed = "fast" | "normal" | "slow";
 export type WorldLayout = "shelf" | "grid";
@@ -36,12 +37,53 @@ export type CreationAttempt = {
   chunks_total: number;
   chunks_done: number;
 };
-export type ProviderKey = { id: string; name: string; provider: string };
+export type WorldBook = {
+  id: string;
+  filename: string;
+  position: number;
+  state: string;
+  chunks_done: number | null;
+  chunks_total: number | null;
+};
+export type WorldProgress = {
+  chunks_done: number;
+  chunks_total: number;
+  books_done: number;
+  books_total: number;
+};
+export type WorldProcessing = {
+  model: string | null;
+  max_chunk_size: number | null;
+  boundary_search_distance: number | null;
+};
+export type WorldDetail = World & {
+  sources_locked: boolean;
+  state: "complete" | "running" | "pausing" | "paused" | "failed";
+  books: WorldBook[];
+  progress: WorldProgress;
+  processing: WorldProcessing | null;
+};
+export type ProviderKey = {
+  id: string;
+  name: string;
+  provider: string;
+  connection_id?: string;
+};
+export type ProviderConnection = {
+  id: string;
+  provider: string;
+  enabled: boolean;
+};
 export type Providers = {
   keys: ProviderKey[];
+  connections?: ProviderConnection[];
   models: { id: string; name: string; provider: string }[];
   defaults: { model: string; key_id: string };
 };
+
+export function bookCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "Book" : "Books"}`;
+}
 
 export function attemptLabel(attempt: CreationAttempt): string {
   if (attempt.state === "complete") return "Ready";

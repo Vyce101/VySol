@@ -248,7 +248,7 @@ main {
 .collection-heading h2 {
   font-size: 28px;
 }
-.collection-heading span {
+.collection-heading > span {
   height: 1px;
   width: 140px;
   background: linear-gradient(90deg, #e1e5ed70, transparent);
@@ -1394,8 +1394,8 @@ progress::-webkit-progress-value {
   margin-bottom: 25px;
 }
 .collection-heading .create-world-button {
-  padding: 4px;
-  color: var(--gold);
+  padding: 7px 8px;
+  color: #f3dbaf;
   flex-shrink: 0;
 }
 .collection-heading > span {

@@ -19,7 +19,6 @@ export function SettingsView({
   collectionPreview,
   onCollectionPreview,
   manageKeys,
-  onReturnToCreation,
 }: {
   visible: boolean;
   speed: Speed;
@@ -29,7 +28,6 @@ export function SettingsView({
   onCollectionPreview: (preview: CollectionPreview) => void;
   manageKeys?: boolean;
   onClose?: () => void;
-  onReturnToCreation?: () => void;
 }) {
   const [section, setSection] = useState<SettingsSection>("general");
   const [saving, setSaving] = useState(false);
@@ -59,11 +57,6 @@ export function SettingsView({
     >
       <header className="settings-page-header">
         <h1>Settings</h1>
-        {manageKeys && onReturnToCreation && (
-          <button className="text-action return-to-creation" onClick={onReturnToCreation}>
-            ← Return to creation
-          </button>
-        )}
       </header>
 
       <div className="settings-layout">

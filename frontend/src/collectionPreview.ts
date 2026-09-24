@@ -25,6 +25,7 @@ export function sampleWorlds(worlds: World[]): PreviewWorld[] {
     created_at: "",
     last_used_at: null,
     artwork: "frostwake",
+    book_count: (index % 3) + 1,
     artworkUrl: worlds.length
       ? `/api/worlds/${worlds[index % worlds.length].id}/artwork`
       : "/assets/frostwake.png",
