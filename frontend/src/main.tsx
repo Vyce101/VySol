@@ -7,6 +7,7 @@ import "@fontsource/eb-garamond/400-italic.css";
 import { App } from "./App";
 import "./styles.css";
 import "./settings-redesign.css";
+import "./worlds-redesign.css";
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

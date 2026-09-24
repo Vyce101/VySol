@@ -1,0 +1,217 @@
+/* World browsing, creation, and overview page layout and motion. */
+.view {
+  --page-duration: 240ms;
+  transition:
+    opacity var(--page-duration) cubic-bezier(0.2, 0, 0.38, 0.9),
+    visibility var(--page-duration);
+}
+.create-world-view {
+  --page-duration: 240ms;
+}
+.world-overview-view {
+  --page-duration: 240ms;
+}
+.create-world-view.is-handoff,
+.world-overview-view.is-handoff {
+  --page-duration: 270ms;
+}
+main.settings-returning > .view {
+  --page-duration: 190ms;
+}
+.worlds-view {
+  padding-inline: clamp(22px, 3.1vw, 54px);
+}
+.hero-title {
+  height: clamp(200px, 42svh, 410px);
+  padding-bottom: clamp(18px, 3svh, 30px);
+}
+.hero-title h1 {
+  font-size: clamp(32px, min(3.2vw, 5.6svh), 50px);
+}
+.collection-heading {
+  gap: 17px;
+  margin-bottom: clamp(12px, 2svh, 20px);
+}
+.collection-heading h2 {
+  font-size: clamp(25px, 3.2svh, 31px);
+}
+.create-world-button,
+.outline-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 38px;
+  padding: 7px 8px;
+  border: 1px solid #e0b76b99;
+  border-radius: 5px;
+  background: linear-gradient(120deg, #96744042, #4f402c38);
+  color: #f3dbaf;
+  font-size: 16px;
+  white-space: nowrap;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+.create-world-button:hover:not(:disabled),
+.outline-action:hover:not(:disabled) {
+  background-color: #59452c;
+  border-color: #e0b76bcc;
+  color: #f3dbaf;
+  box-shadow: 0 0 8px #e0b76b40;
+}
+.create-world-button:focus-visible,
+.outline-action:focus-visible {
+  outline: 2px solid #eece95a8;
+  outline-offset: 2px;
+}
+.world-grid {
+  gap: clamp(12px, 1.6vw, 20px);
+}
+.world-card {
+  height: clamp(184px, 24svh, 248px);
+  border-radius: 7px;
+  cursor: pointer;
+  isolation: isolate;
+}
+.world-card > img {
+  opacity: 0.76;
+}
+.world-card:hover > img,
+.world-card:focus-visible > img {
+  transform: scale(1.025);
+}
+.world-card.is-preview-card {
+  cursor: default;
+}
+.world-card.is-preview-card:hover,
+.world-card.is-preview-card:focus-visible {
+  transform: none;
+  box-shadow: none;
+}
+.world-card.is-preview-card:hover > img,
+.world-card.is-preview-card:focus-visible > img {
+  transform: none;
+}
+.world-card-preview-label {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 13px;
+  padding: 3px 8px;
+  border: 1px solid #dce5f24a;
+  border-radius: 999px;
+  background: #0b1525b8;
+  color: #d3d9e2;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+.world-card-copy {
+  position: absolute;
+  z-index: 1;
+  left: clamp(14px, 1.5vw, 22px);
+  right: clamp(14px, 1.5vw, 22px);
+  bottom: 14px;
+  display: grid;
+  gap: 3px;
+  text-shadow: 0 1px 8px #000;
+}
+.world-card h3 {
+  position: static;
+  font-size: clamp(23px, min(2.1vw, 3.4svh), 31px);
+  line-height: 1.08;
+}
+.world-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  color: #d4d9df;
+  font-size: 15px;
+}
+.card-book-count {
+  margin-left: 4px;
+}
+.card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #42c68a;
+  box-shadow: 0 0 7px #42c68a58;
+}
+.status-running .status-dot,
+.status-pausing .status-dot {
+  background: #259ef0;
+  box-shadow: 0 0 7px #259ef058;
+}
+.status-failed .status-dot {
+  background: #e77470;
+  box-shadow: 0 0 7px #e7747058;
+}
+.status-paused .status-dot {
+  background: #e1b968;
+  box-shadow: 0 0 7px #e1b96858;
+}
+.status-failed,
+.book-state-label-failed {
+  color: #ff9b91;
+}
+.card-progress-line {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  height: 8px;
+  margin: 0 0 0 2px;
+  align-self: center;
+  display: block;
+  transform: translateY(2px);
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  accent-color: #259ef0;
+  background: #ffffff24;
+}
+.card-progress-line::-webkit-progress-bar {
+  background: #ffffff24;
+  border-radius: 999px;
+}
+.card-progress-line::-webkit-progress-value {
+  background: #259ef0;
+  border-radius: 999px;
+}
+.card-progress-line::-moz-progress-bar {
+  background: #259ef0;
+  border-radius: 999px;
+}
+.worlds-view footer {
+  padding: clamp(12px, 2svh, 21px) 0 24px;
+  font-size: 18px;
+}
+.close-world-button {
+  color: #f1efec;
+  padding: 6px;
+}
+.route-navigation {
+  gap: 14px;
+}
+.route-navigation > svg {
+  color: #b6bdc7;
+}
+.route-navigation button.active:after {
+  background: var(--gold);
+  height: 2px;
+}
+.app-header-subpage .header-tools {
+  min-width: 38px;
+}
+
