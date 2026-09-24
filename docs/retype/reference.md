@@ -40,12 +40,12 @@ This compares filenames, not book contents. Importing the same book into another
 
 ## Creation processing settings
 
-These fields appear in the **Processing** step of Create World.
+These fields appear under **Processing** on Create World. Chunk settings are inside **Advanced Settings**.
 
 | Field | Supported values | Default | Meaning |
 | --- | --- | --- | --- |
-| Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for later retrieval. Retrieval is not available yet. |
-| API key | A saved Google AI Studio / Gemini API key | Last submitted key, if still available | The named credential used for embedding requests. A valid selection is required before submission. |
+| Embedding Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for later retrieval. Retrieval is not available yet. |
+| Credential | A saved Google AI Studio API key | Last submitted credential, if still available | A valid selection is required before submission. |
 | Maximum chunk size (chars) | Whole number from 1 to 1,000,000 | 8,000 | Maximum characters in each text chunk before any further splitting required by the model. |
 | Boundary search distance (chars) | Whole number from 0 to one less than Maximum chunk size | 1,000 | How far backward from the size limit VySol searches for a suitable break. Zero disables this search. |
 
@@ -69,24 +69,24 @@ Worlds, book copies, settings, custom artwork, logs, and creation staging files 
 
 World names must be nonblank and at most 200 characters. Separate worlds can share the same display name.
 
-A pending world card shows creation progress and opens its unfinished attempt. Accepted cards currently preview artwork without opening a reader or detail page.
+A world card shows its book count and Ready, Creating, Paused, or Attention status. Opening a card shows its Overview: ordered Stories and saved World Details. A creating world's Overview also shows per-book chunk progress and Pause, Resume, or Discard World actions as appropriate. Several worlds can be created and processed at once.
 
 Hovering, keyboard-focusing, or touching a card previews its title and background. Leaving it retains that preview. Search matches world names without case sensitivity and lists suggestions without rearranging the cards. Hovering or using arrow keys in search does not change the preview; selecting a result focuses and scrolls to its card.
 
-The startup preview uses the most recently used world when usage information exists, otherwise the most recently created. Card previews do not record usage, and the current interface does not yet provide a world-opening action that updates usage history.
+The startup preview uses the most recently used world when usage information exists, otherwise the most recently created. Card previews do not record usage, and opening an Overview does not yet update usage history.
 
 Frostwake is the default artwork for new worlds and the empty homepage. Artwork selection, world editing, book reading, chronicles, and AI roleplay are not available in this interface yet.
 
 ## Settings
 
-The gear opens **Settings**. Use **Worlds** to leave it, or **Return to creation** when you arrived from the creation modal.
+The gear opens **Settings**. Use its X to return to the page you came from, including an unfinished Create World draft.
 
 | Section / setting | Choices | Initial value | Persistence |
 | --- | --- | --- | --- |
-| Providers / API keys | Add, rename, replace, or delete named Google keys | No keys | Labels in SQLite; plain-text secrets in the ignored credentials folder |
-| Appearance / World display | Horizontal shelf; Grid | Horizontal shelf | Saved automatically |
-| Developer / Background transition speed | Fast — 150 ms; Normal — 300 ms; Slow — 600 ms | Normal — 300 ms | Saved automatically |
-| Developer / Homepage preview | Your saved worlds; 4 sample worlds; 12 sample worlds; Empty homepage | Your saved worlds | Resets on reload |
+| AI Connections | Enable or disable Google under Select Connections; add, rename, reveal, replace, or remove numbered credentials | No connection | Names and sequence numbers in SQLite; plain-text secrets in the ignored credentials folder |
+| General / World Display | Shelf; Grid | Shelf | Saved automatically |
+| General / Background Transition Speed | Fast — 150 ms; Normal — 300 ms; Slow — 600 ms | Normal — 300 ms | Saved automatically; controls artwork changes |
+| Developer / Homepage Preview | Your Saved Worlds; 4 Sample Worlds; 12 Sample Worlds; Empty Homepage | Your Saved Worlds | Resets on reload |
 
 **Horizontal shelf** keeps cards in one row. Use the mouse wheel over the homepage, horizontal touch scrolling, or keyboard focus to reach more cards. **Grid** wraps cards into rows and allows vertical page scrolling for larger collections. Shelf mode and grids with up to four worlds adapt to ordinary viewport sizes without vertical page scrolling; extremely short windows keep controls readable instead of shrinking them indefinitely.
 

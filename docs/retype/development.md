@@ -28,11 +28,11 @@ The frontend is served from `frontend/dist/client/`. Rebuild after frontend chan
 
 | Area | Responsibility |
 | --- | --- |
-| `frontend/src/CreateWorld.tsx` | Unsubmitted setup, ordered selections, modal steps, uploads, and progress. |
-| `frontend/src/ProvidersView.tsx` | Named credential metadata and write-only secret entry. |
+| `frontend/src/CreateWorld.tsx` | Unsubmitted page, ordered selections, uploads, and progress. |
+| `frontend/src/ProvidersView.tsx` | Provider selection, numbered credentials, and explicit secret reveal and replacement. |
 | `src/vysol/server.py` | Loopback HTTP boundary, lifecycle, static frontend, and artwork. |
 | `src/vysol/creation_api.py` | Validated attempt, upload, and credential contracts. |
-| `src/vysol/creation.py` | Single worker, submission locking, recovery, and whole-world publication. |
+| `src/vysol/creation.py` | Independent per-world workers, recovery, and whole-world publication. |
 | `src/vysol/creation_store.py` | SQLite checkpoints, operation IDs, ordered chunks, and vectors. |
 | `src/vysol/embeddings.py` | Gemini requests, input formatting, vector validation, and bounded retries. |
 | `src/vysol/credentials.py` | Injectable credential adapter and atomic local key files. |
@@ -40,7 +40,7 @@ The frontend is served from `frontend/dist/client/`. Rebuild after frontend chan
 | `src/vysol/worlds.py` | World metadata, listing, accepted book order, and settings. |
 | `launcher/` | Windows preparation, readiness checks, and subprocess ownership. |
 
-The browser submits a manifest, uploads all missing files, then starts processing. The submitted manifest cannot subsequently be edited. Bounded uploads and synchronous storage run outside the event loop. A backend thread processes independently of the browser; a lifetime file lock prevents a second worker service on the same runtime directory. An in-process guard serializes starts, key changes, and publication.
+The browser submits a manifest, uploads all missing files, then starts processing. The submitted manifest cannot subsequently be edited. Bounded uploads and synchronous storage run outside the event loop. Each attempt has its own backend worker and stop signal, so several worlds can process independently. A lifetime file lock prevents a second worker service on the same runtime directory. An in-process guard protects starts, key changes, and publication.
 
 Every book must upload, validate, convert, and chunk before embedding begins. Preparation failures are recorded per book and prevent all embedding requests. TXT decoding and EPUB extraction reuse the existing converters. Scene extraction and graph processing are not implemented.
 
@@ -57,7 +57,7 @@ data/
   processing.sqlite3               # Attempts, chunks, vectors, labels, preferences, operation IDs
   credentials/
     .gitignore                     # Ignores all contents, including temporary writes
-    <credential UUID>.key          # Plain-text secret; never returned by the API
+    <credential UUID>.key          # Plain-text secret; returned only by explicit reveal
   creations/<attempt UUID>/
     books/<book UUID>/source        # Original uploaded bytes
     books/<book UUID>/text          # UTF-8 working text
@@ -78,9 +78,9 @@ data/
 
 The attempt UUID becomes the world ID. Stable book IDs survive reordering. Chunk IDs derive from the book, source span, text digest, and processing profile. SQLite stores explicit positions, offsets, source text digests, model, dimensions, and processing versions. These are source locations, not fictional chronology.
 
-Before submission, setup values and File objects exist only in the mounted creation component. Close, the X button, and Escape clear the name, files, step, validation errors, and selected processing settings. Reopening loads the last submitted model/key defaults and the standard chunk settings. **Manage API keys** temporarily hides the modal without clearing that state so **Return to creation** can restore the same step and selections. A page reload loses unsubmitted setup.
+Before submission, setup values and File objects exist only in the mounted creation component. Navigating to **AI Connections** keeps that component mounted so the Settings X can return to the draft. A page reload loses unsubmitted file selections. Successful submission clears the draft; the next Create World page starts fresh with the last submitted model/key defaults and standard chunk settings.
 
-Submission begins durable recovery by saving the manifest before uploading books. Closing the modal while submission is in flight does not reset its state or interrupt the uploads. Once an attempt exists, closing preserves it; deletion requires the separate confirmed discard action.
+Submission begins durable recovery by saving the manifest before uploading books. Leaving the page while submission is in flight does not interrupt the uploads. Once an attempt exists, leaving preserves it; deletion requires the separate confirmed discard action.
 
 Mutation commands carry a stable operation UUID and an expected revision. Replaying the same command returns saved state; reuse with different input or a stale revision is rejected. The browser retries an uncertain upload with the same operation ID. Incomplete uploads can retry while the browser retains their File objects; after reload, unavailable files require discarding and starting again.
 
@@ -88,26 +88,31 @@ Successful vectors checkpoint individually. Startup reconciles an interrupted di
 
 Publication verifies text coverage and file digests, then atomically renames a complete prepared world directory into `worlds/`. The final SQLite checkpoint may be recovered from that directory. `sources_locked` prevents the shared importer from appending to accepted worlds. Old worlds retain their existing files and are not migrated or embedded. Discard stops the worker before deleting only the attempt's owned directory and cascading its SQLite records.
 
-Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite and API responses contain identifiers and labels only. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault` and `embedder` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
+Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite stores provider groups and credential sequence numbers; a new credential takes the lowest available number. Ordinary API responses contain identifiers and labels, not secrets. Explicit local key reveal is uncached and must not be logged. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault` and `embedder` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
 
 ## Local API contract
 
-Paths below are relative to the server. Responses contain public IDs, sanitized errors, per-book states, and aggregate progress; they never contain saved secrets.
+Paths below are relative to the server. Ordinary responses contain public IDs, sanitized errors, per-book states, and aggregate progress. The explicit credential reveal route returns a saved secret to the local client.
 
 | Method and path | Contract |
 | --- | --- |
 | `GET /api/health` | `status: ready`, `app: vysol`. |
-| `GET /api/worlds` | Accepted worlds only, ordered by last use or creation. |
+| `GET /api/worlds` | Accepted worlds with book counts, ordered by last use or creation. |
+| `GET /api/worlds/{id}` | Accepted or unfinished world details: ordered books, source lock, state, progress, and nullable processing settings. |
 | `GET /api/worlds/{id}/books` | Book metadata, ordered by explicit positions where available. |
-| `GET /api/creation` | Current unfinished attempt or null. |
+| `GET /api/creation` | Most recently updated unfinished attempt or null, retained for compatibility. |
+| `GET /api/creations` | All unfinished attempts. |
 | `GET /api/creation/{id}` | Specific attempt, including completed state for reconciliation. |
 | `PUT /api/creation/{id}` | Manifest: operation ID, revision, name, key ID, config `{model,size,search}`, ordered books `{id,filename,size}`. |
 | `PUT /api/creation/{id}/books/{book_id}` | Raw bytes, percent-encoded `X-Filename`, query `revision` and `operation_id`. |
 | `POST /api/creation/{id}/start` | Start/resume with revision and operation ID. |
 | `POST /api/creation/{id}/pause` | Pause with revision. |
 | `DELETE /api/creation/{id}` | Discard with revision query; accepted worlds reject this action. |
-| `GET /api/providers` | Credential metadata, supported models, and last submitted model/key defaults. |
-| `PUT /api/providers/keys/{id}` | Name, provider `google`, and optional write-only secret; a new key requires a secret. |
+| `GET /api/providers` | Provider groups and numbered credential metadata, supported models, and last submitted model/key defaults. |
+| `POST /api/providers/connections` | Idempotently add the Google provider group. |
+| `PUT /api/providers/connections/{id}` | Enable or disable a provider group while preserving credentials. |
+| `PUT /api/providers/keys/{id}` | Name, provider `google`, optional connection ID, and optional write-only secret; a new key requires a secret. The response includes a stable sequence number. |
+| `GET /api/providers/keys/{id}/secret` | Explicit uncached local reveal of a saved key. |
 | `DELETE /api/providers/keys/{id}` | Delete secret and metadata unless used by running work. |
 | `GET`, `PUT /api/settings` | Existing background speed and shelf/grid settings. |
 | `GET /api/worlds/{id}/artwork` | Registered artwork or bundled Frostwake. |
