@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MagnifyingGlass } from "@phosphor-icons/react";
 import type { PreviewWorld } from "./collectionPreview";
 
@@ -13,14 +13,41 @@ export function WorldSearch({
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [active, setActive] = useState(-1);
   const input = useRef<HTMLInputElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const matches = worlds.filter((world) =>
     world.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
+  useEffect(
+    () => () => {
+      if (closeTimer.current) clearTimeout(closeTimer.current);
+    },
+    [],
+  );
   const expanded = open && !disabled && !!query.trim();
-  function select(world: PreviewWorld) {
+  const mounted = (open || closing) && !disabled && !!query.trim();
+  function showDropdown() {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+    setClosing(false);
+    setOpen(true);
+  }
+  function hideDropdown() {
     setOpen(false);
+    setActive(-1);
+    if (!mounted) return;
+    setClosing(true);
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    closeTimer.current = setTimeout(() => {
+      setClosing(false);
+      closeTimer.current = null;
+    }, reduced ? 0 : 105);
+  }
+  function select(world: PreviewWorld) {
+    hideDropdown();
     setQuery("");
     setActive(-1);
     onSelect(world);
@@ -29,7 +56,7 @@ export function WorldSearch({
     <div
       className="search-area"
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+        if (!event.currentTarget.contains(event.relatedTarget)) hideDropdown();
       }}
     >
       <label className={`search ${disabled ? "disabled" : ""}`}>
@@ -49,16 +76,15 @@ export function WorldSearch({
           }
           value={query}
           disabled={disabled}
-          onFocus={() => setOpen(true)}
+          onFocus={showDropdown}
           onChange={(event) => {
             setQuery(event.target.value);
             setActive(-1);
-            setOpen(true);
+            showDropdown();
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
-              setOpen(false);
-              setActive(-1);
+              hideDropdown();
               return;
             }
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -82,8 +108,13 @@ export function WorldSearch({
           }}
         />
       </label>
-      {expanded && (
-        <div className="search-dropdown">
+      {mounted && (
+        <div
+          className="search-dropdown"
+          data-open={open ? "true" : "false"}
+          aria-hidden={!open}
+          inert={!open}
+        >
           <div
             id="world-search-results"
             role="listbox"
