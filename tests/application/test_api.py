@@ -57,6 +57,31 @@ def test_startup_prefers_last_used_world_over_newer_unused_world(client, tmp_pat
     assert client.get('/api/worlds').json()[0]['id'] == used['id']
 
 
+def test_world_list_and_detail_include_book_counts_and_legacy_processing_fallback(client):
+    value = new_world(client, 'Legacy world')
+
+    listed = client.get('/api/worlds').json()
+    assert listed[0]['book_count'] == 0
+
+    detail = client.get(f"/api/worlds/{value['id']}")
+    assert detail.status_code == 200
+    assert detail.json() == {
+        'id': value['id'],
+        'name': 'Legacy world',
+        'created_at': detail.json()['created_at'],
+        'last_used_at': None,
+        'artwork': 'frostwake',
+        'sources_locked': False,
+        'state': 'complete',
+        'book_count': 0,
+        'books': [],
+        'progress': {'chunks_done': None, 'chunks_total': None, 'books_done': 0, 'books_total': 0},
+        'processing': {'model': None, 'max_chunk_size': None, 'boundary_search_distance': None},
+    }
+
+    assert client.get(f'/api/worlds/{uuid4()}').status_code == 404
+
+
 def test_layout_defaults_persistence_and_legacy_settings(client, tmp_path):
     from vysol.worlds import atomic_json
     assert client.get('/api/settings').json() == {'background_speed': 'normal', 'world_layout': 'shelf'}

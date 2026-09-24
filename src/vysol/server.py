@@ -102,6 +102,69 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
     def worlds():
         return store.list_worlds()
 
+    @app.get("/api/worlds/{world_id}")
+    def world_detail(world_id: UUID):
+        identity = str(world_id)
+        try:
+            world = store.get(identity)
+        except FileNotFoundError:
+            world = None
+        attempt = creation.store.get(identity)
+        if world is None and attempt is None:
+            raise HTTPException(404, "World not found.")
+
+        attempt_public = creation.store.public(attempt) if attempt else None
+        attempt_books = {book["id"]: book for book in (attempt_public or {}).get("books", [])}
+        if world is not None:
+            books = []
+            for book in store.books(identity):
+                creation_book = attempt_books.get(book["id"])
+                books.append({
+                    "id": book["id"],
+                    "filename": book["filename"],
+                    "position": book["position"],
+                    "state": creation_book["state"] if creation_book else "done",
+                    "chunks_done": creation_book["chunks_done"] if creation_book else None,
+                    "chunks_total": creation_book["chunks_total"] if creation_book else None,
+                })
+        else:
+            books = [{
+                "id": book["id"],
+                "filename": book["filename"],
+                "position": book.get("position"),
+                "state": book.get("state", "waiting"),
+                "chunks_done": book.get("chunks_done", 0),
+                "chunks_total": book.get("chunks_total", 0),
+            } for book in attempt_public["books"]]
+
+        config = (world or {}).get("processing") or (attempt or {}).get("config") or {}
+        completed_books = sum(book["state"] == "done" for book in books)
+        chunks_done = attempt_public.get("chunks_done") if attempt_public else None
+        chunks_total = attempt_public.get("chunks_total") if attempt_public else None
+        state = attempt["state"] if attempt else "complete"
+        return {
+            "id": identity,
+            "name": (world or attempt)["name"],
+            "created_at": (world or attempt).get("created_at"),
+            "last_used_at": (world or {}).get("last_used_at"),
+            "artwork": (world or {}).get("artwork", "frostwake"),
+            "sources_locked": bool((world or {}).get("sources_locked", attempt is not None)),
+            "state": state,
+            "book_count": len(books),
+            "books": books,
+            "progress": {
+                "chunks_done": chunks_done,
+                "chunks_total": chunks_total,
+                "books_done": attempt_public.get("books_done", completed_books) if attempt_public else completed_books,
+                "books_total": len(books),
+            },
+            "processing": {
+                "model": config.get("model"),
+                "max_chunk_size": config.get("size"),
+                "boundary_search_distance": config.get("search"),
+            },
+        }
+
     @app.post("/api/worlds")
     @app.put("/api/worlds/{world_id}/imports/{operation_id}")
     def retired_creation():

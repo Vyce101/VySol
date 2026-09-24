@@ -41,7 +41,9 @@ class WorldStore:
         for path in (self.root / "worlds").glob("*/world.json"):
             if not path.resolve().is_relative_to(self.root):
                 raise OSError("Invalid world storage")
-            worlds.append(json.loads(path.read_text(encoding="utf-8")))
+            world = json.loads(path.read_text(encoding="utf-8"))
+            world["book_count"] = len(self.books(world["id"]))
+            worlds.append(world)
         return sorted(worlds, key=lambda w: (bool(w.get("last_used_at")), w.get("last_used_at") or w["created_at"], w["id"]), reverse=True)
 
     def create(self, world_id: str, name: str) -> dict:
@@ -64,7 +66,10 @@ class WorldStore:
             record = json.loads(path.read_text(encoding="utf-8"))
             records.append({"id": record["book_id"], "filename": record["original_filename"],
                             "comparison_name": record["comparison_name"], "position": record.get("position")})
-        return sorted(records, key=lambda book: book["position"]) if all(b["position"] is not None for b in records) else records
+        return sorted(records, key=lambda book: (
+            book["position"] is None,
+            book["position"] if book["position"] is not None else book["comparison_name"].casefold(),
+        ))
 
     def original_digest(self, world_id: str, book: dict) -> str:
         key = hashlib.sha256(book["comparison_name"].encode()).hexdigest()
