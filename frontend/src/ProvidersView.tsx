@@ -1,5 +1,5 @@
-import { CaretDown, Plus } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { CaretDown, Eye, EyeSlash, Plus } from "@phosphor-icons/react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, jsonRequest } from "./api";
 
 type Credential = {
@@ -456,12 +456,80 @@ function CredentialDisclosure({
   const isNew = !credential.name;
   const [name, setName] = useState(credential.name);
   const [secret, setSecret] = useState("");
+  const [storedSecret, setStoredSecret] = useState<string | null>(null);
+  const [secretVisible, setSecretVisible] = useState(false);
+  const [loadingSecret, setLoadingSecret] = useState(false);
+  const [secretError, setSecretError] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const revealRequestGeneration = useRef(0);
+
+  useLayoutEffect(() => {
+    revealRequestGeneration.current += 1;
+  }, [expanded, credential.id, credential.name]);
+
+  useLayoutEffect(
+    () => () => {
+      revealRequestGeneration.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => {
     setName(credential.name);
     setSecret("");
+    setStoredSecret(null);
+    setSecretVisible(false);
+    setLoadingSecret(false);
   }, [credential.id, credential.name]);
+
+  useEffect(() => {
+    if (expanded) return;
+    setSecretVisible(false);
+    setLoadingSecret(false);
+    setSecretError("");
+    if (storedSecret !== null && secret === storedSecret) {
+      setSecret("");
+      setStoredSecret(null);
+    }
+  }, [expanded, secret, storedSecret]);
+
+  async function toggleSecretVisibility() {
+    setSecretError("");
+    if (secretVisible) {
+      setSecretVisible(false);
+      if (storedSecret !== null && secret === storedSecret) {
+        setSecret("");
+        setStoredSecret(null);
+      }
+      return;
+    }
+
+    if (secret || isNew) {
+      setSecretVisible(true);
+      return;
+    }
+
+    const generation = revealRequestGeneration.current + 1;
+    revealRequestGeneration.current = generation;
+    setLoadingSecret(true);
+    try {
+      const response = await api<{ secret: string }>(
+        `/providers/keys/${credential.id}/secret`,
+      );
+      if (generation !== revealRequestGeneration.current) return;
+      setSecret(response.secret);
+      setStoredSecret(response.secret);
+      setSecretVisible(true);
+    } catch {
+      if (generation === revealRequestGeneration.current) {
+        setSecretError("Could not reveal this API key. Try again.");
+      }
+    } finally {
+      if (generation === revealRequestGeneration.current) {
+        setLoadingSecret(false);
+      }
+    }
+  }
 
   return (
     <section className="credential-card">
@@ -494,6 +562,8 @@ function CredentialDisclosure({
               void onSave(name, secret).then((saved) => {
                 if (saved) {
                   setSecret("");
+                  setStoredSecret(null);
+                  setSecretVisible(false);
                 }
               });
             }}
@@ -514,15 +584,33 @@ function CredentialDisclosure({
               <div className="credential-secret-control">
                 <input
                   id={`credential-secret-${credential.id}`}
-                  type="password"
+                  type={secretVisible ? "text" : "password"}
                   autoComplete="new-password"
                   value={secret}
                   maxLength={1280}
                   required={isNew}
                   placeholder={isNew ? "Enter API key" : "••••••••••••••••••••"}
-                  onChange={(event) => setSecret(event.target.value)}
+                  onChange={(event) => {
+                    setSecret(event.target.value);
+                    setSecretError("");
+                  }}
                 />
+                <button
+                  className="secret-visibility"
+                  type="button"
+                  aria-label={secretVisible ? "Hide API Key" : "Show API Key"}
+                  disabled={busy || loadingSecret}
+                  onClick={() => void toggleSecretVisibility()}
+                >
+                  {secretVisible ? (
+                    <EyeSlash size={18} aria-hidden="true" />
+                  ) : (
+                    <Eye size={18} aria-hidden="true" />
+                  )}
+                </button>
               </div>
+              {loadingSecret && <span className="secret-loading">Loading API key…</span>}
+              {secretError && <span className="secret-error" role="alert">{secretError}</span>}
             </div>
             {confirmRemove ? (
               <div className="credential-confirmation" role="alertdialog" aria-label="Remove credential">
