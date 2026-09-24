@@ -96,6 +96,8 @@ class Creation:
                 raise CreationConflict("Finish or discard the current attempt before starting another.")
             if manifest["revision"] != 0:
                 raise CreationConflict("This creation attempt no longer exists.")
+            if not self.store.enabled_key(manifest["key_id"], db=db):
+                raise CreationConflict("Choose a saved API key from an enabled connection before creating a world.")
             value = {"id": attempt_id, "created_at": now(), "revision": 0, "state": "paused", "books": []}
             self.store.put(db, value)
             self.store.command(db, attempt_id, command_id, payload)

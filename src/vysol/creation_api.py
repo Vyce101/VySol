@@ -5,6 +5,7 @@ from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -65,6 +66,7 @@ class Start(Revision):
 class ProviderKey(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     provider: Literal["google"] = "google"
+    connection_id: UUID | None = None
     secret: SecretStr | None = None
 
     @field_validator("name")
@@ -75,12 +77,24 @@ class ProviderKey(BaseModel):
         return value.strip()
 
 
+class ProviderConnection(BaseModel):
+    provider: Literal["google"]
+
+
+class ProviderConnectionState(BaseModel):
+    enabled: bool
+
+
 def creation_routes(creation: Creation):
     router = APIRouter(prefix="/api")
 
     @router.get("/creation")
     def current():
         return creation.store.public(creation.store.get())
+
+    @router.get("/creations")
+    def all_current():
+        return [creation.store.public(value) for value in creation.store.pending()]
 
     @router.get("/creation/{attempt_id}")
     def status(attempt_id: UUID):
@@ -125,11 +139,36 @@ def creation_routes(creation: Creation):
 
     @router.get("/providers")
     def providers():
-        return {"keys": creation.store.keys(), "models": MODELS, "defaults": creation.store.defaults()}
+        return {"keys": creation.store.keys(), "connections": creation.store.connections(),
+                "models": MODELS, "defaults": creation.store.defaults()}
+
+    @router.post("/providers/connections")
+    def add_provider_connection(value: ProviderConnection):
+        return creation.store.add_connection(value.provider)
+
+    @router.put("/providers/connections/{connection_id}")
+    def update_provider_connection(connection_id: UUID, value: ProviderConnectionState):
+        try:
+            return creation.store.update_connection(str(connection_id), value.enabled)
+        except KeyError:
+            raise HTTPException(404, "AI connection not found.") from None
+
+    @router.get("/providers/keys/{key_id}/secret")
+    def reveal_key(key_id: UUID):
+        key = str(key_id)
+        if not any(item["id"] == key for item in creation.store.keys()):
+            raise HTTPException(404, "API key not found.")
+        secret = creation.vault.read(key)
+        if not secret:
+            raise HTTPException(404, "Saved API key secret not found.")
+        return JSONResponse({"secret": secret}, headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        })
 
     def ensure_key_mutable(key_id):
-        value = creation.store.get()
-        if value and value["state"] in BUSY and value["key_id"] == key_id:
+        if any(value["state"] in BUSY and value["key_id"] == key_id
+               for value in creation.store.pending()):
             raise CreationConflict("Pause world creation before changing its API key.")
 
     @router.put("/providers/keys/{key_id}")
@@ -138,6 +177,12 @@ def creation_routes(creation: Creation):
         with creation.guard:
             ensure_key_mutable(key)
             prior = next((item for item in creation.store.keys() if item["id"] == key), None)
+            connection_id = str(value.connection_id) if value.connection_id else None
+            if connection_id and not any(
+                connection["id"] == connection_id and connection["provider"] == value.provider
+                for connection in creation.store.connections()
+            ):
+                raise HTTPException(422, "The selected provider connection does not match this credential.")
             if value.secret is not None:
                 secret = value.secret.get_secret_value().strip()
                 if not secret or len(secret.encode("utf-16-le")) > 2560:
@@ -146,10 +191,15 @@ def creation_routes(creation: Creation):
             elif not prior:
                 raise HTTPException(422, "Enter an API key.")
             with creation.store.connect() as db:
-                db.execute("INSERT INTO provider_keys VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider",
-                           (key, value.name, value.provider))
+                try:
+                    result = creation.store.save_key(
+                        db, key, value.name, value.provider,
+                        connection_id,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
         creation.logger.info("Provider credential saved key_id=%s", key)
-        return {"id": key, "name": value.name, "provider": value.provider}
+        return result
 
     @router.delete("/providers/keys/{key_id}")
     def delete_key(key_id: UUID):

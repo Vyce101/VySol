@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 import struct
-from uuid import uuid5, NAMESPACE_URL
+from uuid import uuid4, uuid5, NAMESPACE_URL
 
 from .books.chunking import CHUNKER_VERSION, TextChunk
 from .embeddings import MODEL, DIMENSIONS, INPUT_FORMAT_VERSION
@@ -37,6 +37,11 @@ class CreationStore:
                     vector BLOB, model TEXT, dimensions INTEGER,
                     UNIQUE(world_id, book_id, start));
                 CREATE TABLE IF NOT EXISTS provider_keys(id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS provider_connections(
+                    id TEXT PRIMARY KEY, provider TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE IF NOT EXISTS provider_sequences(
+                    provider TEXT PRIMARY KEY, next_sequence INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS preferences(id TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS commands(
                     id TEXT PRIMARY KEY, world_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
@@ -44,6 +49,15 @@ class CreationStore:
             """)
             if "position" not in {row[1] for row in db.execute("PRAGMA table_info(chunks)")}:
                 db.execute("ALTER TABLE chunks ADD COLUMN position INTEGER")
+            key_columns = {row[1] for row in db.execute("PRAGMA table_info(provider_keys)")}
+            if "connection_id" not in key_columns:
+                db.execute("ALTER TABLE provider_keys ADD COLUMN connection_id TEXT")
+            if "sequence" not in key_columns:
+                db.execute("ALTER TABLE provider_keys ADD COLUMN sequence INTEGER")
+            connection_columns = {row[1] for row in db.execute("PRAGMA table_info(provider_connections)")}
+            if "enabled" not in connection_columns:
+                db.execute("ALTER TABLE provider_connections ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        self._migrate_provider_connections()
 
     @contextmanager
     def connect(self):
@@ -60,13 +74,23 @@ class CreationStore:
         if db is None:
             with self.connect() as connection:
                 return self.get(attempt_id, db=connection)
+        if attempt_id is None:
+            attempts = self.pending(db=db)
+            return attempts[0] if attempts else None
         rows = db.execute("SELECT data FROM attempts" + (" WHERE id=?" if attempt_id else ""),
                           (attempt_id,) if attempt_id else ()).fetchall()
         for row in rows:
             value = json.loads(row["data"])
-            if attempt_id or value["state"] != "complete":
-                return value
+            return value
         return None
+
+    def pending(self, *, db=None) -> list[dict]:
+        if db is None:
+            with self.connect() as connection:
+                return self.pending(db=connection)
+        attempts = [json.loads(row["data"]) for row in db.execute("SELECT data FROM attempts")]
+        return sorted((attempt for attempt in attempts if attempt["state"] != "complete"),
+                      key=lambda attempt: (attempt.get("updated_at", ""), attempt["id"]), reverse=True)
 
     def put(self, db, value: dict):
         value["updated_at"] = now()
@@ -107,7 +131,132 @@ class CreationStore:
 
     def keys(self) -> list[dict]:
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM provider_keys ORDER BY name,id")]
+            return [dict(row) for row in db.execute(
+                "SELECT id,name,provider,connection_id,sequence FROM provider_keys ORDER BY provider,name COLLATE NOCASE,id")]
+
+    def connections(self) -> list[dict]:
+        with self.connect() as db:
+            connections = [dict(row) for row in db.execute(
+                "SELECT id,provider,created_at,enabled FROM provider_connections ORDER BY provider COLLATE NOCASE,id")]
+            for connection in connections:
+                connection["enabled"] = bool(connection["enabled"])
+                connection["next_sequence"] = self._peek_next_sequence(db, connection["id"])
+            credentials = db.execute(
+                "SELECT id,name,provider,connection_id,sequence FROM provider_keys ORDER BY provider,name COLLATE NOCASE,id"
+            ).fetchall()
+        credentials_by_connection = {connection["id"]: [] for connection in connections}
+        for row in credentials:
+            credential = dict(row)
+            connection_id = credential["connection_id"]
+            if connection_id in credentials_by_connection:
+                credentials_by_connection[connection_id].append(credential)
+        for connection in connections:
+            connection["credentials"] = credentials_by_connection[connection["id"]]
+        return connections
+
+    def add_connection(self, provider: str) -> dict:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            connection = self._get_or_create_connection(db, provider)
+            connection["enabled"] = bool(connection["enabled"])
+            connection["next_sequence"] = self._peek_next_sequence(db, connection["id"])
+            connection["credentials"] = []
+            return connection
+
+    def update_connection(self, connection_id: str, enabled: bool) -> dict:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT id,provider,created_at,enabled FROM provider_connections WHERE id=?",
+                             (connection_id,)).fetchone()
+            if row is None:
+                raise KeyError(connection_id)
+            db.execute("UPDATE provider_connections SET enabled=? WHERE id=?", (int(enabled), connection_id))
+            value = dict(row)
+            value["enabled"] = bool(enabled)
+            value["next_sequence"] = self._peek_next_sequence(db, connection_id)
+            value["credentials"] = [dict(credential) for credential in db.execute(
+                "SELECT id,name,provider,connection_id,sequence FROM provider_keys WHERE connection_id=? "
+                "ORDER BY provider,name COLLATE NOCASE,id", (connection_id,))]
+            return value
+
+    def enabled_key(self, key_id: str, *, db=None) -> bool:
+        if db is None:
+            with self.connect() as connection:
+                return self.enabled_key(key_id, db=connection)
+        row = db.execute(
+            "SELECT c.enabled FROM provider_keys k JOIN provider_connections c ON c.id=k.connection_id WHERE k.id=?",
+            (key_id,),
+        ).fetchone()
+        return bool(row and row["enabled"])
+
+    def save_key(self, db, key_id: str, name: str, provider: str, connection_id: str | None) -> dict:
+        connection = self._get_or_create_connection(db, provider)
+        if connection_id is not None and connection_id != connection["id"]:
+            raise ValueError("The selected provider connection does not match this credential.")
+        existing = db.execute("SELECT sequence FROM provider_keys WHERE id=?", (key_id,)).fetchone()
+        sequence = existing["sequence"] if existing else self._allocate_sequence(db, connection["id"])
+        db.execute(
+            "INSERT INTO provider_keys(id,name,provider,connection_id,sequence) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,"
+            "connection_id=excluded.connection_id,sequence=excluded.sequence",
+            (key_id, name, provider, connection["id"], sequence),
+        )
+        return {"id": key_id, "name": name, "provider": provider,
+                "connection_id": connection["id"], "sequence": sequence}
+
+    def _migrate_provider_connections(self):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT rowid,id,provider,connection_id,sequence FROM provider_keys ORDER BY rowid"
+            ).fetchall()
+            providers = {row["provider"] for row in rows}
+            for provider in providers:
+                self._get_or_create_connection(db, provider)
+            for row in rows:
+                connection = self._get_or_create_connection(db, row["provider"])
+                connection_id = row["connection_id"]
+                if connection_id != connection["id"]:
+                    connection_id = connection["id"]
+                sequence = row["sequence"]
+                if sequence is None:
+                    sequence = self._allocate_sequence(db, connection["id"])
+                db.execute("UPDATE provider_keys SET connection_id=?,sequence=? WHERE id=?",
+                           (connection_id, sequence, row["id"]))
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS provider_keys_sequence ON provider_keys(provider,sequence)")
+
+    @staticmethod
+    def _get_or_create_connection(db, provider: str) -> dict:
+        row = db.execute("SELECT id,provider,created_at,enabled FROM provider_connections WHERE provider=?",
+                         (provider,)).fetchone()
+        if row:
+            connection = dict(row)
+            connection["enabled"] = bool(connection["enabled"])
+            return connection
+        connection = {"id": str(uuid4()), "provider": provider, "created_at": now(), "enabled": 1}
+        db.execute("INSERT INTO provider_connections(id,provider,created_at,enabled) VALUES(?,?,?,?)",
+                   (connection["id"], provider, connection["created_at"], connection["enabled"]))
+        connection["enabled"] = True
+        return connection
+
+    @staticmethod
+    def _allocate_sequence(db, connection_id: str) -> int:
+        occupied = db.execute("SELECT sequence FROM provider_keys WHERE connection_id=? ORDER BY sequence",
+                              (connection_id,)).fetchall()
+        sequence = 1
+        for row in occupied:
+            current = row["sequence"]
+            if current is None:
+                continue
+            if current == sequence:
+                sequence += 1
+            elif current > sequence:
+                break
+        return sequence
+
+    @staticmethod
+    def _peek_next_sequence(db, connection_id: str) -> int:
+        return CreationStore._allocate_sequence(db, connection_id)
 
     def defaults(self) -> dict:
         with self.connect() as db:
