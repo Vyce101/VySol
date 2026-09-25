@@ -18,6 +18,16 @@ let records: World[];
 let creationRecord: CreationAttempt | null;
 let extraCreationRecords: CreationAttempt[];
 let details: Record<string, WorldDetail>;
+let chronicleRows: Array<{
+  id: string;
+  world_id: string;
+  title: string;
+  created_at: string;
+  last_message_at: string | null;
+  message_count: number;
+  preview: string;
+  not_started: boolean;
+}>;
 const allCreationRecords = () => [
   ...(creationRecord ? [creationRecord] : []),
   ...extraCreationRecords,
@@ -64,6 +74,7 @@ beforeEach(() => {
   creationRecord = null;
   extraCreationRecords = [];
   details = { one: readyDetail(frostwake) };
+  chronicleRows = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -75,7 +86,33 @@ beforeEach(() => {
           defaults: { model: "gemini-embedding-2", key_id: "key" },
         });
       if (path === "/settings")
-        return response({ background_speed: "normal", world_layout: "shelf" });
+        return response({ background_speed: "normal", world_layout: "shelf", chat_appearance: "focused" });
+      if (path === "/chronicle-settings")
+        return response({
+          model: "gemini-3.8-flash", key_id: "", chunk_count: 3,
+          minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+          chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+          rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+          sections: { ai: true, retrieval: true, response: true, section_tags: true },
+        });
+      if (path.endsWith("/chronicles") && path.startsWith("/worlds/")) {
+        if (init?.method === "POST") {
+          const row = {
+            id: `chronicle-${chronicleRows.length + 1}`, world_id: path.split("/")[2],
+            title: "New Chronicle", created_at: new Date().toISOString(),
+            last_message_at: null, message_count: 0, preview: "No messages yet",
+            not_started: true,
+          };
+          chronicleRows = [row, ...chronicleRows];
+          return response(row);
+        }
+        return response(chronicleRows);
+      }
+      if (/^\/chronicles\/[^/]+\/messages$/.test(path)) return response([]);
+      if (/^\/chronicles\/[^/]+$/.test(path)) {
+        const row = chronicleRows.find((entry) => entry.id === path.split("/")[2]);
+        return response(row ?? {});
+      }
       if (path === "/creations") return response(allCreationRecords());
       if (path === "/creation") return response(creationRecord);
       if (path.startsWith("/creation/") && path.endsWith("/pause")) {
@@ -178,12 +215,16 @@ test("home cards show book counts and Ready, and saved cards open Overview", asy
   expect(screen.getByText("8000 characters")).toBeTruthy();
   expect(screen.getByText("1000 characters")).toBeTruthy();
   expect(within(overview).getByText("Gemini Embedding 2", { selector: "dd" })).toBeTruthy();
+  expect(vi.mocked(fetch)).not.toHaveBeenCalledWith(
+    expect.stringContaining("/worlds/one/activity"),
+    expect.objectContaining({ method: "POST" }),
+  );
   expect([...overview.querySelectorAll(".world-details-grid dt")].map((node) => node.textContent)).toEqual([
     "Embedding Model",
     "Maximum Chunk Size",
     "Boundary Search Distance",
   ]);
-  fireEvent.click(screen.getByRole("button", { name: "Back to Worlds" }));
+  fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
   expect(await screen.findByRole("button", { name: "Frostwake, Ready, 2 Books" })).toBeTruthy();
 });
 
@@ -201,6 +242,19 @@ test("Create World is a full page with breadcrumbs and its draft survives Settin
   expect(screen.queryByRole("combobox", { name: "Search worlds" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Close Settings" }));
   expect((await screen.findByLabelText("World Name") as HTMLInputElement).value).toBe("Draft World");
+});
+
+test("Chronicles can be created from a ready World without leaving the list", async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Frostwake, Ready, 2 Books" }));
+  const overview = document.querySelector<HTMLElement>(".world-overview-view.is-visible")!;
+  fireEvent.click(within(overview).getByRole("button", { name: "Chronicles" }));
+  const list = document.querySelector<HTMLElement>(".chronicles-page-view.is-visible")!;
+  expect(await within(list).findByText("No Chronicles Yet")).toBeTruthy();
+  fireEvent.click(within(list).getByRole("button", { name: "New Chronicle" }));
+  expect(await within(list).findByText("No messages yet")).toBeTruthy();
+  expect(within(list).getByText("Not started")).toBeTruthy();
+  expect(list.classList.contains("is-visible")).toBe(true);
 });
 
 test("creating cards open Overview with chunk counts and Discard left of Pause", async () => {
@@ -267,6 +321,13 @@ test("creating cards open Overview with chunk counts and Discard left of Pause",
   expect(within(overview).getByText("3 of 7 chunks embedded", { selector: "small" })).toBeTruthy();
   const actions = screen.getByRole("button", { name: "Pause" }).parentElement!;
   expect(actions.textContent?.indexOf("Discard World")).toBeLessThan(actions.textContent?.indexOf("Pause") ?? -1);
+  const discardButton = within(overview).getByRole("button", { name: "Discard World" });
+  expect(discardButton.classList.contains("pause-world-action")).toBe(true);
+  expect(discardButton.classList.contains("discard-world-action")).toBe(true);
+  fireEvent.click(discardButton);
+  const confirmDiscardButton = within(overview).getByRole("button", { name: "Discard World" });
+  expect(confirmDiscardButton.classList.contains("pause-world-action")).toBe(true);
+  expect(confirmDiscardButton.classList.contains("discard-world-action")).toBe(true);
 });
 
 test("multiple active attempts have separate cards and actions target the selected world", async () => {
@@ -316,12 +377,13 @@ test("multiple active attempts have separate cards and actions target the select
   await waitFor(() => {
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("/creation/second/pause"))).toBe(true);
   });
-  fireEvent.click(screen.getByRole("button", { name: "Back to Worlds" }));
+  fireEvent.click(screen.getByRole("button", { name: "Worlds" }));
   expect(screen.getByRole("button", { name: "Northern Tales, Creating, 1 Book" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Southern Tales, Pausing…, 1 Book" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "New World" }));
   expect(await screen.findByRole("heading", { name: "Create World" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Close Create World" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Close Create World" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
 });
 
 test("sample homepage cards are clearly marked and cannot open nonexistent worlds", async () => {

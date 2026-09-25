@@ -3,6 +3,7 @@ import { ArrowRight, GearSix, Plus, X } from "@phosphor-icons/react";
 import {
   api,
   jsonRequest,
+  type ChatAppearance,
   type CreationAttempt,
   type Settings,
   type Speed,
@@ -17,6 +18,10 @@ import { Background } from "./Background";
 import { CreateWorld, WorldOverview } from "./CreateWorld";
 import { SettingsView } from "./SettingsView";
 import { WorldSearch } from "./WorldSearch";
+import { WorldSectionsNav } from "./WorldSectionsNav";
+import { ChroniclesView } from "./ChroniclesView";
+import { ChronicleChat } from "./ChronicleChat";
+import { installVerticalScrollbarVisibility } from "./verticalScrollbars";
 import {
   artworkUrl,
   sampleWorlds,
@@ -24,7 +29,7 @@ import {
   type PreviewWorld,
 } from "./collectionPreview";
 
-type View = "worlds" | "settings" | "create" | "overview";
+type View = "worlds" | "settings" | "create" | "overview" | "chronicles" | "chronicle-chat";
 type PageView = Exclude<View, "settings">;
 
 function pendingBookCount(attempt: CreationAttempt) {
@@ -36,7 +41,7 @@ function worldForAttempt(attempt: CreationAttempt): PreviewWorld {
     id: attempt.id,
     name: attempt.name,
     created_at: attempt.created_at,
-    last_used_at: null,
+    last_used_at: attempt.updated_at,
     artwork: "frostwake",
     artworkUrl: "/assets/frostwake.png",
     book_count: pendingBookCount(attempt),
@@ -46,22 +51,25 @@ function worldForAttempt(attempt: CreationAttempt): PreviewWorld {
 export function App() {
   const homeRef = useRef<HTMLElement>(null);
   const shelfRef = useRef<HTMLDivElement>(null);
-  const edgeAnimation = useRef<Animation | null>(null);
   const resumeAttemptRef = useRef<
     ((attempt: CreationAttempt) => Promise<CreationAttempt>) | null
   >(null);
-  useEffect(() => () => edgeAnimation.current?.cancel(), []);
+  useEffect(() => installVerticalScrollbarVisibility(), []);
   const [view, setView] = useState<View>("worlds");
   const [previousView, setPreviousView] = useState<PageView>("worlds");
   const [worlds, setWorlds] = useState<World[]>([]);
   const [preview, setPreview] = useState<PreviewWorld | null>(null);
   const [selectedWorldId, setSelectedWorldId] = useState<string | null>(null);
+  const [selectedChronicle, setSelectedChronicle] = useState<{ id: string; title: string } | null>(null);
+  const [chronicleVisitKey, setChronicleVisitKey] = useState(0);
+  const [overviewAttentionEpoch, setOverviewAttentionEpoch] = useState(0);
   const [worldDetail, setWorldDetail] = useState<WorldDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [collectionPreview, setCollectionPreview] =
     useState<CollectionPreview>("saved");
   const [speed, setSpeed] = useState<Speed>("normal");
   const [layout, setLayout] = useState<WorldLayout>("shelf");
+  const [chatAppearance, setChatAppearance] = useState<ChatAppearance>("focused");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [attempts, setAttempts] = useState<CreationAttempt[]>([]);
@@ -72,8 +80,11 @@ export function App() {
   const [searchEpoch, setSearchEpoch] = useState(0);
   const [overviewHandoff, setOverviewHandoff] = useState(false);
   const [settingsReturning, setSettingsReturning] = useState(false);
+  const [peerSectionSwitch, setPeerSectionSwitch] = useState(false);
+  const [chronicleReturning, setChronicleReturning] = useState(false);
   const completedAttemptIds = useRef(new Set<string>());
   const discardedAttemptIds = useRef(new Set<string>());
+  const hasLeftWorlds = useRef(false);
 
   function updateAttempt(value: CreationAttempt) {
     if (discardedAttemptIds.current.has(value.id)) return;
@@ -98,6 +109,18 @@ export function App() {
     return () => clearTimeout(timer);
   }, [settingsReturning]);
 
+  useEffect(() => {
+    if (!peerSectionSwitch) return;
+    const timer = setTimeout(() => setPeerSectionSwitch(false), 180);
+    return () => clearTimeout(timer);
+  }, [peerSectionSwitch]);
+
+  useEffect(() => {
+    if (!chronicleReturning) return;
+    const timer = setTimeout(() => setChronicleReturning(false), 210);
+    return () => clearTimeout(timer);
+  }, [chronicleReturning]);
+
   async function load() {
     setError("");
     setLoading(true);
@@ -117,6 +140,7 @@ export function App() {
       setPreview((previous) => previous ?? records[0] ?? null);
       setSpeed(settings.background_speed);
       setLayout(settings.world_layout ?? "shelf");
+      setChatAppearance(settings.chat_appearance ?? "focused");
       records.forEach((world) => {
         const image = new Image();
         image.src = `/api/worlds/${world.id}/artwork`;
@@ -130,6 +154,20 @@ export function App() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (view !== "worlds") {
+      hasLeftWorlds.current = true;
+      return;
+    }
+    if (!hasLeftWorlds.current) return;
+    api<World[]>("/worlds")
+      .then((records) => {
+        setWorlds(records);
+        if (collectionPreview === "saved") setPreview(records[0] ?? null);
+      })
+      .catch(() => setError("Your worlds could not be refreshed. Try again."));
+  }, [view, collectionPreview]);
 
   const pollableAttemptIds = attempts
     .filter((attempt) => attempt.state !== "complete")
@@ -180,13 +218,14 @@ export function App() {
   }, [attempts]);
 
   useEffect(() => {
-    if (view !== "overview" || !selectedWorldId) return;
+    if (!["overview", "chronicles", "chronicle-chat"].includes(view) || !selectedWorldId) return;
     let cancelled = false;
-    setWorldDetail(null);
+    setWorldDetail((previous) => previous?.id === selectedWorldId ? previous : null);
     setDetailError("");
     api<WorldDetail>(`/worlds/${selectedWorldId}`)
       .then((detail) => {
-        if (!cancelled) setWorldDetail(detail);
+        if (cancelled) return;
+        setWorldDetail(detail);
       })
       .catch((cause) => {
         if (!cancelled)
@@ -216,7 +255,11 @@ export function App() {
   const savedCollection: PreviewWorld[] = [
     ...attemptWorlds,
     ...worlds.filter((world) => !attemptWorlds.some((attempt) => attempt.id === world.id)),
-  ];
+  ].sort((left, right) => {
+    const leftActivity = Date.parse(left.last_used_at ?? left.created_at);
+    const rightActivity = Date.parse(right.last_used_at ?? right.created_at);
+    return rightActivity - leftActivity || right.id.localeCompare(left.id);
+  });
   const collection =
     collectionPreview === "empty"
       ? []
@@ -233,6 +276,7 @@ export function App() {
     ) return;
     setPreview(world);
     setSelectedWorldId(world.id);
+    setSelectedChronicle(null);
     setWorldDetail(null);
     setDetailError("");
     setOverviewHandoff(false);
@@ -242,8 +286,15 @@ export function App() {
   function openCreateWorld() {
     setOverviewHandoff(false);
     setSelectedWorldId(null);
+    setSelectedChronicle(null);
     setWorldDetail(null);
     setView("create");
+  }
+
+  function openWorldSection(section: "overview" | "chronicles") {
+    if (view === "overview" || view === "chronicles") setPeerSectionSwitch(true);
+    if (view === "chronicle-chat") setChronicleReturning(true);
+    setView(section);
   }
 
   function openSettings(from: PageView = view === "settings" ? previousView : view) {
@@ -356,24 +407,6 @@ export function App() {
           ? "instant"
           : "smooth",
       });
-      const atEdge =
-        delta < 0
-          ? shelf.scrollLeft <= 0
-          : shelf.scrollLeft >= shelf.scrollWidth - shelf.clientWidth - 1;
-      if (
-        atEdge &&
-        !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches &&
-        edgeAnimation.current?.playState !== "running"
-      ) {
-        edgeAnimation.current = shelf.animate(
-          [
-            { transform: "translateX(0)" },
-            { transform: `translateX(${delta > 0 ? -7 : 7}px)` },
-            { transform: "translateX(0)" },
-          ],
-          { duration: 220, easing: "ease-out" },
-        );
-      }
     }
     home.addEventListener("wheel", scrollShelf, { passive: false });
     return () => home.removeEventListener("wheel", scrollShelf);
@@ -398,10 +431,13 @@ export function App() {
   const selectedAttempt =
     displayedAttempts.find((attempt) => attempt.id === selectedWorldId) ?? null;
   const routeTitle = view === "create" ? "Create World" : selectedWorld?.name;
+  const isWorldReady =
+    (worldDetail?.state === "complete" || selectedAttempt?.state === "complete") &&
+    (worldDetail?.progress.chunks_done ?? selectedAttempt?.chunks_done ?? 0) > 0;
 
   return (
     <>
-      <Background url={artworkUrl(preview)} speed={speed} />
+      <Background url={artworkUrl(preview)} speed={speed} focusedChat={view === "chronicle-chat" && chatAppearance === "focused"} />
       <header className={`app-header ${view !== "worlds" ? "app-header-subpage" : ""}`}>
         <div className="brand">
           <img src="/assets/logo.png" alt="" />
@@ -419,39 +455,44 @@ export function App() {
             {view !== "worlds" && (
               <>
                 <ArrowRight size={16} aria-hidden="true" />
-                <button className="active" aria-current="page">
+                <button
+                  className={view === "overview" || view === "create" ? "active" : ""}
+                  aria-current={view === "overview" || view === "create" ? "page" : undefined}
+                  onClick={view === "create" ? undefined : () => openWorldSection(view === "chronicle-chat" ? "chronicles" : "overview")}
+                >
                   {routeTitle}
                 </button>
+                {view === "chronicle-chat" && selectedChronicle && (
+                  <>
+                    <ArrowRight size={16} aria-hidden="true" />
+                    <button className="active" aria-current="page">
+                      {selectedChronicle.title}
+                    </button>
+                  </>
+                )}
               </>
             )}
           </nav>
         )}
         <div className="header-tools">
-          {view === "worlds" && (
+          {view !== "settings" && (
             <>
+              {view === "worlds" && (
               <WorldSearch
                 key={`${collectionPreview}-${searchEpoch}`}
                 worlds={collection}
                 disabled={false}
                 onSelect={openWorld}
               />
+              )}
               <button
                 className="icon-button settings-button"
                 aria-label="Settings"
-                onClick={() => openSettings("worlds")}
+                onClick={() => openSettings()}
               >
                 <GearSix size={25} weight="light" />
               </button>
             </>
-          )}
-          {(view === "overview" || view === "create") && (
-            <button
-              className="icon-button close-world-button"
-              aria-label={view === "create" ? "Close Create World" : "Back to Worlds"}
-              onClick={() => setView("worlds")}
-            >
-              <X size={24} weight="light" />
-            </button>
           )}
           {view === "settings" && (
             <button
@@ -465,7 +506,7 @@ export function App() {
           )}
         </div>
       </header>
-      <main className={`${view === "worlds" && (layout === "shelf" || collection.length <= 4) ? "fit-home" : ""} ${settingsReturning ? "settings-returning" : ""}`}>
+      <main className={`${view === "worlds" && (layout === "shelf" || collection.length <= 4) ? "fit-home" : ""} ${settingsReturning ? "settings-returning" : ""} ${peerSectionSwitch ? "peer-section-switch" : ""} ${chronicleReturning ? "chronicle-returning" : ""}`}>
         <section
           ref={homeRef}
           className={`view worlds-view ${layout === "shelf" || collection.length <= 4 ? "fitted-worlds" : ""} ${view === "worlds" ? "is-visible" : ""}`}
@@ -481,7 +522,7 @@ export function App() {
             <div className="collection-heading">
               <h2>Your Worlds</h2>
               <button
-                className="create-world-button"
+                className="create-world-button primary-button"
                 aria-label="New World"
                 onClick={openCreateWorld}
               >
@@ -635,15 +676,64 @@ export function App() {
           onDiscard={() => {
             if (selectedAttempt) void handleAttemptAction(selectedAttempt.id, "discard");
           }}
+          onChronicles={() => openWorldSection("chronicles")}
         />
+
+        <section
+          className={`view world-overview-view chronicles-page-view ${view === "chronicles" ? "is-visible" : ""}`}
+          aria-hidden={view !== "chronicles"}
+          inert={view !== "chronicles"}
+        >
+          <div className="overview-layout">
+            <WorldSectionsNav
+              section="chronicles"
+              onOverview={() => openWorldSection("overview")}
+              onChronicles={() => {}}
+              attentionEpoch={overviewAttentionEpoch}
+            />
+            <div className="world-page-content overview-content">
+              {selectedWorldId && (
+                <ChroniclesView
+                  visible={view === "chronicles"}
+                  worldId={selectedWorldId}
+                  worldName={selectedWorld?.name ?? "World"}
+                  isWorldReady={isWorldReady}
+                  onOpenChronicle={(chronicle) => {
+                    setSelectedChronicle(chronicle);
+                    setChronicleVisitKey((value) => value + 1);
+                    setView("chronicle-chat");
+                  }}
+                  onPendingChronicleAttempt={() => setOverviewAttentionEpoch((value) => value + 1)}
+                />
+              )}
+            </div>
+          </div>
+        </section>
+
+        {selectedWorldId && selectedChronicle && (
+          <ChronicleChat
+            visible={view === "chronicle-chat"}
+            worldId={selectedWorldId}
+            worldName={selectedWorld?.name ?? "World"}
+            chronicleId={selectedChronicle.id}
+            appearance={chatAppearance}
+            chronicleName={selectedChronicle.title}
+            visitKey={chronicleVisitKey}
+            onChronicleChanged={(title) =>
+              setSelectedChronicle((previous) => previous ? { ...previous, title } : previous)
+            }
+          />
+        )}
 
         <SettingsView
           visible={view === "settings"}
           speed={speed}
           layout={layout}
+          chatAppearance={chatAppearance}
           onSaved={(settings) => {
             setSpeed(settings.background_speed);
             setLayout(settings.world_layout);
+            setChatAppearance(settings.chat_appearance);
           }}
           collectionPreview={collectionPreview}
           onCollectionPreview={changeCollection}

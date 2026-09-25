@@ -28,6 +28,7 @@ function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> =
       visible
       speed="normal"
       layout="shelf"
+      chatAppearance="focused"
       onSaved={onSaved}
       collectionPreview="saved"
       onCollectionPreview={onCollectionPreview}
@@ -49,7 +50,8 @@ test("shows General controls, four Developer previews, and AI Connections withou
   expect(screen.getByRole("heading", { name: "General" })).toBeTruthy();
   expect(screen.getByLabelText(/World Display/).textContent).toContain("Shelf");
   expect(screen.getByLabelText(/Background Transition Speed/)).toBeTruthy();
-  expect(screen.queryByText(/Tailor VySol|Motion|Full|Reduced/)).toBeNull();
+  expect(screen.getByLabelText(/Chronicle Chat Appearance/)).toBeTruthy();
+  expect(screen.queryByText(/Tailor VySol|Motion|Reduced/)).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: "Developer" }));
   const preview = screen.getByLabelText(/Homepage Preview/) as HTMLSelectElement;
@@ -90,12 +92,23 @@ test("saves General preferences", async () => {
     "/settings",
     expect.objectContaining({
       method: "PUT",
-      body: JSON.stringify({ background_speed: "fast", world_layout: "shelf" }),
+      body: JSON.stringify({ background_speed: "fast", world_layout: "shelf", chat_appearance: "focused" }),
     }),
   );
   expect(onSaved).toHaveBeenCalledWith({
     background_speed: "fast",
     world_layout: "shelf",
+    chat_appearance: "focused",
+  });
+
+  fireEvent.change(screen.getByLabelText(/Chronicle Chat Appearance/), {
+    target: { value: "full_overlay" },
+  });
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
+  expect(onSaved).toHaveBeenLastCalledWith({
+    background_speed: "normal",
+    world_layout: "shelf",
+    chat_appearance: "full_overlay",
   });
 
 });

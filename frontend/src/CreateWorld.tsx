@@ -6,6 +6,7 @@ import {
   Question,
 } from "@phosphor-icons/react";
 import { BookList } from "./BookList";
+import { WorldSectionsNav } from "./WorldSectionsNav";
 import {
   api,
   jsonRequest,
@@ -573,7 +574,7 @@ export function CreateWorld({
       aria-hidden={!visible}
       inert={!visible}
     >
-      <form className="world-page-content create-world-content" noValidate onSubmit={submit}>
+      <form className="world-page-content create-world-content" autoComplete="off" noValidate onSubmit={submit}>
         <header className="world-page-heading">
           <h1 ref={heading} tabIndex={-1}>Create World</h1>
         </header>
@@ -582,6 +583,7 @@ export function CreateWorld({
           <span>World Name</span>
           <input
             id="world-name"
+            autoComplete="off"
             maxLength={200}
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -774,6 +776,7 @@ export function WorldOverview({
   onPause,
   onResume,
   onDiscard,
+  onChronicles,
 }: {
   visible: boolean;
   handoffTransition: boolean;
@@ -785,6 +788,7 @@ export function WorldOverview({
   onPause: () => void;
   onResume: () => void;
   onDiscard: () => void;
+  onChronicles: () => void;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -824,11 +828,11 @@ export function WorldOverview({
       inert={!visible}
     >
       <div className="overview-layout">
-        <aside className="world-overview-sidebar">
-          <nav aria-label="World sections">
-            <button type="button" aria-current="page">Overview</button>
-          </nav>
-        </aside>
+        <WorldSectionsNav
+          section="overview"
+          onOverview={() => {}}
+          onChronicles={onChronicles}
+        />
         <div className="world-page-content overview-content">
         <header className="world-page-heading overview-heading">
           <div>
@@ -914,10 +918,10 @@ export function WorldOverview({
               <div className="world-discard-confirmation" role="group" aria-label="Confirm discard">
                 <span>Discard this world and its progress?</span>
                 <button type="button" className="text-action" disabled={busy} onClick={() => setDiscardConfirm(false)}>Keep</button>
-                <button type="button" className="danger-action" disabled={busy} onClick={onDiscard}>Discard World</button>
+                <button type="button" className="text-action pause-world-action discard-world-action" disabled={busy} onClick={onDiscard}>Discard World</button>
               </div>
             ) : (
-              <button type="button" className="danger-action" disabled={busy} onClick={() => setDiscardConfirm(true)}>
+              <button type="button" className="text-action pause-world-action discard-world-action" disabled={busy} onClick={() => setDiscardConfirm(true)}>
                 Discard World
               </button>
             )}

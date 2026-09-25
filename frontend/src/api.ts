@@ -8,7 +8,8 @@ export type World = {
 };
 export type Speed = "fast" | "normal" | "slow";
 export type WorldLayout = "shelf" | "grid";
-export type Settings = { background_speed: Speed; world_layout: WorldLayout };
+export type ChatAppearance = "focused" | "full_overlay";
+export type Settings = { background_speed: Speed; world_layout: WorldLayout; chat_appearance: ChatAppearance };
 export type ProcessingConfig = { model: string; size: number; search: number };
 export type CreationBook = {
   id: string;

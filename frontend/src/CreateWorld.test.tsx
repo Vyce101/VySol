@@ -146,6 +146,7 @@ test("Create World is a page with compact ordered story rows and no file metadat
   expect(document.querySelectorAll(".provider-logo-mark")).toHaveLength(2);
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(screen.getByLabelText("World Name")).toBeTruthy();
+  expect((screen.getByLabelText("World Name") as HTMLInputElement).autocomplete).toBe("off");
   expect(screen.getByRole("heading", { name: "Stories" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Add Books" })).toBeTruthy();
   await addStory();

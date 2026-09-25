@@ -3,6 +3,7 @@ import { ProvidersView } from "./ProvidersView";
 import {
   api,
   jsonRequest,
+  type ChatAppearance,
   type Settings,
   type Speed,
   type WorldLayout,
@@ -15,6 +16,7 @@ export function SettingsView({
   visible,
   speed,
   layout,
+  chatAppearance,
   onSaved,
   collectionPreview,
   onCollectionPreview,
@@ -23,6 +25,7 @@ export function SettingsView({
   visible: boolean;
   speed: Speed;
   layout: WorldLayout;
+  chatAppearance: ChatAppearance;
   onSaved: (settings: Settings) => void;
   collectionPreview: CollectionPreview;
   onCollectionPreview: (preview: CollectionPreview) => void;
@@ -105,6 +108,7 @@ export function SettingsView({
                     save({
                       background_speed: speed,
                       world_layout: event.target.value as WorldLayout,
+                      chat_appearance: chatAppearance,
                     })
                   }
                 >
@@ -130,12 +134,37 @@ export function SettingsView({
                     save({
                       background_speed: event.target.value as Speed,
                       world_layout: layout,
+                      chat_appearance: chatAppearance,
                     })
                   }
                 >
                   <option value="fast">Fast</option>
                   <option value="normal">Normal</option>
                   <option value="slow">Slow</option>
+                </select>
+              </div>
+
+              <div className="settings-option">
+                <label htmlFor="chat-appearance">
+                  <span className="settings-option-title">Chronicle Chat Appearance</span>
+                  <span className="settings-option-description">
+                    Choose how the artwork is shaded while reading a Chronicle.
+                  </span>
+                </label>
+                <select
+                  id="chat-appearance"
+                  value={chatAppearance}
+                  disabled={saving}
+                  onChange={(event) =>
+                    save({
+                      background_speed: speed,
+                      world_layout: layout,
+                      chat_appearance: event.target.value as ChatAppearance,
+                    })
+                  }
+                >
+                  <option value="focused">Focus the Reading Area</option>
+                  <option value="full_overlay">Shade the Full Page</option>
                 </select>
               </div>
             </div>
