@@ -42,10 +42,16 @@ input {
   outline: none;
 }
 button:focus-visible,
-input:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+input[type="range"]:focus-visible,
 article:focus-visible {
   outline: 2px solid var(--gold);
   outline-offset: 5px;
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible {
+  outline: none;
+  border-color: #dce5f2b8;
 }
 h1,
 h2,
@@ -92,7 +98,9 @@ button:hover:not(:disabled) {
       rgba(6, 12, 21, 0.13) 68%
     ),
     linear-gradient(90deg, rgba(4, 9, 16, 0.36), transparent 65%);
+  transition: opacity 240ms cubic-bezier(0.2, 0, 0.38, 0.9);
 }
+.backdrop.is-focused-chat .backdrop-shade { opacity: 0; }
 @keyframes background-in {
   from {
     opacity: 0;

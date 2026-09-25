@@ -8,7 +8,7 @@ export const durations: Record<Speed, number> = {
 };
 const fallback = "/assets/frostwake.png";
 
-export function Background({ url, speed }: { url: string; speed: Speed }) {
+export function Background({ url, speed, focusedChat = false }: { url: string; speed: Speed; focusedChat?: boolean }) {
   const [layers, setLayers] = useState([{ source: fallback, id: 0 }]);
   const request = useRef(0);
   useEffect(() => {
@@ -50,7 +50,7 @@ export function Background({ url, speed }: { url: string; speed: Speed }) {
   }, [url, speed]);
   return (
     <div
-      className="backdrop"
+      className={`backdrop ${focusedChat ? "is-focused-chat" : ""}`}
       aria-hidden="true"
       style={
         {

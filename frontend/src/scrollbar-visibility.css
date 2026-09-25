@@ -1,0 +1,46 @@
+:root,
+:root * {
+  scrollbar-color: transparent transparent !important;
+  scrollbar-width: thin;
+}
+
+.show-vertical-scrollbar {
+  scrollbar-color: #dce3ef65 transparent !important;
+}
+
+.fade-vertical-scrollbar {
+  scrollbar-color: transparent transparent !important;
+  transition: scrollbar-color 250ms cubic-bezier(0.2, 0, 1, 0.9);
+}
+
+:root::-webkit-scrollbar:vertical,
+:root *::-webkit-scrollbar:vertical {
+  width: 8px;
+}
+
+:root::-webkit-scrollbar-track:vertical,
+:root *::-webkit-scrollbar-track:vertical,
+:root::-webkit-scrollbar-corner,
+:root *::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:root::-webkit-scrollbar-thumb:vertical,
+:root *::-webkit-scrollbar-thumb:vertical {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-color: transparent;
+  background-clip: padding-box;
+  transition: background-color 250ms cubic-bezier(0.2, 0, 1, 0.9);
+}
+
+.show-vertical-scrollbar::-webkit-scrollbar-thumb:vertical {
+  background-color: #dce3ef65;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root::-webkit-scrollbar-thumb:vertical,
+  :root *::-webkit-scrollbar-thumb:vertical {
+    transition: none;
+  }
+}

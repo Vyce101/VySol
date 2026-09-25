@@ -54,10 +54,15 @@
 }
 
 .settings-redesign button:focus-visible,
-.settings-redesign input:focus-visible,
+.settings-redesign input[type="checkbox"]:focus-visible,
+.settings-redesign input[type="radio"]:focus-visible,
 .settings-redesign select:focus-visible {
   outline: 2px solid var(--gold);
   outline-offset: 3px;
+}
+.settings-redesign input:focus-visible {
+  outline: none;
+  border-color: #dce5f2b8;
 }
 
 .settings-redesign .settings-layout {

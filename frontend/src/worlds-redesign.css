@@ -18,6 +18,12 @@
 main.settings-returning > .view {
   --page-duration: 190ms;
 }
+main.peer-section-switch > .world-overview-view {
+  --page-duration: 160ms;
+}
+main.chronicle-returning > .view {
+  --page-duration: 195ms;
+}
 .worlds-view {
   padding-inline: clamp(22px, 3.1vw, 54px);
 }
@@ -66,6 +72,17 @@ main.settings-returning > .view {
 .outline-action:focus-visible {
   outline: 2px solid #eece95a8;
   outline-offset: 2px;
+}
+.collection-heading .create-world-button.primary-button {
+  min-height: 42px;
+  padding: 8px 24px;
+  background-color: #6d5338;
+  background-image: linear-gradient(120deg, #96744055, #4f402c55);
+  color: #f3dbaf;
+  font-size: 18px;
+}
+.collection-heading .create-world-button.primary-button:hover:not(:disabled) {
+  background-color: #977440;
 }
 .world-grid {
   gap: clamp(12px, 1.6vw, 20px);
@@ -230,7 +247,7 @@ main.settings-returning > .view {
   z-index: -1;
   pointer-events: none;
   background:
-    linear-gradient(90deg, #091321 0%, rgba(9, 19, 33, 0.98) 29%, rgba(9, 19, 33, 0.91) 48%, rgba(9, 19, 33, 0.52) 67%, rgba(9, 19, 33, 0.03) 100%),
+    linear-gradient(90deg, rgba(9, 19, 33, 0.93) 0%, rgba(9, 19, 33, 0.9) 24%, rgba(9, 19, 33, 0.76) 48%, rgba(9, 19, 33, 0.52) 74%, rgba(9, 19, 33, 0.16) 100%),
     linear-gradient(0deg, rgba(7, 15, 26, 0.2), rgba(7, 15, 26, 0.08));
 }
 .world-page-content {
@@ -261,6 +278,9 @@ main.settings-returning > .view {
 }
 .world-overview-sidebar button {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
   min-height: 46px;
   padding: 10px 15px;
   border-radius: 6px;
@@ -270,6 +290,13 @@ main.settings-returning > .view {
   transition:
     color 160ms ease,
     background-color 160ms ease;
+}
+.world-overview-sidebar button.world-overview-attention {
+  animation: world-overview-attention 1.7s cubic-bezier(0.2, 0, 0.38, 0.9) 1;
+}
+@keyframes world-overview-attention {
+  0%, 100% { color: #c2cad4; background: transparent; }
+  48% { color: #ffd3ce; background: #a83b3940; }
 }
 .world-overview-sidebar button:hover {
   color: #fff;
@@ -826,9 +853,43 @@ main.settings-returning > .view {
   min-width: 120px;
   min-height: 39px;
   justify-content: center;
-  border: 1px solid #e0b76b70;
+  border: 1px solid #e0b76b99;
   border-radius: 5px;
   color: #f0d9ad;
+  background: linear-gradient(120deg, #96744042, #4f402c38);
+  box-shadow: 0 0 5px #e0b76b2b;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+.pause-world-action:hover:not(:disabled) {
+  border-color: #e0b76bcc;
+  background-color: #59452c;
+  color: #f3dbaf;
+  box-shadow: 0 0 8px #e0b76b55;
+}
+.world-overview-actions .discard-world-action {
+  border-color: #e7747099;
+  color: #ffb4aa;
+  background: linear-gradient(120deg, #9c3e3542, #522a2c38);
+  box-shadow: 0 0 5px #e7747030;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+.world-overview-actions .discard-world-action:hover:not(:disabled) {
+  border-color: #e98c85;
+  color: #ffd0c7;
+  background: linear-gradient(120deg, #a3433f77, #63363867);
+  box-shadow: 0 0 8px #e774707a;
+}
+.world-overview-actions .discard-world-action:focus-visible {
+  outline: 2px solid #e77470a8;
+  outline-offset: 5px;
 }
 .danger-action {
   min-height: 39px;
@@ -849,7 +910,7 @@ main.settings-returning > .view {
   color: #d1d7df;
   font-size: 14px;
 }
-.world-discard-confirmation .danger-action {
+.world-discard-confirmation .discard-world-action {
   white-space: nowrap;
 }
 .detail-load-error {
@@ -947,7 +1008,7 @@ main.settings-returning > .view {
   }
   .create-world-view::before,
   .world-overview-view::before {
-    background: linear-gradient(90deg, #091321 0%, rgba(9, 19, 33, 0.94) 66%, rgba(9, 19, 33, 0.38) 100%);
+    background: linear-gradient(90deg, rgba(9, 19, 33, 0.93) 0%, rgba(9, 19, 33, 0.83) 66%, rgba(9, 19, 33, 0.5) 100%);
   }
   .world-page-content {
     --content-offset: 0px;
@@ -1013,6 +1074,15 @@ main.settings-returning > .view {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .pause-world-action,
+  .world-overview-actions .discard-world-action {
+    transition: none;
+  }
+  .world-overview-sidebar button.world-overview-attention {
+    animation: none;
+    color: #ffd3ce;
+    background: #a83b3940;
+  }
   .view,
   .world-card,
   .world-card > img,
