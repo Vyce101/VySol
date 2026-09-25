@@ -36,4 +36,4 @@ If the browser does not open but the launcher says VySol is ready, visit `http:/
 
 Close the launcher window to stop its server and other app-owned processes. Closing just the browser tab leaves the server running. Closing the launcher does not close your browser.
 
-Next, [create a world](create-world.md). You will need at least one TXT or EPUB book, an internet connection, and a Google AI Studio / Gemini API key. Closing the launcher pauses unfinished processing; restart and choose **Resume** to continue.
+Next, [create a world](create-world.md). You will need at least one TXT or EPUB book, an internet connection, and a Google AI Studio / Gemini API key. Closing the launcher pauses unfinished processing; restart and choose **Resume** to continue. Once its embeddings finish, open a [Chronicle](chronicles.md) to chat in that World.

@@ -34,4 +34,4 @@ Submitted books, order, model, credential selection, and chunk settings cannot b
 
 **Discard World** asks for confirmation and removes that unfinished attempt and its saved work. Other unfinished worlds are unaffected. For file problems, see [supported books and limits](reference.md#supported-books) and [duplicate names](reference.md#duplicate-book-names).
 
-When all books succeed, the same Overview becomes **Ready**. Its ordered source books cannot be removed, replaced, reordered, or extended. Reading, retrieval, scene extraction, graph indexing, and roleplay are not part of this flow yet.
+When all books succeed, the same Overview becomes **Ready**. Its ordered source books cannot be removed, replaced, reordered, or extended. You can then open a [Chronicle](chronicles.md) to chat using passages retrieved from those books. Book reading, scene extraction, and graph indexing are not part of this flow yet.

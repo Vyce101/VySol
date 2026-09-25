@@ -4,7 +4,7 @@ order: 100
 ---
 # VySol Documentation
 
-VySol is a project for AI experiences set inside established fictional worlds. These docs cover the current local app: starting it, creating worlds, importing books, and changing the implementation.
+VySol is a project for AI experiences set inside established fictional worlds. These docs cover the current local app: starting it, creating worlds from books, chatting in Chronicles, and changing the implementation.
 
 ## Get it running
 
@@ -13,6 +13,10 @@ Follow the [Quickstart](quickstart.md) to launch VySol on Windows and reach the 
 ## Create a world
 
 The [Create a world guide](create-world.md) covers naming a world, arranging books, configuring embeddings, and recovering unfinished attempts.
+
+## Continue in a Chronicle
+
+The [Chronicles guide](chronicles.md) covers separate conversations in each World, retrieval from its books, chat, and shared Chronicle settings.
 
 ## Look up supported behavior
 

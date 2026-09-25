@@ -29,11 +29,13 @@ The frontend is served from `frontend/dist/client/`. Rebuild after frontend chan
 | Area | Responsibility |
 | --- | --- |
 | `frontend/src/CreateWorld.tsx` | Unsubmitted page, ordered selections, uploads, and progress. |
+| `frontend/src/ChroniclesView.tsx`, `ChronicleChat.tsx`, and `ChronicleSettingsDrawer.tsx` | Chronicle lists, conversation and local drafts, streamed response display, and shared drawer settings. |
 | `frontend/src/ProvidersView.tsx` | Provider selection, numbered credentials, and explicit secret reveal and replacement. |
 | `src/vysol/server.py` | Loopback HTTP boundary, lifecycle, static frontend, and artwork. |
 | `src/vysol/creation_api.py` | Validated attempt, upload, and credential contracts. |
 | `src/vysol/creation.py` | Independent per-world workers, recovery, and whole-world publication. |
 | `src/vysol/creation_store.py` | SQLite checkpoints, operation IDs, ordered chunks, and vectors. |
+| `src/vysol/chronicles.py` and `chronicles_api.py` | Chronicle persistence, retrieval, provider streaming, and local HTTP contracts. |
 | `src/vysol/embeddings.py` | Gemini requests, input formatting, vector validation, and bounded retries. |
 | `src/vysol/credentials.py` | Injectable credential adapter and atomic local key files. |
 | `src/vysol/books/` | Strict TXT/EPUB conversion, deterministic chunking, and legacy importer. |
@@ -47,6 +49,8 @@ Every book must upload, validate, convert, and chunk before embedding begins. Pr
 The splitter preserves every Unicode code point of the working TXT in contiguous slices. It searches backward from the size limit, preferring paragraph boundaries, then line breaks, then `?`, `!`, or `.`, then whitespace, and finally a hard split. Within a boundary level it chooses the latest match. Punctuation stays in the preceding chunk; matching is character-based, without sentence parsing or abbreviation detection. Offsets count Python Unicode code points, not UTF-8 bytes or JavaScript UTF-16 units. Chunk settings satisfy `size > 0` and `0 <= search < size`.
 
 `CHUNKER_VERSION` is 2; version 2 adds punctuation between line breaks and whitespace in the boundary priority. `CreationStore.add_chunks` records the version in each chunk's processing profile, which also contributes to its stable ID. Resume skips splitting for books already marked `chunked` and reuses their stored chunks and completed vectors. Updating the splitter does not automatically regenerate those chunks or rebuild accepted worlds. Newly generated chunks, including smaller replacements for an oversized input, use the current version.
+
+Chronicle retrieval leaves stored chunks and embeddings unchanged. It embeds only the latest user message with Gemini Embedding 2's retrieval-query prefix, compares that vector with normalized vectors from the selected World, and keeps up to the configured number above Minimum Similarity. The preceding source characters are reconstructed from earlier contiguous chunks, so overlap can cross more than one chunk. The chat request includes previous user and answer text, selected passages with book names and source offsets, and the latest message. No roleplay system instruction or history truncation is added.
 
 The backend sends one chunk per Gemini request with retrieval-document formatting, `autoTruncate: false`, and 768 dimensions. The formatting prefix is separate from stored chunk text. Explicit size errors split only the affected chunk using the same boundary rules. Valid finite vectors are normalized and stored as little-endian float32 values. Transient failures retry at most four requests with cancellable backoff; other failures require attention. See Google's [embedding guide](https://ai.google.dev/gemini-api/docs/embeddings) and [REST configuration](https://ai.google.dev/api/embeddings#EmbedContentConfig).
 
@@ -78,6 +82,10 @@ data/
 
 The attempt UUID becomes the world ID. Stable book IDs survive reordering. Chunk IDs derive from the book, source span, text digest, and processing profile. SQLite stores explicit positions, offsets, source text digests, model, dimensions, and processing versions. These are source locations, not fictional chronology.
 
+The same SQLite database stores World-scoped Chronicles, ordered messages, generation request IDs, and one shared Chronicle settings record. A client-generated request UUID prevents duplicate user messages on retry. One generation can run per Chronicle. User input is saved before retrieval and generation; streamed answer and readable thinking are saved separately. Stopping or failing preserves any usable partial result. A discarded unfinished World also loses its Chronicles. The browser receives distinct SSE events for user creation, thinking, answer, completion, and failure, and applies the selected answer reveal speed locally.
+
+Unsent Chronicle drafts remain in `ChronicleChat` component state, keyed by Chronicle ID. They are not stored in SQLite. The component stays mounted while switching Chronicles in one World, so each draft returns when that Chronicle is reopened. Reloading or leaving and reopening the World loses those drafts. The message field recalculates its height from the active draft and scrolls internally after reaching its CSS height limit.
+
 Before submission, setup values and File objects exist only in the mounted creation component. Navigating to **AI Connections** keeps that component mounted so the Settings X can return to the draft. A page reload loses unsubmitted file selections. Successful submission clears the draft; the next Create World page starts fresh with the last submitted model/key defaults and standard chunk settings.
 
 Submission begins durable recovery by saving the manifest before uploading books. Leaving the page while submission is in flight does not interrupt the uploads. Once an attempt exists, leaving preserves it; deletion requires the separate confirmed discard action.
@@ -88,7 +96,7 @@ Successful vectors checkpoint individually. Startup reconciles an interrupted di
 
 Publication verifies text coverage and file digests, then atomically renames a complete prepared world directory into `worlds/`. The final SQLite checkpoint may be recovered from that directory. `sources_locked` prevents the shared importer from appending to accepted worlds. Old worlds retain their existing files and are not migrated or embedded. Discard stops the worker before deleting only the attempt's owned directory and cascading its SQLite records.
 
-Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite stores provider groups and credential sequence numbers; a new credential takes the lowest available number. Ordinary API responses contain identifiers and labels, not secrets. Explicit local key reveal is uncached and must not be logged. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault` and `embedder` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
+Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite stores provider groups and credential sequence numbers; a new credential takes the lowest available number. Ordinary API responses contain identifiers and labels, not secrets. Explicit local key reveal is uncached and must not be logged. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault`, `embedder`, and `chat_client` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
 
 ## Local API contract
 
@@ -99,6 +107,7 @@ Paths below are relative to the server. Ordinary responses contain public IDs, s
 | `GET /api/health` | `status: ready`, `app: vysol`. |
 | `GET /api/worlds` | Accepted worlds with book counts, ordered by last use or creation. |
 | `GET /api/worlds/{id}` | Accepted or unfinished world details: ordered books, source lock, state, progress, and nullable processing settings. |
+| `POST /api/worlds/{id}/activity` | Record activity for an accepted World. Opening a World in the interface does not call this route. |
 | `GET /api/worlds/{id}/books` | Book metadata, ordered by explicit positions where available. |
 | `GET /api/creation` | Most recently updated unfinished attempt or null, retained for compatibility. |
 | `GET /api/creations` | All unfinished attempts. |
@@ -108,13 +117,19 @@ Paths below are relative to the server. Ordinary responses contain public IDs, s
 | `POST /api/creation/{id}/start` | Start/resume with revision and operation ID. |
 | `POST /api/creation/{id}/pause` | Pause with revision. |
 | `DELETE /api/creation/{id}` | Discard with revision query; accepted worlds reject this action. |
-| `GET /api/providers` | Provider groups and numbered credential metadata, supported models, and last submitted model/key defaults. |
+| `GET /api/providers` | Provider groups and numbered credential metadata, embedding and chat model catalogs, and last submitted creation defaults. |
 | `POST /api/providers/connections` | Idempotently add the Google provider group. |
 | `PUT /api/providers/connections/{id}` | Enable or disable a provider group while preserving credentials. |
 | `PUT /api/providers/keys/{id}` | Name, provider `google`, optional connection ID, and optional write-only secret; a new key requires a secret. The response includes a stable sequence number. |
 | `GET /api/providers/keys/{id}/secret` | Explicit uncached local reveal of a saved key. |
 | `DELETE /api/providers/keys/{id}` | Delete secret and metadata unless used by running work. |
-| `GET`, `PUT /api/settings` | Existing background speed and shelf/grid settings. |
+| `GET`, `PUT /api/settings` | Background transition speed, shelf/grid layout, and Chronicle Chat Appearance. |
+| `GET`, `POST /api/worlds/{id}/chronicles` | List and create Chronicles for an accepted or unfinished World. |
+| `GET`, `PATCH`, `DELETE /api/chronicles/{id}` | Chronicle detail, rename, and confirmed deletion from the interface. |
+| `GET /api/chronicles/{id}/messages` | Saved messages in conversation order. |
+| `POST /api/chronicles/{id}/messages/stream` | Send `{request_id,text}` and stream `user_message`, `thinking_delta`, `answer_delta`, `completed`, or `error` events. |
+| `POST /api/chronicles/{id}/generations/{request_id}/stop` | Stop an active response and retain usable partial text. |
+| `GET`, `PUT /api/chronicle-settings` | Shared model, connection, retrieval, response speed, section boundaries, and drawer section states. |
 | `GET /api/worlds/{id}/artwork` | Registered artwork or bundled Frostwake. |
 
 The old `POST /api/worlds` and `PUT /api/worlds/{id}/imports/{operation_id}` mutations return 410. They cannot bypass the new acceptance rules. Revision conflicts return 409; stream limits return 413; invalid input returns 422; handled storage failures return 503. The UI polls attempt state while work is pending.

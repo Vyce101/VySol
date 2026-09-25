@@ -42,11 +42,13 @@ Do not hard-code package versions or temporary implementation choices in this fi
 
 Changelog model: Continuous/Dated
 
-Record notable completed changes in the project changelog when they become part of the delivered project.
+Record notable completed changes in the project changelog when they become part of the delivered project. In other words, do not make changelog updates before I ask/before committing.
 
 Keep entries concise and user-readable. Do not record plans, experiments, or unfinished work.
 
 ## 5. Misc.
+
+### Casing
 
 Use Title Case for page headings, sections, fields, and named navigation destinations:
 
@@ -55,3 +57,35 @@ Create World, World Name, Stories, Processing, AI Connection, Embedding Model, A
 Use normal sentence case for descriptions and statuses:
 
 Ready, Creating, Attention, 2 books, Add books, Save changes.
+
+### Motion and Transitions
+
+Treat motion as part of the interface's information structure. Animation should help the user understand what changed, where an element came from, or how two states relate. Do not add movement solely for decoration.
+
+Follow the motion language already established in the repository before introducing new timings or easing curves.
+
+Use approximately:
+- 105-150 ms for menus and very small/frequent interactions.
+- 150-160 ms for hover, focus, active states, and peer-content fades.
+- 180 ms for layout-preserving list movement and reordering.
+- 190 ms for closing disclosures or similar exits.
+- 220-240 ms for opening disclosures, drawers, and ordinary page changes.
+- Longer durations only for genuinely larger task-state transformations where the existing application already establishes that pattern.
+
+Prefer:
+- cubic-bezier(0.2, 0, 0.38, 0.9) when an element remains visible while moving or resizing.
+- cubic-bezier(0, 0, 0.38, 0.9) for entrances.
+- cubic-bezier(0.2, 0, 1, 0.9) for exits.
+
+Choose motion according to the relationship between states:
+
+- Peer sections inside the same persistent shell: keep the shell stationary and crossfade the changing content.
+- Page/detail navigation: keep persistent/background elements stationary and use a restrained page crossfade.
+- Disclosures: physically expand or contract their own layout space.
+- Drawers and anchored menus: small directional movement from their real visual anchor is appropriate.
+- Reordered lists: animate existing items from their previous positions to their new positions so users can track them.
+- Pure state feedback such as hover or active controls: react quickly and do not use large movement.
+
+All new motion must support prefers-reduced-motion. Under reduced motion, remove positional movement, breathing/pulsing, and decorative animation while preserving the correct final state and interaction behavior.
+
+Before adding a new hard-coded motion value, inspect the existing CSS/components for an equivalent interaction and reuse its established duration and easing when possible.

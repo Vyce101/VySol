@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-25
+
+### Added
+
+- Added Chronicles with separate saved conversations in each World, book passage retrieval, streamed AI responses, Chronicle search, and shared chat settings.
+- Added a Chronicle Chat Appearance setting for artwork shading during chat.
+
+### Changed
+
+- Ordered World cards by recorded activity and ranked World search results without changing card positions.
+
 ## 2026-09-23
 
 ### Added

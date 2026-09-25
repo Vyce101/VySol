@@ -44,7 +44,7 @@ These fields appear under **Processing** on Create World. Chunk settings are ins
 
 | Field | Supported values | Default | Meaning |
 | --- | --- | --- | --- |
-| Embedding Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for later retrieval. Retrieval is not available yet. |
+| Embedding Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for Chronicle retrieval. |
 | Credential | A saved Google AI Studio API key | Last submitted credential, if still available | A valid selection is required before submission. |
 | Maximum chunk size (chars) | Whole number from 1 to 1,000,000 | 8,000 | Maximum characters in each text chunk before any further splitting required by the model. |
 | Boundary search distance (chars) | Whole number from 0 to one less than Maximum chunk size | 1,000 | How far backward from the size limit VySol searches for a suitable break. Zero disables this search. |
@@ -63,19 +63,42 @@ Each accepted upload produces an untouched original and a separate UTF-8 TXT wor
 
 The Windows launcher stores runtime data in the repository's `data/` folder by default. Books are inside `data/worlds/<world key>/books/<book key>/`, with `original/` and `text/` subfolders. The generated keys are internal identifiers, so folder names do not match world titles. Metadata records the correspondence.
 
-Worlds, book copies, settings, custom artwork, logs, and creation staging files remain under the configured runtime directory. `processing.sqlite3` stores creation checkpoints, source offsets, chunk text, vectors, and credential labels. `creations/` holds attempt files. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory. API key secrets are plain-text files under `credentials/` and are included in a full runtime backup. Keep that folder and its backups private. The credentials folder has its own ignore file so keys and temporary writes remain ignored even with a custom runtime directory.
+Worlds, book copies, settings, custom artwork, logs, and creation staging files remain under the configured runtime directory. `processing.sqlite3` stores creation checkpoints, source offsets, chunk text, vectors, credential labels, Chronicles, messages, and shared Chronicle settings. `creations/` holds attempt files. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory. API key secrets are plain-text files under `credentials/` and are included in a full runtime backup. Keep that folder and its backups private. The credentials folder has its own ignore file so keys and temporary writes remain ignored even with a custom runtime directory.
 
-## Browsing worlds
+## Browsing Worlds
 
 World names must be nonblank and at most 200 characters. Separate worlds can share the same display name.
 
 A world card shows its book count and Ready, Creating, Paused, or Attention status. Opening a card shows its Overview: ordered Stories and saved World Details. A creating world's Overview also shows per-book chunk progress and Pause, Resume, or Discard World actions as appropriate. Several worlds can be created and processed at once.
 
-Hovering, keyboard-focusing, or touching a card previews its title and background. Leaving it retains that preview. Search matches world names without case sensitivity and lists suggestions without rearranging the cards. Hovering or using arrow keys in search does not change the preview; selecting a result focuses and scrolls to its card.
+Saved World cards are ordered by latest recorded activity, using creation date for Worlds without activity. Sending a Chronicle message updates that activity; opening a World or previewing its card does not. Unfinished attempts use their latest update time in the same card order.
 
-The startup preview uses the most recently used world when usage information exists, otherwise the most recently created. Card previews do not record usage, and opening an Overview does not yet update usage history.
+Hovering, keyboard-focusing, or touching a card previews its title and background. Leaving it retains that preview. Search matches world names without case or accent sensitivity and lists ranked suggestions without rearranging the cards. Hovering or using arrow keys in search does not change the preview; selecting a result focuses and scrolls to its card.
 
-Frostwake is the default artwork for new worlds and the empty homepage. Artwork selection, world editing, book reading, chronicles, and AI roleplay are not available in this interface yet.
+At startup, the background uses the first accepted World in the saved-world order, if one exists. Unfinished attempts do not select the startup background.
+
+Frostwake is the default artwork for new worlds and the empty homepage. Artwork selection, world editing, and book reading are not available in this interface yet.
+
+## Chronicles
+
+Chronicles can be created within accepted or unfinished Worlds. Each starts as **New Chronicle** with no messages, and duplicate names are allowed. An unfinished World can hold Chronicles, but its chat cannot open until embedding is complete. A completed legacy World without embeddings also cannot use retrieval chat.
+
+Chronicle names must be nonblank and can contain at most 120 characters. A sent message must be nonblank and can contain at most 100,000 characters.
+
+Each send uses the latest user message to search embedded chunks belonging to that World. The number of chunks is a maximum: fewer are sent if they fall below Minimum Similarity. Chunk Overlap adds preceding source characters at retrieval time and can extend across several stored chunks. No qualifying chunks still permits a response. Sending the full conversation may exceed a model's context limit; VySol reports the provider error without automatically trimming or summarizing the history.
+
+Chronicle settings are shared across Worlds. Chat model choices remain available without an enabled connection, but sending requires a usable key saved under an enabled Google connection. The supported models are Gemini 3.8 Flash, Gemini 3.5 Flash-Lite, and Gemma 4 31B IT. Thinking is shown only when the provider returns a readable summary.
+
+| Setting | Supported values | Default |
+| --- | --- | --- |
+| Chat Model | The three supported models listed above | Gemini 3.8 Flash |
+| API Connection | A saved key on an enabled Google connection | None selected |
+| Number of Chunks | Whole number from 1 to 50 | 3 |
+| Minimum Similarity | 0.00 to 1.00, in 0.01 steps in the drawer | 0.60 |
+| Chunk Overlap (chars) | Whole number from 0 to 100,000 | 150 |
+| Streaming Speed | Off (0), 1–99 chars/s, or Instant (100) | Normal (50 chars/s) |
+
+The four **Section Tags** fields each allow up to 2,000 characters. Their defaults are `<chat_history>`, `</chat_history>`, `<rag_chunks>`, and `</rag_chunks>`, respectively. They are editable text, not parsed XML.
 
 ## Settings
 
@@ -86,6 +109,7 @@ The gear opens **Settings**. Use its X to return to the page you came from, incl
 | AI Connections | Enable or disable Google under Select Connections; add, rename, reveal, replace, or remove numbered credentials | No connection | Names and sequence numbers in SQLite; plain-text secrets in the ignored credentials folder |
 | General / World Display | Shelf; Grid | Shelf | Saved automatically |
 | General / Background Transition Speed | Fast — 150 ms; Normal — 300 ms; Slow — 600 ms | Normal — 300 ms | Saved automatically; controls artwork changes |
+| General / Chronicle Chat Appearance | Focus the Reading Area; Shade the Full Page | Focus the Reading Area | Saved automatically; controls artwork shading during Chronicle chat |
 | Developer / Homepage Preview | Your Saved Worlds; 4 Sample Worlds; 12 Sample Worlds; Empty Homepage | Your Saved Worlds | Resets on reload |
 
 **Horizontal shelf** keeps cards in one row. Use the mouse wheel over the homepage, horizontal touch scrolling, or keyboard focus to reach more cards. **Grid** wraps cards into rows and allows vertical page scrolling for larger collections. Shelf mode and grids with up to four worlds adapt to ordinary viewport sizes without vertical page scrolling; extremely short windows keep controls readable instead of shrinking them indefinitely.
