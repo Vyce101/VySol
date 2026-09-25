@@ -2,6 +2,8 @@
 
 from collections.abc import Iterable
 from pathlib import Path
+from uuid import UUID
+import json
 
 from filelock import Timeout
 
@@ -39,6 +41,7 @@ def import_books(world_id: str, uploads: Iterable[Upload], *, data_dir: Path | s
                         book = publish_book(root, destination, world_id, upload, comparison_name, text_name, text)
                     results.append(ImportResult(upload.filename, book=book))
                     logger.info("Book import succeeded book_id=%s batch_index=%d", book.book_id, index)
+                    _record_world_activity(root, world_id, logger)
                 except ImportFailure as exc:
                     results.append(ImportResult(upload.filename, error=exc.code, message=str(exc)))
                     logger.warning("Book import rejected batch_index=%d code=%s", index, exc.code)
@@ -52,3 +55,18 @@ def import_books(world_id: str, uploads: Iterable[Upload], *, data_dir: Path | s
                                     message="Book storage or logging is unavailable; retry the import.")
                        for upload in uploads[len(results):])
     return results
+
+
+def _record_world_activity(root: Path, world_id: str, logger):
+    try:
+        UUID(world_id)
+    except (AttributeError, TypeError, ValueError):
+        return
+
+    try:
+        # Import lazily because WorldStore also uses the books storage module.
+        from ..worlds import WorldStore
+
+        WorldStore(root).record_activity(world_id)
+    except (OSError, Timeout, json.JSONDecodeError):
+        logger.warning("World activity timestamp could not be saved world_id=%s", world_id)

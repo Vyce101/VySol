@@ -33,6 +33,18 @@ def test_request_contract_and_normalized_vector():
         assert values == [1] + [0] * (DIMENSIONS - 1)
 
 
+def test_query_embedding_uses_gemini_retrieval_query_prefix():
+    def respond(request):
+        body = json.loads(request.content)
+        assert body["content"]["parts"] == [{"text": "task: search result | query: The latest message"}]
+        return httpx.Response(200, json={"embedding": {"values": [1] + [0] * (DIMENSIONS - 1)}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        values = GeminiEmbeddings(client).embed_query(
+            "The latest message", "synthetic", threading.Event(), logging.getLogger())
+        assert values == [1] + [0] * (DIMENSIONS - 1)
+
+
 @pytest.mark.parametrize("status,body,expected", [
     (403, {"error": {"message": "private provider detail"}}, EmbeddingFailure),
     (400, {"error": {"message": "Input token count exceeds maximum"}}, InputTooLarge),

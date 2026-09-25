@@ -11,6 +11,27 @@ from filelock import FileLock
 from .books.storage import safe_directory
 
 
+def _timestamp_value(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result.astimezone(timezone.utc)
+
+
+def latest_timestamp(*values: str | None) -> str | None:
+    valid = [(parsed, value) for value in values if (parsed := _timestamp_value(value)) is not None]
+    return max(valid, key=lambda item: item[0])[1] if valid else None
+
+
+def _world_activity_key(world: dict) -> tuple[datetime, str]:
+    activity = latest_timestamp(world.get("created_at"), world.get("last_used_at"))
+    parsed = _timestamp_value(activity)
+    return parsed or datetime.min.replace(tzinfo=timezone.utc), world["id"]
+
+
 def atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_name(f".{uuid4().hex}.tmp")
     try:
@@ -36,15 +57,32 @@ class WorldStore:
             raise OSError("Invalid world storage")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def list_worlds(self) -> list[dict]:
+    def list_worlds(self, chronicle_activity: dict[str, str] | None = None) -> list[dict]:
         worlds = []
         for path in (self.root / "worlds").glob("*/world.json"):
             if not path.resolve().is_relative_to(self.root):
                 raise OSError("Invalid world storage")
             world = json.loads(path.read_text(encoding="utf-8"))
             world["book_count"] = len(self.books(world["id"]))
+            world["last_used_at"] = latest_timestamp(
+                world.get("last_used_at"), (chronicle_activity or {}).get(world["id"]),
+            )
             worlds.append(world)
-        return sorted(worlds, key=lambda w: (bool(w.get("last_used_at")), w.get("last_used_at") or w["created_at"], w["id"]), reverse=True)
+        return sorted(worlds, key=_world_activity_key, reverse=True)
+
+    def record_activity(self, world_id: str, at: str | None = None) -> dict | None:
+        """Save the latest use time without allowing older events to move a World back."""
+        activity = at or datetime.now(timezone.utc).isoformat()
+        if _timestamp_value(activity) is None:
+            raise ValueError("World activity must be an ISO timestamp.")
+        with FileLock(self.root / "locks" / "worlds.lock", timeout=30):
+            try:
+                world = self.get(world_id)
+            except FileNotFoundError:
+                return None
+            world["last_used_at"] = latest_timestamp(world.get("last_used_at"), activity)
+            atomic_json(self.directory(world_id) / "world.json", world)
+            return world
 
     def create(self, world_id: str, name: str) -> dict:
         with FileLock(self.root / "locks" / "worlds.lock", timeout=30):
@@ -82,13 +120,16 @@ class WorldStore:
     def settings(self) -> dict:
         path = self.root / "settings.json"
         if not path.exists():
-            return {"background_speed": "normal", "world_layout": "shelf"}
-        return {"background_speed": "normal", "world_layout": "shelf", **json.loads(path.read_text(encoding="utf-8"))}
+            return {"background_speed": "normal", "world_layout": "shelf", "chat_appearance": "focused"}
+        return {"background_speed": "normal", "world_layout": "shelf", "chat_appearance": "focused",
+                **json.loads(path.read_text(encoding="utf-8"))}
 
-    def save_settings(self, speed: str, layout: str | None = None) -> dict:
+    def save_settings(self, speed: str, layout: str | None = None, chat_appearance: str | None = None) -> dict:
         with FileLock(self.root / "locks" / "settings.lock", timeout=30):
             value = {**self.settings(), "background_speed": speed}
             if layout is not None:
                 value["world_layout"] = layout
+            if chat_appearance is not None:
+                value["chat_appearance"] = chat_appearance
             atomic_json(self.root / "settings.json", value)
             return value

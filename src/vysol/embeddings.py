@@ -32,6 +32,13 @@ class GeminiEmbeddings:
         self.client = client
 
     def embed(self, text: str, secret: str, stop: threading.Event, logger) -> list[float]:
+        return self._embed(f"title: none | text: {text}", secret, stop, logger)
+
+    def embed_query(self, text: str, secret: str, stop: threading.Event, logger) -> list[float]:
+        """Embed a retrieval query with Gemini Embedding 2's asymmetric query prefix."""
+        return self._embed(f"task: search result | query: {text}", secret, stop, logger)
+
+    def _embed(self, content: str, secret: str, stop: threading.Event, logger) -> list[float]:
         client = self.client or httpx.Client(timeout=httpx.Timeout(45, connect=10))
         try:
             for attempt in range(4):
@@ -42,7 +49,7 @@ class GeminiEmbeddings:
                     response = client.post(
                         f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:embedContent",
                         headers={"x-goog-api-key": secret},
-                        json={"content": {"parts": [{"text": f"title: none | text: {text}"}]},
+                        json={"content": {"parts": [{"text": content}]},
                               "embedContentConfig": {"outputDimensionality": DIMENSIONS,
                                                      "autoTruncate": False}},
                     )

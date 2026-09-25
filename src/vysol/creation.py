@@ -224,6 +224,11 @@ class Creation:
                     raise OSError("Invalid creation path.")
                 shutil.rmtree(folder)
                 with self.store.connect() as db:
+                    has_chronicles = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chronicles'"
+                    ).fetchone()
+                    if has_chronicles:
+                        db.execute("DELETE FROM chronicles WHERE world_id=?", (attempt_id,))
                     db.execute("DELETE FROM attempts WHERE id=?", (attempt_id,))
         finally:
             with self.guard:

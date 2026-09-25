@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
 from .creation import BUSY, Creation
+from .chronicles import CHAT_MODELS
 from .creation_store import CreationConflict
 from .embeddings import MODEL, MODELS
 
@@ -140,7 +141,7 @@ def creation_routes(creation: Creation):
     @router.get("/providers")
     def providers():
         return {"keys": creation.store.keys(), "connections": creation.store.connections(),
-                "models": MODELS, "defaults": creation.store.defaults()}
+                "models": MODELS, "chat_models": CHAT_MODELS, "defaults": creation.store.defaults()}
 
     @router.post("/providers/connections")
     def add_provider_connection(value: ProviderConnection):

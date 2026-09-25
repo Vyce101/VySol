@@ -46,7 +46,7 @@ def test_world_storage_failure_is_user_readable(client, monkeypatch):
     assert 'private' not in response.text
 
 
-def test_startup_prefers_last_used_world_over_newer_unused_world(client, tmp_path):
+def test_world_list_uses_latest_activity_or_creation_time(client, tmp_path):
     from vysol.worlds import atomic_json
     used = new_world(client, 'Previously used')
     new_world(client, 'New but unused')
@@ -54,6 +54,8 @@ def test_startup_prefers_last_used_world_over_newer_unused_world(client, tmp_pat
     metadata = store.get(used['id'])
     metadata['last_used_at'] = '2020-01-01T00:00:00+00:00'
     atomic_json(store.directory(used['id']) / 'world.json', metadata)
+    assert client.get('/api/worlds').json()[0]['name'] == 'New but unused'
+    assert client.post(f"/api/worlds/{used['id']}/activity").status_code == 200
     assert client.get('/api/worlds').json()[0]['id'] == used['id']
 
 
@@ -84,7 +86,9 @@ def test_world_list_and_detail_include_book_counts_and_legacy_processing_fallbac
 
 def test_layout_defaults_persistence_and_legacy_settings(client, tmp_path):
     from vysol.worlds import atomic_json
-    assert client.get('/api/settings').json() == {'background_speed': 'normal', 'world_layout': 'shelf'}
+    assert client.get('/api/settings').json() == {
+        'background_speed': 'normal', 'world_layout': 'shelf', 'chat_appearance': 'focused',
+    }
     atomic_json(tmp_path / 'settings.json', {'background_speed': 'slow'})
     assert client.get('/api/settings').json()['world_layout'] == 'shelf'
     assert client.put('/api/settings', json={'background_speed': 'normal', 'world_layout': 'grid'}).status_code == 200
@@ -92,6 +96,9 @@ def test_layout_defaults_persistence_and_legacy_settings(client, tmp_path):
     client.put('/api/settings', json={'background_speed': 'fast'})
     assert WorldStore(tmp_path).settings()['world_layout'] == 'grid'
     assert client.put('/api/settings', json={'background_speed': 'normal', 'world_layout': 'invalid'}).status_code == 422
+    assert client.put('/api/settings', json={'background_speed': 'normal', 'chat_appearance': 'full_overlay'}).status_code == 200
+    assert WorldStore(tmp_path).settings()['chat_appearance'] == 'full_overlay'
+    assert client.put('/api/settings', json={'background_speed': 'normal', 'chat_appearance': 'invalid'}).status_code == 422
 
 
 def test_old_creation_routes_cannot_bypass_processing(client):
