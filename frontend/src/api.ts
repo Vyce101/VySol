@@ -78,8 +78,59 @@ export type Providers = {
   keys: ProviderKey[];
   connections?: ProviderConnection[];
   models: { id: string; name: string; provider: string }[];
+  chat_models?: ChatModel[];
   defaults: { model: string; key_id: string };
 };
+
+export type ChatModel = {
+  id: string;
+  name: string;
+  provider: string;
+  series: "Flash" | "Flash Lite" | "Gemma" | string;
+};
+
+export type Chronicle = {
+  id: string;
+  world_id: string;
+  title: string;
+  created_at: string;
+  last_message_at: string | null;
+  message_count: number;
+  preview: string;
+  not_started: boolean;
+};
+
+export type ChronicleMessage = {
+  id: string;
+  request_id?: string;
+  streaming_speed?: number;
+  role: "user" | "assistant";
+  text: string;
+  thinking: string | null;
+  created_at: string;
+  status: "complete" | "partial" | "error" | "stopped" | "streaming";
+};
+
+export type ChronicleSettings = {
+  model: string;
+  key_id: string;
+  chunk_count: number;
+  minimum_similarity: number;
+  chunk_overlap: number;
+  streaming_speed: number;
+  chat_history_prefix: string;
+  chat_history_suffix: string;
+  rag_chunks_prefix: string;
+  rag_chunks_suffix: string;
+  sections: { ai: boolean; retrieval: boolean; response: boolean; section_tags: boolean };
+};
+
+export type ChronicleStreamEvent =
+  | { type: "user_message"; message: ChronicleMessage }
+  | { type: "thinking_delta"; text: string }
+  | { type: "answer_delta"; text: string }
+  | { type: "completed"; message: ChronicleMessage | null }
+  | { type: "error"; message: string; code?: string; assistant?: ChronicleMessage | null };
 
 export function bookCountLabel(count: number): string {
   return `${count} ${count === 1 ? "Book" : "Books"}`;
@@ -113,7 +164,81 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
         : body.message || "Something went wrong. Please try again.",
     );
   }
+  if (response.status === 204) return undefined as T;
   return response.json();
+}
+
+export async function streamChronicleMessage(
+  chronicleId: string,
+  requestId: string,
+  text: string,
+  onEvent: (event: ChronicleStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(
+    `/api/chronicles/${encodeURIComponent(chronicleId)}/messages/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ request_id: requestId, text }),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(
+      typeof body.detail === "string"
+        ? body.detail
+        : body.message || "Your message could not be sent. Please try again.",
+    );
+  }
+  if (!response.body) throw new Error("The response stream is unavailable.");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const dispatch = (frame: string) => {
+    let name = "message";
+    const data: string[] = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) name = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (!data.length) return;
+    const payload = JSON.parse(data.join("\n")) as Record<string, unknown>;
+    const eventPayload = payload[name] && typeof payload[name] === "object"
+      ? payload[name] as Record<string, unknown>
+      : payload;
+    if (name === "user_message" && eventPayload.message) {
+      onEvent({ type: name, message: eventPayload.message as ChronicleMessage });
+    } else if ((name === "thinking_delta" || name === "answer_delta") && typeof eventPayload.text === "string") {
+      onEvent({ type: name, text: eventPayload.text });
+    } else if (name === "completed" && Object.prototype.hasOwnProperty.call(eventPayload, "message")) {
+      onEvent({ type: name, message: eventPayload.message as ChronicleMessage | null });
+    } else if (name === "error") {
+      onEvent({
+        type: name,
+        message: typeof eventPayload.message === "string" ? eventPayload.message : "Response generation failed.",
+        code: typeof eventPayload.code === "string" ? eventPayload.code : undefined,
+        assistant: (eventPayload.assistant ?? null) as ChronicleMessage | null,
+      });
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let separator = buffer.search(/\r?\n\r?\n/);
+    while (separator >= 0) {
+      const frame = buffer.slice(0, separator);
+      const match = buffer.slice(separator).match(/^\r?\n\r?\n/);
+      buffer = buffer.slice(separator + (match?.[0].length ?? 2));
+      dispatch(frame);
+      separator = buffer.search(/\r?\n\r?\n/);
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) dispatch(buffer);
 }
 
 export const jsonRequest = (method: string, body: unknown): RequestInit => ({
