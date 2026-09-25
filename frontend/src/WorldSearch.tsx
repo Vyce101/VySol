@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { MagnifyingGlass } from "@phosphor-icons/react";
 import type { PreviewWorld } from "./collectionPreview";
+import { rankWorlds } from "./chronicleSearch";
+
+const MINIMUM_SUGGESTION_QUERY_LENGTH = 1;
 
 export function WorldSearch({
   worlds,
@@ -17,17 +20,17 @@ export function WorldSearch({
   const [active, setActive] = useState(-1);
   const input = useRef<HTMLInputElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const matches = worlds.filter((world) =>
-    world.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
+  const usefulQueryLength = Array.from(query.trim().replace(/\s/g, "")).length;
+  const hasUsefulQuery = usefulQueryLength >= MINIMUM_SUGGESTION_QUERY_LENGTH;
+  const matches = rankWorlds(worlds, query);
   useEffect(
     () => () => {
       if (closeTimer.current) clearTimeout(closeTimer.current);
     },
     [],
   );
-  const expanded = open && !disabled && !!query.trim();
-  const mounted = (open || closing) && !disabled && !!query.trim();
+  const expanded = open && !disabled && hasUsefulQuery;
+  const mounted = (open || closing) && !disabled && hasUsefulQuery;
   function showDropdown() {
     if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = null;
@@ -88,6 +91,7 @@ export function WorldSearch({
               return;
             }
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              if (!hasUsefulQuery) return;
               event.preventDefault();
               setOpen(true);
               const next =

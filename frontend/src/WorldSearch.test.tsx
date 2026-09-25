@@ -17,13 +17,23 @@ test("search keeps its keyboard and listbox behavior when a world is selected", 
   const onSelect = vi.fn();
   render(<WorldSearch worlds={worlds} disabled={false} onSelect={onSelect} />);
   const search = screen.getByRole("combobox", { name: "Search worlds" });
-  fireEvent.change(search, { target: { value: "moon" } });
+  fireEvent.change(search, { target: { value: "m" } });
   expect(screen.getByRole("listbox", { name: "Matching worlds" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Moon Harbor" })).toBeTruthy();
   fireEvent.keyDown(search, { key: "ArrowDown" });
   expect(screen.getByRole("option", { name: "Moon Harbor" }).getAttribute("aria-selected")).toBe("true");
   fireEvent.keyDown(search, { key: "Enter" });
   expect(onSelect).toHaveBeenCalledWith(worlds[1]);
   expect(screen.queryByRole("listbox")).toBeNull();
+});
+
+test("one-letter searches show name matches", () => {
+  render(<WorldSearch worlds={worlds} disabled={false} onSelect={() => {}} />);
+  const search = screen.getByRole("combobox", { name: "Search worlds" });
+  fireEvent.change(search, { target: { value: "f" } });
+  expect(search.getAttribute("aria-expanded")).toBe("true");
+  expect(screen.getByRole("option", { name: "Frostwake" })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "Moon Harbor" })).toBeNull();
 });
 
 test("search dropdown closes with its short exit animation", () => {
