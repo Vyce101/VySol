@@ -62,8 +62,35 @@ function readyDetail(world: World): WorldDetail {
       max_chunk_size: 8000,
       boundary_search_distance: 1000,
     },
+    embedding_profile: {
+      id: "profile-google",
+      name: "Gemini Embedding 2",
+      provider: "google",
+      model: "gemini-embedding-2",
+      dimensions: 3072,
+      max_input_tokens: 8192,
+      key_id: "key",
+    },
   };
 }
+
+const embeddingProfiles = {
+  profiles: [{
+    id: "profile-google",
+    name: "Gemini Embedding 2",
+    key_id: "key",
+    provider: "google",
+    model: "gemini-embedding-2",
+    model_name: "Gemini Embedding 2",
+    dimensions: 3072,
+    max_input_tokens: 8192,
+    is_default: true,
+    usable: true,
+    credential_name: "World Sim 1",
+  }],
+  default_profile_id: "profile-google",
+  last_used_profile_id: null,
+};
 
 function response(payload: unknown) {
   return { ok: true, json: async () => payload } as Response;
@@ -85,6 +112,7 @@ beforeEach(() => {
           models: [{ id: "gemini-embedding-2", name: "Gemini Embedding 2", provider: "google" }],
           defaults: { model: "gemini-embedding-2", key_id: "key" },
         });
+      if (path === "/embedding-profiles") return response(embeddingProfiles);
       if (path === "/settings")
         return response({ background_speed: "normal", world_layout: "shelf", chat_appearance: "focused" });
       if (path === "/chronicle-settings")
@@ -214,13 +242,16 @@ test("home cards show book counts and Ready, and saved cards open Overview", asy
   fireEvent.click(screen.getByRole("button", { name: "World Details" }));
   expect(screen.getByText("8000 characters")).toBeTruthy();
   expect(screen.getByText("1000 characters")).toBeTruthy();
-  expect(within(overview).getByText("Gemini Embedding 2", { selector: "dd" })).toBeTruthy();
+  expect(within(overview).getByText("Google · gemini-embedding-2", { selector: "dd" })).toBeTruthy();
   expect(vi.mocked(fetch)).not.toHaveBeenCalledWith(
     expect.stringContaining("/worlds/one/activity"),
     expect.objectContaining({ method: "POST" }),
   );
   expect([...overview.querySelectorAll(".world-details-grid dt")].map((node) => node.textContent)).toEqual([
+    "Embedding Profile",
     "Embedding Model",
+    "Dimensions",
+    "Maximum Input",
     "Maximum Chunk Size",
     "Boundary Search Distance",
   ]);
@@ -236,8 +267,8 @@ test("Create World is a full page with breadcrumbs and its draft survives Settin
   expect(screen.queryByRole("combobox", { name: "Search worlds" })).toBeNull();
   expect(screen.getByRole("button", { name: "Worlds" })).toBeTruthy();
   fireEvent.change(screen.getByLabelText("World Name"), { target: { value: "Draft World" } });
-  fireEvent.click(await screen.findByRole("button", { name: "Manage API Connections" }));
-  expect(await screen.findByRole("heading", { name: "AI Connections" })).toBeTruthy();
+  fireEvent.click(await screen.findByRole("button", { name: "Manage AI Connections" }));
+  expect(await screen.findByRole("heading", { name: "Providers" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Worlds" })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "Search worlds" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Close Settings" }));

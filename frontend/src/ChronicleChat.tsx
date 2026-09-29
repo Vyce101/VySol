@@ -1,6 +1,6 @@
 import { ArrowRight, CaretRight, SlidersHorizontal, Stop } from "@phosphor-icons/react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, jsonRequest, streamChronicleMessage, type ChatAppearance, type ChronicleMessage, type ChronicleSettings, type ChronicleStreamEvent } from "./api";
+import { api, jsonRequest, streamChronicleMessage, type ChatAppearance, type ChronicleMessage, type ChronicleSettings, type ChronicleStreamEvent, type WorldEmbeddingProfile } from "./api";
 import { ChronicleMarkdown } from "./ChronicleMarkdown";
 import { ChronicleSettingsDrawer } from "./ChronicleSettingsDrawer";
 
@@ -10,11 +10,14 @@ type ChronicleChatProps = {
   visible: boolean;
   worldId: string;
   worldName: string;
+  embeddingProfile?: WorldEmbeddingProfile | null;
   chronicleId: string;
   chronicleName: string;
   appearance?: ChatAppearance;
+  modelPreview?: boolean;
   visitKey?: number;
   onChronicleChanged?: (title: string) => void;
+  onManageEmbedding?: () => void;
 };
 
 function requestId() {
@@ -27,9 +30,10 @@ function requestId() {
     });
 }
 
-export function ChronicleChat({ visible, worldId, worldName, chronicleId, chronicleName, appearance = "focused", visitKey = 0, onChronicleChanged }: ChronicleChatProps) {
+export function ChronicleChat({ visible, worldId, worldName, embeddingProfile = null, chronicleId, chronicleName, appearance = "focused", modelPreview = false, visitKey = 0, onChronicleChanged, onManageEmbedding }: ChronicleChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [settings, setSettings] = useState<ChronicleSettings | null>(null);
+  const [previewSettings, setPreviewSettings] = useState<ChronicleSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingError, setLoadingError] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -318,6 +322,10 @@ export function ChronicleChat({ visible, worldId, worldName, chronicleId, chroni
   async function sendMessage() {
     const text = draft.trim();
     if (!text || generationRef.current || hasRemoteGeneration) return;
+    if (modelPreview) {
+      setStreamError("Model Picker Preview is on. Turn it off in Developer settings before sending.");
+      return;
+    }
     if (!settings?.key_id) {
       setStreamError("Choose an API connection in Settings before sending a message.");
       return;
@@ -393,8 +401,11 @@ export function ChronicleChat({ visible, worldId, worldName, chronicleId, chroni
     }
   }
 
-  const onSettingsChange = useCallback((next: ChronicleSettings) => setSettings(next), []);
-  const canSend = draft.trim().length > 0 && !generation && !hasRemoteGeneration;
+  const onSettingsChange = useCallback((next: ChronicleSettings) => {
+    if (modelPreview) setPreviewSettings(next);
+    else setSettings(next);
+  }, [modelPreview]);
+  const canSend = draft.trim().length > 0 && !generation && !hasRemoteGeneration && !modelPreview;
 
   return (
     <section className={`view chronicle-chat-view ${appearance === "full_overlay" ? "is-full-overlay" : ""} ${visible ? "is-visible" : ""}`} aria-hidden={!visible} inert={!visible}>
@@ -438,7 +449,7 @@ export function ChronicleChat({ visible, worldId, worldName, chronicleId, chroni
           </div>
         </div>
       </div>
-      <ChronicleSettingsDrawer open={settingsOpen} settings={settings} onSettingsChange={onSettingsChange} saveState={saveState} saveError={settingsError} onClose={() => setSettingsOpen(false)} />
+      <ChronicleSettingsDrawer open={settingsOpen} settings={modelPreview ? previewSettings ?? settings : settings} onSettingsChange={onSettingsChange} modelPreview={modelPreview} saveState={modelPreview ? "idle" : saveState} saveError={modelPreview ? "" : settingsError} embeddingProfile={embeddingProfile} onManageEmbedding={() => { setSettingsOpen(false); onManageEmbedding?.(); }} onClose={() => setSettingsOpen(false)} />
     </section>
   );
 }

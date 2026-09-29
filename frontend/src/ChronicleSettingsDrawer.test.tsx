@@ -234,6 +234,280 @@ test("closes the model menu when a different setting is clicked and hides save c
   expect(screen.queryByText("Changes saved")).toBeNull();
 });
 
+test("shows capability supported output and reasoning controls for a selected model", async () => {
+  const capabilities = {
+    chat: true, embeddings: false, input_limit: 100000, output_limit: 16377,
+    reasoning_levels: ["low", "medium", "high"], reasoning_default: "medium", reasoning_off: true,
+    thinking_levels: null, thinking_default: null, thinking_off: null, embedding: null,
+  };
+  const model = { id: "gpt-5-mini", name: "GPT-5 mini", provider: "openai", series: "GPT", tested: true, capabilities };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "openai-key", name: "Work", provider: "openai", connection_id: "openai", models: [model] }],
+    connections: [{ id: "openai", provider: "openai", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: model.id, key_id: "openai-key" },
+  } as never);
+  const onSettingsChange = vi.fn();
+  const settings: ChronicleSettings = {
+    model: model.id, key_id: "openai-key", output_limit: "max", reasoning: "auto",
+    chunk_count: 3, minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  expect(await screen.findByLabelText("Output Limit")).toBeTruthy();
+  expect(screen.getByLabelText("Reasoning")).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Off" })).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Reasoning"), { target: { value: "high" } });
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ reasoning: "high" }));
+});
+
+test("does not expose undocumented thinking levels for Gemini 2.5 Flash", async () => {
+  const capabilities = {
+    chat: true, embeddings: false, input_limit: 100000, output_limit: 8192,
+    reasoning_levels: null, reasoning_default: null, reasoning_off: null,
+    thinking_levels: [], thinking_default: "auto", thinking_off: false, embedding: null,
+  };
+  const model = { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "google", series: "Flash", tested: true, capabilities };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "google-key", name: "Work", provider: "google", connection_id: "google", models: [model] }],
+    connections: [{ id: "google", provider: "google", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: model.id, key_id: "google-key" },
+  } as never);
+  const settings: ChronicleSettings = {
+    model: model.id, key_id: "google-key", output_limit: "max", reasoning: "auto",
+    chunk_count: 3, minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={vi.fn()} onClose={vi.fn()} />);
+  expect(await screen.findByText("Gemini 2.5 Flash")).toBeTruthy();
+  expect(screen.queryByLabelText("Thinking Level")).toBeNull();
+  expect(screen.queryByLabelText("Reasoning")).toBeNull();
+});
+
+test("shows Gemini 2.5 Pro numeric Thinking Budget with a dynamic default", async () => {
+  const model = {
+    id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "google", series: "Pro", tested: true,
+    capabilities: {
+      chat: true, input_limit: 1_048_576, output_limit: 65_536,
+      thinking_levels: [], thinking_default: "dynamic", thinking_off: false,
+      thinking_budget: { minimum: 128, maximum: 32_768, default: "dynamic" },
+    },
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "google-key", name: "Work", provider: "google", connection_id: "google", models: [model] }],
+    connections: [{ id: "google", provider: "google", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: model.id, key_id: "google-key" },
+  } as never);
+  const onSettingsChange = vi.fn();
+  const settings: ChronicleSettings = {
+    model: model.id, key_id: "google-key", output_limit: "max", reasoning: "high",
+    chunk_count: 3, minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  const { rerender } = render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  const budget = await screen.findByLabelText("Thinking Budget") as HTMLInputElement;
+  expect(budget.value).toBe("");
+  expect(budget.placeholder).toBe("Dynamic (default)");
+  expect(budget.min).toBe("128");
+  expect(budget.max).toBe("32768");
+  expect(screen.queryByLabelText("Thinking Level")).toBeNull();
+  expect(screen.queryByLabelText("Reasoning")).toBeNull();
+  expect(screen.getByText(/Leave blank to use Google’s dynamic default/)).toBeTruthy();
+  fireEvent.change(budget, { target: { value: "128" } });
+  fireEvent.blur(budget);
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ thinking_budget: 128, reasoning: "high" }));
+
+  rerender(<ChronicleSettingsDrawer open settings={{ ...settings, thinking_budget: 128 }} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  const dynamicBudget = await screen.findByLabelText("Thinking Budget");
+  fireEvent.change(dynamicBudget, { target: { value: "" } });
+  fireEvent.blur(dynamicBudget);
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ thinking_budget: null, reasoning: "high" }));
+});
+
+test.each([
+  ["gemini-2.5-flash", 0, 24_576, "dynamic", "Dynamic (default)"],
+  ["gemini-2.5-flash-lite", 512, 24_576, "off", "Off (default)"],
+] as const)("shows the documented numeric Thinking Budget for %s", async (id, minimum, maximum, defaultValue, placeholder) => {
+  const model = {
+    id, name: id, provider: "google", tested: true,
+    capabilities: {
+      chat: true, output_limit: 65_536, thinking_levels: [], thinking_default: defaultValue,
+      thinking_off: true, thinking_budget: { minimum, maximum, default: defaultValue, allow_zero: true },
+    },
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "google-key", name: "Work", provider: "google", connection_id: "google", models: [model] }],
+    connections: [{ id: "google", provider: "google", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: id, key_id: "google-key" },
+  } as never);
+  const onSettingsChange = vi.fn();
+  const settings: ChronicleSettings = {
+    model: id, key_id: "google-key", output_limit: "max", reasoning: "auto",
+    chunk_count: 3, minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  const budget = await screen.findByLabelText("Thinking Budget") as HTMLInputElement;
+  expect(budget.min).toBe("0");
+  expect(budget.max).toBe(String(maximum));
+  expect(budget.placeholder).toBe(placeholder);
+  fireEvent.change(budget, { target: { value: "0" } });
+  fireEvent.blur(budget);
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ thinking_budget: 0 }));
+});
+
+test("does not show a Reasoning selector for non-reasoning models", async () => {
+  const model = {
+    id: "gpt-4.1", name: "GPT-4.1", provider: "openai", series: "GPT", tested: true,
+    capabilities: { chat: true, output_limit: 32_768, reasoning_levels: [], reasoning_default: null, reasoning_off: false },
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "openai-key", name: "Work", provider: "openai", connection_id: "openai", models: [model] }],
+    connections: [{ id: "openai", provider: "openai", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: model.id, key_id: "openai-key" },
+  } as never);
+  const settings: ChronicleSettings = {
+    model: model.id, key_id: "openai-key", reasoning: "high", chunk_count: 3,
+    minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={vi.fn()} onClose={vi.fn()} />);
+  expect(await screen.findByText("GPT-4.1")).toBeTruthy();
+  expect(screen.queryByLabelText("Reasoning")).toBeNull();
+  expect(screen.queryByLabelText("Thinking Level")).toBeNull();
+  expect(screen.queryByText(/does not support a Reasoning control/)).toBeNull();
+});
+
+test("maps a wire none level to Off and keeps Provider Default for unknown output limits", async () => {
+  const capabilities = {
+    chat: true, embeddings: false, input_limit: 100000, output_limit: null,
+    reasoning_levels: ["none", "low", "medium", "high"], reasoning_default: "none", reasoning_off: true,
+    thinking_levels: null, thinking_default: null, thinking_off: null, embedding: null,
+  };
+  const model = { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "deepseek", series: "V4", tested: true, capabilities };
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "deepseek-key", name: "Work", provider: "deepseek", connection_id: "deepseek", models: [model] }],
+    connections: [{ id: "deepseek", provider: "deepseek", enabled: true }],
+    models: [model], chat_models: [model], defaults: { model: model.id, key_id: "deepseek-key" },
+  } as never);
+  const settings: ChronicleSettings = {
+    model: model.id, key_id: "deepseek-key", output_limit: 2048, reasoning: "none",
+    chunk_count: 3, minimum_similarity: 0.6, chunk_overlap: 150, streaming_speed: 50,
+    chat_history_prefix: "<chat_history>", chat_history_suffix: "</chat_history>",
+    rag_chunks_prefix: "<rag_chunks>", rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={vi.fn()} onClose={vi.fn()} />);
+  expect(await screen.findByText("DeepSeek V4 Pro")).toBeTruthy();
+  expect(screen.getByText("Output Limit")).toBeTruthy();
+  const output = await screen.findByLabelText("Output Limit");
+  expect((output as HTMLInputElement).value).toBe("");
+  expect((output as HTMLInputElement).disabled).toBe(true);
+  expect((output as HTMLInputElement).placeholder).toBe("Provider Default");
+  expect(screen.getByText(/Provider Default is used for this model/)).toBeTruthy();
+
+  const reasoning = screen.getByLabelText("Reasoning");
+  expect((reasoning as HTMLSelectElement).value).toBe("off");
+  expect(within(reasoning).getByRole("option", { name: "Model Default (off)" })).toBeTruthy();
+  expect(within(reasoning).getByRole("option", { name: "Off" })).toBeTruthy();
+  expect(within(reasoning).queryByRole("option", { name: "None" })).toBeNull();
+});
+
+test("Developer preview opens documented models without a key and shows the maximum output in an input", async () => {
+  const model = {
+    id: "gpt-6-astra", name: "GPT-6 Astra", provider: "openai", series: "GPT", tested: true,
+    capabilities: { chat: true, output_limit: 128000, reasoning_levels: ["low", "medium", "high"], reasoning_default: "high", reasoning_off: false },
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [], connections: [], models: [], chat_models: [], preview_chat_models: [model],
+    defaults: { model: "", key_id: "" },
+  } as never);
+  const onSettingsChange = vi.fn();
+  const settings: ChronicleSettings = {
+    model: "", key_id: "", output_limit: "max", chunk_count: 3, minimum_similarity: 0.6,
+    chunk_overlap: 150, streaming_speed: 50, chat_history_prefix: "<chat_history>",
+    chat_history_suffix: "</chat_history>", rag_chunks_prefix: "<rag_chunks>",
+    rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  const { rerender } = render(<ChronicleSettingsDrawer open modelPreview settings={settings} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  expect(await screen.findByText("Preview · no connection")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /Select a model/ }));
+  fireEvent.click(screen.getByRole("option", { name: "GPT-6 Astra" }));
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-6-astra", key_id: "" }));
+  rerender(<ChronicleSettingsDrawer open modelPreview settings={{ ...settings, model: "gpt-6-astra" }} onSettingsChange={onSettingsChange} onClose={vi.fn()} />);
+  const output = await screen.findByLabelText("Output Limit") as HTMLInputElement;
+  expect(output.value).toBe("128000");
+  fireEvent.change(output, { target: { value: "4096" } });
+  fireEvent.blur(output);
+  expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ output_limit: 4096 }));
+});
+
+test("searches models, formats provider names, and keeps the three most recent models at the top", async () => {
+  const chatModels = [
+    { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4 5 20251001", provider: "anthropic", series: "Haiku", tested: true, capabilities: { chat: true } },
+    { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4 5 20250929", provider: "anthropic", series: "Sonnet", tested: true, capabilities: { chat: true } },
+    { id: "claude-opus-5-5", name: "Claude Opus 5 5", provider: "anthropic", series: "Opus", tested: true, capabilities: { chat: true } },
+    { id: "claude-fable-5-1", name: "Claude Fable 5 1", provider: "anthropic", series: "Fable", tested: true, capabilities: { chat: true } },
+    { id: "claude-opus-4-5-20251101", name: "Claude Opus 4 5 20251101", provider: "anthropic", series: "Opus", tested: true, capabilities: { chat: true } },
+    { id: "gpt-5-mini", name: "Gpt-5 mini", provider: "openai", series: "GPT", tested: true, capabilities: { chat: true } },
+  ];
+  vi.mocked(api).mockResolvedValue({
+    keys: [{ id: "anthropic-key", name: "Work", provider: "anthropic", connection_id: "anthropic", models: chatModels }],
+    connections: [{ id: "anthropic", provider: "anthropic", enabled: true }],
+    models: chatModels, chat_models: chatModels, defaults: { model: "claude-fable-5-1", key_id: "anthropic-key" },
+  } as never);
+  const settings: ChronicleSettings = {
+    model: "claude-fable-5-1", key_id: "anthropic-key", chunk_count: 3, minimum_similarity: 0.6,
+    chunk_overlap: 150, streaming_speed: 50, chat_history_prefix: "<chat_history>",
+    chat_history_suffix: "</chat_history>", rag_chunks_prefix: "<rag_chunks>",
+    rag_chunks_suffix: "</rag_chunks>",
+    sections: { ai: true, retrieval: true, response: true, section_tags: true },
+  };
+  render(<ChronicleSettingsDrawer open settings={settings} onSettingsChange={vi.fn()} onClose={vi.fn()} />);
+  const modelButton = await screen.findByRole("button", { name: "Claude Fable 5.1" });
+  fireEvent.click(modelButton);
+  const listbox = screen.getByRole("listbox", { name: "Chat Model" });
+  expect([...listbox.querySelectorAll(".chronicle-model-group > span")].map((heading) => heading.textContent)).toEqual(["Anthropic", "OpenAI"]);
+  expect(within(listbox).getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    "Claude Fable 5.1",
+    "Claude Opus 5.5",
+    "Claude Opus 4.5",
+    "Claude Sonnet 4.5",
+    "Claude Haiku 4.5",
+    "GPT-5 mini",
+  ]);
+
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search models" }), { target: { value: "4.5" } });
+  expect(within(listbox).getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    "Claude Opus 4.5",
+    "Claude Sonnet 4.5",
+    "Claude Haiku 4.5",
+  ]);
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search models" }), { target: { value: "" } });
+
+  for (const modelName of ["Claude Opus 5.5", "Claude Sonnet 4.5", "Claude Haiku 4.5", "GPT-5 mini"]) {
+    fireEvent.click(screen.getByRole("option", { name: modelName }));
+    fireEvent.click(modelButton);
+  }
+  const recentListbox = screen.getByRole("listbox", { name: "Chat Model" });
+  const recentGroup = [...recentListbox.querySelectorAll(".chronicle-model-group")].find((group) => group.querySelector("span")?.textContent === "Recent");
+  expect(recentGroup).toBeTruthy();
+  expect(within(recentGroup as HTMLElement).getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    "GPT-5 mini", "Claude Haiku 4.5", "Claude Sonnet 4.5",
+  ]);
+});
+
 test("refreshes API connections whenever the drawer reopens", async () => {
   const initialProviders = {
     keys: [{ id: "key-1", name: "First Key", provider: "google", connection_id: "google" }],

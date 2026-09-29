@@ -99,6 +99,18 @@ function renderChat() {
   return render(<ChronicleChat visible worldId="world-1" worldName="Frostwake" chronicleId="chronicle-1" chronicleName="A New Chronicle" />);
 }
 
+test("Model Picker Preview blocks sending and leaves saved chat settings unchanged", async () => {
+  render(<ChronicleChat visible modelPreview worldId="world-1" worldName="Frostwake"
+    chronicleId="chronicle-1" chronicleName="A New Chronicle" />);
+  await screen.findByRole("heading", { name: "Frostwake" });
+  fireEvent.change(screen.getByRole("textbox", { name: "What do you do?" }), { target: { value: "Inspect the scene." } });
+  const send = screen.getByRole("button", { name: "Send message" });
+  expect(send.hasAttribute("disabled")).toBe(true);
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "What do you do?" }), { key: "Enter" });
+  expect(vi.mocked(streamChronicleMessage)).not.toHaveBeenCalled();
+  expect(vi.mocked(api).mock.calls.some(([path, init]) => path === "/chronicle-settings" && init?.method === "PUT")).toBe(false);
+});
+
 test("opens thinking as it arrives, freezes the send-time reveal speed, and saves shared drawer state before sending", async () => {
   renderChat();
   await screen.findByRole("heading", { name: "Frostwake" });

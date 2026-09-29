@@ -20,6 +20,8 @@ export function SettingsView({
   onSaved,
   collectionPreview,
   onCollectionPreview,
+  modelPreview = false,
+  onModelPreview = () => {},
   manageKeys,
 }: {
   visible: boolean;
@@ -29,6 +31,8 @@ export function SettingsView({
   onSaved: (settings: Settings) => void;
   collectionPreview: CollectionPreview;
   onCollectionPreview: (preview: CollectionPreview) => void;
+  modelPreview?: boolean;
+  onModelPreview?: (enabled: boolean) => void;
   manageKeys?: boolean;
   onClose?: () => void;
 }) {
@@ -85,9 +89,9 @@ export function SettingsView({
         <div className="settings-content" key={section}>
           <h2>
             {section === "general"
-              ? "General"
+              ? "Appearance"
               : section === "connections"
-                ? "AI Connections"
+                ? "Providers"
                 : "Developer"}
           </h2>
 
@@ -176,6 +180,16 @@ export function SettingsView({
 
           {section === "developer" && (
             <div className="settings-options">
+              <div className="settings-option">
+                <label htmlFor="model-picker-preview">
+                  <span className="settings-option-title">Model Picker Preview</span>
+                  <span className="settings-option-description">Show documented chat models in a Chronicle without an API key. Sending is disabled during the preview.</span>
+                </label>
+                <select id="model-picker-preview" value={modelPreview ? "on" : "off"} onChange={(event) => onModelPreview(event.target.value === "on")}>
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                </select>
+              </div>
               <div className="settings-option">
                 <label htmlFor="homepage-preview">
                   <span className="settings-option-title">Homepage Preview</span>

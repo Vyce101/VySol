@@ -67,6 +67,7 @@ export function App() {
   const [detailError, setDetailError] = useState("");
   const [collectionPreview, setCollectionPreview] =
     useState<CollectionPreview>("saved");
+  const [modelPreview, setModelPreview] = useState(false);
   const [speed, setSpeed] = useState<Speed>("normal");
   const [layout, setLayout] = useState<WorldLayout>("shelf");
   const [chatAppearance, setChatAppearance] = useState<ChatAppearance>("focused");
@@ -301,6 +302,13 @@ export function App() {
     setSettingsReturning(false);
     setPreviousView(from);
     setManageKeys(false);
+    setView("settings");
+  }
+
+  function openAIConnections(from: PageView) {
+    setSettingsReturning(false);
+    setPreviousView(from);
+    setManageKeys(true);
     setView("settings");
   }
 
@@ -650,9 +658,7 @@ export function App() {
             resumeAttemptRef.current = resume;
           }}
           onManageKeys={() => {
-            setPreviousView("create");
-            setManageKeys(true);
-            setView("settings");
+            openAIConnections("create");
           }}
         />
 
@@ -715,13 +721,16 @@ export function App() {
             visible={view === "chronicle-chat"}
             worldId={selectedWorldId}
             worldName={selectedWorld?.name ?? "World"}
+            embeddingProfile={worldDetail?.embedding_profile ?? null}
             chronicleId={selectedChronicle.id}
             appearance={chatAppearance}
+            modelPreview={modelPreview}
             chronicleName={selectedChronicle.title}
             visitKey={chronicleVisitKey}
             onChronicleChanged={(title) =>
               setSelectedChronicle((previous) => previous ? { ...previous, title } : previous)
             }
+            onManageEmbedding={() => openAIConnections("chronicle-chat")}
           />
         )}
 
@@ -737,6 +746,8 @@ export function App() {
           }}
           collectionPreview={collectionPreview}
           onCollectionPreview={changeCollection}
+          modelPreview={modelPreview}
+          onModelPreview={setModelPreview}
           manageKeys={manageKeys}
           onClose={returnFromSettings}
         />

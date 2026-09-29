@@ -23,6 +23,7 @@ afterEach(() => {
 function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> = {}) {
   const onSaved = vi.fn();
   const onCollectionPreview = vi.fn();
+  const onModelPreview = vi.fn();
   render(
     <SettingsView
       visible
@@ -32,22 +33,25 @@ function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> =
       onSaved={onSaved}
       collectionPreview="saved"
       onCollectionPreview={onCollectionPreview}
+      modelPreview={false}
+      onModelPreview={onModelPreview}
       {...overrides}
     />,
   );
-  return { onSaved, onCollectionPreview };
+  return { onSaved, onCollectionPreview, onModelPreview };
 }
 
-test("shows General controls, four Developer previews, and AI Connections without descriptions", async () => {
+test("shows Appearance controls, four Developer previews, and Providers", async () => {
   vi.mocked(api).mockImplementation(async (path) => {
     if (path === "/providers")
       return { keys: [], connections: [] } as never;
     throw new Error(`Unexpected request ${path}`);
   });
-  const { onCollectionPreview } = renderSettings();
+  const { onCollectionPreview, onModelPreview } = renderSettings();
 
   expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "General" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "General" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Appearance" })).toBeTruthy();
   expect(screen.getByLabelText(/World Display/).textContent).toContain("Shelf");
   expect(screen.getByLabelText(/Background Transition Speed/)).toBeTruthy();
   expect(screen.getByLabelText(/Chronicle Chat Appearance/)).toBeTruthy();
@@ -63,10 +67,12 @@ test("shows General controls, four Developer previews, and AI Connections withou
   ]);
   fireEvent.change(preview, { target: { value: "empty" } });
   expect(onCollectionPreview).toHaveBeenCalledWith("empty");
+  fireEvent.change(screen.getByLabelText(/Model Picker Preview/), { target: { value: "on" } });
+  expect(onModelPreview).toHaveBeenCalledWith(true);
 
   fireEvent.click(screen.getByRole("button", { name: "AI Connections" }));
   expect(
-    await screen.findByRole("heading", { name: "AI Connections" }),
+    await screen.findByRole("heading", { name: "Providers" }),
   ).toBeTruthy();
   expect(
     screen.queryByText(/Connect and manage the AI providers/),
@@ -75,6 +81,7 @@ test("shows General controls, four Developer previews, and AI Connections withou
     screen.queryByText(/Manage the AI services VySol uses/),
   ).toBeNull();
   expect(await screen.findByRole("button", { name: "Select Connections" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Embedding" })).toBeTruthy();
 });
 
 test("saves General preferences", async () => {

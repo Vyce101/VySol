@@ -596,9 +596,45 @@ export function ChronicleSettingsDrawer({ open, settings, onSettingsChange, save
                       </span>
                       {!modelPreview && selectedKey?.models_error && <small className="chronicle-model-cache-error" role="status">{selectedKey.models_error}{selectedKey.models?.length ? " Showing the last successful list." : ""}</small>}
                     </div>
-                    <div className="chronicle-setting-field is-disabled">
-                      <span>Embedding Model</span><span aria-disabled="true">Gemini Embedding 2</span>
-                    </div>
+                    {selectedModel && !isCompatible && outputLimitControl}
+                    {thinkingBudgetControl}
+                    {reasoningControl}
+                    {unknownNativeDefaults}
+                    {embeddingProfile ? (
+                      <div className="chronicle-world-embedding">
+                        <span>World Embedding Profile</span>
+                        <strong>{embeddingProfile.name}</strong>
+                        <small>{displayName(embeddingProfile.provider)} · {embeddingProfile.model}</small>
+                        <span className="chronicle-world-embedding-facts">{embeddingProfile.dimensions?.toLocaleString() ?? "Unknown"} dimensions · {embeddingProfile.max_input_tokens?.toLocaleString() ?? "Provider default"}{embeddingProfile.max_input_tokens ? " tokens" : " input"}</span>
+                        <button type="button" className="chronicle-world-embedding-link" onClick={onManageEmbedding}>Open AI Connections</button>
+                      </div>
+                    ) : (
+                      <div className="chronicle-world-embedding is-unavailable">
+                        <span>World Embedding Profile</span>
+                        <small>World details are loading.</small>
+                      </div>
+                    )}
+                    {isCompatible && (
+                      <div className={`chronicle-compatible-settings ${compatibleSettingsOpen ? "is-open" : ""}`}>
+                        <button type="button" className="chronicle-compatible-trigger" aria-expanded={compatibleSettingsOpen} aria-controls="compatible-chat-settings" onClick={() => setCompatibleSettingsOpen((value) => !value)}>
+                          <span>Advanced Settings</span><CaretRight size={15} aria-hidden="true" />
+                        </button>
+                        <div id="compatible-chat-settings" className="chronicle-compatible-panel" aria-hidden={!compatibleSettingsOpen} inert={!compatibleSettingsOpen}>
+                          <div className="chronicle-settings-fields">
+                            {selectedModel && outputLimitControl}
+                            <p className="chronicle-control-note">Some compatible servers may reject an optional setting.</p>
+                            <label className="chronicle-setting-field"><span>Temperature</span><input type="number" min={0} max={2} step={0.01} value={settings?.compatible_overrides?.temperature ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("temperature", event.target.value === "" ? undefined : Number(event.target.value))} /></label>
+                            <label className="chronicle-setting-field"><span>Top P</span><input type="number" min={0} max={1} step={0.01} value={settings?.compatible_overrides?.top_p ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("top_p", event.target.value === "" ? undefined : Number(event.target.value))} /></label>
+                            <label className="chronicle-setting-field"><span>Frequency Penalty</span><input type="number" min={-2} max={2} step={0.01} value={settings?.compatible_overrides?.frequency_penalty ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("frequency_penalty", event.target.value === "" ? undefined : Number(event.target.value))} /></label>
+                            <label className="chronicle-setting-field"><span>Presence Penalty</span><input type="number" min={-2} max={2} step={0.01} value={settings?.compatible_overrides?.presence_penalty ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("presence_penalty", event.target.value === "" ? undefined : Number(event.target.value))} /></label>
+                            <label className="chronicle-setting-field"><span>Seed</span><input type="number" step={1} value={settings?.compatible_overrides?.seed ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("seed", event.target.value === "" ? undefined : Number(event.target.value))} /></label>
+                            <label className="chronicle-setting-field"><span>Stop Sequences</span><textarea rows={2} value={Array.isArray(settings?.compatible_overrides?.stop) ? settings.compatible_overrides.stop.join("\n") : settings?.compatible_overrides?.stop ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("stop", event.target.value ? event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) : undefined)} /></label>
+                            <label className="chronicle-setting-field"><span>Reasoning Effort</span><select value={settings?.compatible_overrides?.reasoning_effort ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("reasoning_effort", event.target.value || undefined)}><option value="">Provider Default</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+                            <label className="chronicle-setting-field"><span>Verbosity</span><select value={settings?.compatible_overrides?.verbosity ?? ""} disabled={!settings} onChange={(event) => updateCompatibleOverride("verbosity", event.target.value || undefined)}><option value="">Provider Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
                 {section === "retrieval" && <div className="chronicle-settings-fields">
