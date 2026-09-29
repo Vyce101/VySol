@@ -10,7 +10,7 @@ export type Speed = "fast" | "normal" | "slow";
 export type WorldLayout = "shelf" | "grid";
 export type ChatAppearance = "focused" | "full_overlay";
 export type Settings = { background_speed: Speed; world_layout: WorldLayout; chat_appearance: ChatAppearance };
-export type ProcessingConfig = { model: string; size: number; search: number };
+export type ProcessingConfig = { model?: string; size: number; search: number };
 export type CreationBook = {
   id: string;
   filename: string;
@@ -32,7 +32,8 @@ export type CreationAttempt = {
   phase: string;
   message: string;
   config: ProcessingConfig;
-  key_id: string;
+  key_id?: string | null;
+  embedding_profile_id?: string | null;
   books: CreationBook[];
   books_done: number;
   chunks_total: number;
@@ -53,42 +54,100 @@ export type WorldProgress = {
   books_total: number;
 };
 export type WorldProcessing = {
-  model: string | null;
+  model?: string | null;
   max_chunk_size: number | null;
   boundary_search_distance: number | null;
 };
+export type EmbeddingProfile = {
+  id: string;
+  name: string;
+  key_id: string;
+  provider: string;
+  model: string;
+  model_name: string;
+  dimensions: number | null;
+  input_format_version?: number;
+  max_input_tokens: number | null;
+  is_default: boolean;
+  usable: boolean;
+  credential_name: string;
+  base_url?: string | null;
+  world_count?: number;
+  in_use?: boolean;
+  worlds?: { id: string; name: string }[];
+};
+export type EmbeddingProfileList = {
+  profiles: EmbeddingProfile[];
+  default_profile_id: string | null;
+  last_used_profile_id: string | null;
+};
+export type WorldEmbeddingProfile = Pick<
+  EmbeddingProfile,
+  "id" | "name" | "provider" | "model" | "dimensions" | "max_input_tokens" | "key_id" | "input_format_version"
+> & { base_url?: string | null };
 export type WorldDetail = World & {
   sources_locked: boolean;
   state: "complete" | "running" | "pausing" | "paused" | "failed";
   books: WorldBook[];
   progress: WorldProgress;
   processing: WorldProcessing | null;
+  embedding_profile?: WorldEmbeddingProfile | null;
 };
 export type ProviderKey = {
   id: string;
   name: string;
   provider: string;
   connection_id?: string;
+  base_url?: string | null;
+  models?: ProviderModel[];
+  models_updated_at?: string | null;
+  models_error?: string | null;
 };
 export type ProviderConnection = {
   id: string;
   provider: string;
   enabled: boolean;
+  credentials?: ProviderKey[];
+  next_sequence?: number;
+};
+export type ModelCapabilities = {
+  chat: boolean | null;
+  embeddings: boolean | null;
+  input_limit: number | null;
+  output_limit: number | null;
+  reasoning_levels: string[] | null;
+  reasoning_default: string | null;
+  reasoning_off: boolean | null;
+  thinking_levels: string[] | null;
+  thinking_default: string | null;
+  thinking_off: boolean | null;
+  thinking_budget?: { minimum: number; maximum: number; default: string; allow_zero?: boolean } | null;
+  embedding: {
+    dimensions: number[] | null;
+    max_dimensions: number | null;
+    input_limit: number | null;
+  } | null;
+};
+export type ProviderModel = {
+  id: string;
+  name: string;
+  provider: string;
+  series?: string;
+  tested?: boolean;
+  capabilities?: ModelCapabilities | null;
+  capability_source?: string | null;
+  api?: string | null;
 };
 export type Providers = {
   keys: ProviderKey[];
   connections?: ProviderConnection[];
-  models: { id: string; name: string; provider: string }[];
-  chat_models?: ChatModel[];
-  defaults: { model: string; key_id: string };
+  models: ProviderModel[];
+  chat_models?: ProviderModel[];
+  preview_chat_models?: ProviderModel[];
+  defaults: { model: string; key_id: string; embedding_profile_id?: string | null };
 };
 
-export type ChatModel = {
-  id: string;
-  name: string;
-  provider: string;
-  series: "Flash" | "Flash Lite" | "Gemma" | string;
-};
+export type ChatModel = ProviderModel & { series: string };
 
 export type Chronicle = {
   id: string;
@@ -114,7 +173,20 @@ export type ChronicleMessage = {
 
 export type ChronicleSettings = {
   model: string;
-  key_id: string;
+  key_id?: string;
+  output_limit?: "max" | number;
+  reasoning?: string;
+  thinking_budget?: number | null;
+  compatible_overrides?: {
+    temperature?: number;
+    top_p?: number;
+    frequency_penalty?: number;
+    presence_penalty?: number;
+    seed?: number;
+    stop?: string | string[];
+    reasoning_effort?: string;
+    verbosity?: string;
+  };
   chunk_count: number;
   minimum_similarity: number;
   chunk_overlap: number;
