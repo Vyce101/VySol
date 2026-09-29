@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import httpx
 
 from vysol.embeddings import DIMENSIONS
+from vysol.provider_profiles import profile_for
 from vysol.server import create_app
 
 
@@ -24,7 +25,12 @@ class MemoryVault:
 
 
 class RetrievalEmbeddings:
+    def __init__(self):
+        self.document_secrets = []
+        self.query_secrets = []
+
     def embed(self, text, secret, stop, logger):
+        self.document_secrets.append(secret)
         values = [0.0] * DIMENSIONS
         if text == "cccc":
             values[1] = 1
@@ -33,6 +39,7 @@ class RetrievalEmbeddings:
         return values
 
     def embed_query(self, text, secret, stop, logger):
+        self.query_secrets.append(secret)
         values = [0.0] * DIMENSIONS
         values[1] = 1
         return values
@@ -133,6 +140,8 @@ def add_key_and_world_setting(client):
     assert client.put(f"/api/providers/keys/{key_id}", json={
         "name": "Chronicle key", "secret": "chat-secret",
     }).status_code == 200
+    client.app.state.creation.store.save_catalog(
+        key_id, [profile_for("google", "gemini-3.8-flash", {"outputTokenLimit": 65536})])
     settings = client.get("/api/chronicle-settings").json()
     settings["key_id"] = key_id
     assert client.put("/api/chronicle-settings", json=settings).status_code == 200
@@ -203,6 +212,8 @@ def test_chat_retrieves_world_chunks_with_source_character_overlap_streams_and_r
         assert "<rag_chunks>" in payload["input"] and "</rag_chunks>" in payload["input"]
         assert "Source.txt | chars 0-12" in payload["input"]
         assert "aaaabbbbcccc" in payload["input"]
+        assert client.app.state.creation.embedder.query_secrets == ["test-secret"]
+        assert client.app.state.creation.embedder.document_secrets
 
         retry = client.post(f"/api/chronicles/{chronicle['id']}/messages/stream",
                             json={"request_id": request_id, "text": "What happened?"})

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .chronicles import CHAT_MODEL_IDS, ChronicleService
+from .chronicles import ChronicleService
 
 
 class NewMessage(BaseModel):
@@ -36,6 +36,10 @@ class RenameChronicle(BaseModel):
 class ChronicleSettings(BaseModel):
     model: str = "gemini-3.8-flash"
     key_id: str = ""
+    output_limit: int | Literal["max"] = "max"
+    reasoning: str = "auto"
+    thinking_budget: int | None = Field(default=None, ge=0, le=32768)
+    compatible_overrides: dict[str, int | float | str | list[str] | None] = Field(default_factory=dict)
     chunk_count: int = Field(default=3, ge=1, le=50)
     minimum_similarity: float = Field(default=0.60, ge=0, le=1)
     chunk_overlap: int = Field(default=150, ge=0, le=100_000)
@@ -50,8 +54,48 @@ class ChronicleSettings(BaseModel):
     @field_validator("model")
     @classmethod
     def supported_model(cls, value):
-        if value not in CHAT_MODEL_IDS:
-            raise ValueError("Choose a supported chat model.")
+        if not value or len(value) > 200:
+            raise ValueError("Choose a chat model.")
+        return value
+
+    @field_validator("output_limit")
+    @classmethod
+    def valid_output_limit(cls, value):
+        if isinstance(value, int) and (value < 1 or value > 1_000_000):
+            raise ValueError("Output Limit must be a positive number.")
+        return value
+
+    @field_validator("reasoning")
+    @classmethod
+    def valid_reasoning(cls, value):
+        if value not in {"auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("Choose a supported Reasoning value.")
+        return value
+
+    @field_validator("compatible_overrides")
+    @classmethod
+    def valid_compatible_overrides(cls, value):
+        numeric = {"temperature": (0, 2), "top_p": (0, 1),
+                   "frequency_penalty": (-2, 2), "presence_penalty": (-2, 2)}
+        allowed = set(numeric) | {"seed", "stop", "reasoning_effort", "verbosity"}
+        if set(value) - allowed:
+            raise ValueError("Choose a supported Advanced Setting.")
+        for name, entry in value.items():
+            if entry is None:
+                continue
+            if name in numeric:
+                low, high = numeric[name]
+                if isinstance(entry, bool) or not isinstance(entry, (int, float)) or not low <= entry <= high or (name == "top_p" and entry == 0):
+                    raise ValueError(f"Enter a valid {name} value.")
+            elif name == "seed" and (isinstance(entry, bool) or not isinstance(entry, int) or not 0 <= entry <= 2_147_483_647):
+                raise ValueError("Enter a valid Seed.")
+            elif name == "stop" and (not isinstance(entry, list) or len(entry) > 16 or
+                                      any(not isinstance(item, str) or not item or len(item) > 200 for item in entry)):
+                raise ValueError("Enter valid Stop Sequences.")
+            elif name == "reasoning_effort" and (not isinstance(entry, str) or entry not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}):
+                raise ValueError("Choose a valid Reasoning Effort.")
+            elif name == "verbosity" and (not isinstance(entry, str) or entry not in {"low", "medium", "high"}):
+                raise ValueError("Choose a valid Verbosity.")
         return value
 
     @field_validator("key_id")

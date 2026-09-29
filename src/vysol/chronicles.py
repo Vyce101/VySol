@@ -18,8 +18,9 @@ from uuid import uuid4
 import httpx
 from filelock import Timeout
 
+from .chat_requests import request_for
 from .creation_store import CreationConflict
-from .embeddings import DIMENSIONS, EmbeddingFailure, ProcessingPaused
+from .embeddings import EmbeddingFailure, ProcessingPaused
 
 
 CHAT_MODELS = [
@@ -31,6 +32,10 @@ CHAT_MODEL_IDS = {model["id"] for model in CHAT_MODELS}
 DEFAULT_SETTINGS = {
     "model": "gemini-3.8-flash",
     "key_id": "",
+    "output_limit": "max",
+    "reasoning": "auto",
+    "thinking_budget": None,
+    "compatible_overrides": {},
     "chunk_count": 3,
     "minimum_similarity": 0.60,
     "chunk_overlap": 150,
@@ -336,7 +341,6 @@ class ChronicleService:
         self.store = ChronicleStore(creation.store.path)
         self.worlds = creation.worlds
         self.vault = creation.vault
-        self.embedder = creation.embedder
         self.logger = creation.logger
         self.chat_client = chat_client
         self.guard = threading.RLock()
@@ -422,19 +426,21 @@ class ChronicleService:
                     raise CreationConflict("Chat is available after this World finishes processing its books.")
         return books
 
-    def _snapshot(self) -> tuple[dict, str]:
+    def _snapshot(self) -> tuple[dict, dict, str]:
         settings = self.store.settings()
-        if settings["model"] not in CHAT_MODEL_IDS:
-            raise CreationConflict("Choose a supported chat model in Chronicle settings.")
         key_id = settings["key_id"]
         if not key_id:
-            raise CreationConflict("Choose an API key in Chronicle settings before sending a message.")
-        if not self.creation.store.enabled_key(key_id):
-            raise CreationConflict("The selected API key is unavailable. Choose an enabled key in Chronicle settings.")
-        secret = self.vault.read(key_id)
-        if not secret:
-            raise CreationConflict("The selected API key secret is missing. Choose another key in Chronicle settings.")
-        return settings, secret
+            raise CreationConflict("Choose an AI Connection in Chronicle settings before sending a message.")
+        credential = self.creation.store.credential(key_id)
+        if credential is None or not credential["enabled"]:
+            raise CreationConflict("The selected AI Connection is unavailable. Choose an enabled connection.")
+        model = self.creation.store.model_for(key_id, settings["model"])
+        if model is None or model["capabilities"].get("chat") is False:
+            raise CreationConflict("The selected model is unavailable for this connection. Refresh its models.")
+        secret = self.vault.read(key_id) or ""
+        if not secret and credential["provider"] != "openai_compatible":
+            raise CreationConflict("The selected API key secret is missing. Choose another connection.")
+        return settings, {**credential, "model_profile": model}, secret
 
     def start_generation(self, chronicle_id: str, request_id: str, text: str):
         with self.guard:
@@ -443,14 +449,14 @@ class ChronicleService:
             if existing is not None:
                 return existing
             self._require_embedded_world(chronicle["world_id"])
-            settings, secret = self._snapshot()
+            settings, credential, secret = self._snapshot()
             result = self.store.begin_generation(chronicle_id, request_id, text, settings)
             key = (chronicle_id, request_id)
             if result["new"]:
                 self._record_world_activity(chronicle["world_id"], result["user_message"]["created_at"])
                 stop = threading.Event()
                 thread = threading.Thread(target=self._run_generation,
-                                          args=(chronicle_id, request_id, text, settings, secret, stop),
+                                          args=(chronicle_id, request_id, text, settings, credential, secret, stop),
                                           name=f"chronicle-{chronicle_id[:8]}", daemon=True)
                 self.stops[key] = stop
                 self.threads[key] = thread
@@ -496,7 +502,7 @@ class ChronicleService:
             if answer is None:
                 if generation["status"] == "failed":
                     yield self._sse("error", {"code": generation["error_code"] or "generation_failed",
-                                              "message": "The model could not finish this response.",
+                                              "message": self._generation_error_message(generation["error_code"]),
                                               "assistant": None})
                 elif generation["status"] in TERMINAL_GENERATION_STATES:
                     yield self._sse("completed", {"message": None})
@@ -514,7 +520,7 @@ class ChronicleService:
             if generation["status"] in TERMINAL_GENERATION_STATES:
                 if generation["status"] == "failed":
                     yield self._sse("error", {"code": generation["error_code"] or "generation_failed",
-                                              "message": "The model could not finish this response.",
+                                              "message": self._generation_error_message(generation["error_code"]),
                                               "assistant": answer})
                 else:
                     yield self._sse("completed", {"message": answer})
@@ -525,17 +531,29 @@ class ChronicleService:
     def _sse(event: str, value: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
 
-    def _run_generation(self, chronicle_id, request_id, latest_text, settings, secret, stop):
+    @staticmethod
+    def _generation_error_message(code: str | None) -> str:
+        if code == "compatible_request":
+            return "The compatible server rejected this model or an Advanced Setting. Check the connection and controls."
+        if code == "credentials":
+            return "The AI provider rejected this credential. Check AI Connections in Settings."
+        if code == "provider_unavailable":
+            return "The AI provider is unavailable or its usage limit was reached."
+        if code == "provider_incomplete":
+            return "The AI provider ended this response early."
+        return "The model could not finish this response."
+
+    def _run_generation(self, chronicle_id, request_id, latest_text, settings, credential, secret, stop):
         state, code = "completed", None
         key = (chronicle_id, request_id)
         try:
-            query = self._embed_query(latest_text, secret, stop)
+            chronicle = self.store.require(chronicle_id)
+            query = self.creation.embed_world_query(chronicle["world_id"], latest_text, stop)
             if stop.is_set():
                 raise ProcessingPaused()
-            chronicle = self.store.require(chronicle_id)
             chunks = self._retrieve(chronicle["world_id"], query, settings)
             prompt = self._prompt(chronicle_id, request_id, latest_text, chunks, settings)
-            for kind, delta in self._provider_deltas(settings["model"], prompt, secret, key, stop):
+            for kind, delta in self._provider_deltas(settings, credential, prompt, secret, key, stop):
                 if stop.is_set():
                     raise ProcessingPaused()
                 if delta:
@@ -546,6 +564,8 @@ class ChronicleService:
             state = "stopped"
         except EmbeddingFailure as exc:
             state, code = "failed", exc.code
+            self.logger.error("Chronicle provider or embedding failed chronicle_id=%s request_id=%s code=%s",
+                              chronicle_id, request_id, exc.code)
         except Exception as exc:
             state, code = "failed", "provider_unavailable"
             self.logger.error("Chronicle generation failed chronicle_id=%s request_id=%s type=%s",
@@ -570,24 +590,6 @@ class ChronicleService:
             self.worlds.record_activity(world_id, at)
         except (OSError, Timeout, json.JSONDecodeError):
             self.logger.warning("World activity timestamp could not be saved world_id=%s", world_id)
-
-    def _embed_query(self, text: str, secret: str, stop: threading.Event) -> list[float]:
-        if hasattr(self.embedder, "embed_query"):
-            vector = self.embedder.embed_query(text, secret, stop, self.logger)
-        else:
-            # Test and extension embedders that implement the original protocol still work.
-            vector = self.embedder.embed(f"task: search result | query: {text}", secret, stop, self.logger)
-        return self._normalize(vector)
-
-    @staticmethod
-    def _normalize(vector) -> list[float]:
-        values = list(vector)
-        if not values or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
-            raise EmbeddingFailure("invalid_vector", "The query embedding was invalid. Retry this message.")
-        norm = math.sqrt(sum(float(v) * float(v) for v in values))
-        if norm == 0:
-            raise EmbeddingFailure("invalid_vector", "The query embedding was invalid. Retry this message.")
-        return [float(v) / norm for v in values]
 
     def _retrieve(self, world_id: str, query: list[float], settings: dict) -> list[dict]:
         with self.creation.store.connect() as db:
@@ -663,11 +665,26 @@ class ChronicleService:
                              settings["rag_chunks_suffix"])
         return f"{history_section}\n\n{retrieved_section}\n\n{latest_text}"
 
-    def _provider_deltas(self, model: str, prompt: str, secret: str,
+    def _provider_deltas(self, settings: dict, credential: dict, prompt: str, secret: str,
                          key: tuple[str, str], stop: threading.Event):
-        payload = {"model": model, "input": prompt, "stream": True, "store": False}
-        if model != "gemma-4-31b-it":
-            payload["generation_config"] = {"thinking_summaries": "auto"}
+        provider = credential["provider"]
+        profile = credential["model_profile"]
+        try:
+            endpoint, headers, payload = request_for(
+                provider, settings["model"], prompt, secret, credential.get("base_url"),
+                settings, profile["capabilities"])
+        except ValueError as exc:
+            code = "compatible_request" if provider == "openai_compatible" else "provider_request"
+            raise EmbeddingFailure(code, str(exc)) from exc
+        if provider == "google" and profile.get("api") == "generate_content":
+            yield from self._other_provider_deltas("google_generate_content", endpoint, headers, payload, key, stop)
+        elif provider == "google":
+            yield from self._google_deltas(endpoint, headers, payload, key, stop)
+        else:
+            yield from self._other_provider_deltas(provider, endpoint, headers, payload, key, stop)
+
+    def _google_deltas(self, endpoint: str, headers: dict, payload: dict,
+                       key: tuple[str, str], stop: threading.Event):
         owned_client = self.chat_client is None
         client = self.chat_client or httpx.Client(timeout=httpx.Timeout(60, connect=10))
         event_name = None
@@ -675,9 +692,7 @@ class ChronicleService:
         step_types = {}
         completed = False
         try:
-            with client.stream("POST", "https://generativelanguage.googleapis.com/v1beta/interactions",
-                               headers={"x-goog-api-key": secret, "Content-Type": "application/json"},
-                               json=payload) as response:
+            with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                 with self.guard:
                     self.responses[key] = response
                 if response.status_code >= 400:
@@ -751,6 +766,115 @@ class ChronicleService:
                 self.responses.pop(key, None)
             if owned_client:
                 client.close()
+
+    def _other_provider_deltas(self, provider: str, endpoint: str, headers: dict, payload: dict,
+                               key: tuple[str, str], stop: threading.Event):
+        owned_client = self.chat_client is None
+        client = self.chat_client or httpx.Client(timeout=httpx.Timeout(60, connect=10))
+        data_lines = []
+        completed = False
+        try:
+            with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                with self.guard:
+                    self.responses[key] = response
+                if response.status_code >= 400:
+                    response.read()
+                    if response.status_code in (401, 403):
+                        raise EmbeddingFailure("credentials", "The AI provider rejected this credential.")
+                    if response.status_code == 429 or response.status_code >= 500:
+                        raise EmbeddingFailure("provider_unavailable", "The AI provider is unavailable or its usage limit was reached.")
+                    message = ("The compatible server rejected this request or an Advanced Setting."
+                               if provider == "openai_compatible" else
+                               "The AI provider rejected this model or its settings.")
+                    raise EmbeddingFailure("compatible_request" if provider == "openai_compatible" else "provider_request", message)
+                for line in response.iter_lines():
+                    if stop.is_set():
+                        break
+                    if line == "":
+                        for item in self._standard_event(provider, "\n".join(data_lines)):
+                            if item[0] == "completed":
+                                completed = True
+                            elif item[0] == "failed":
+                                raise EmbeddingFailure("provider_request", "The AI provider could not finish this response.")
+                            else:
+                                yield item
+                        data_lines = []
+                    elif line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                if data_lines:
+                    for item in self._standard_event(provider, "\n".join(data_lines)):
+                        if item[0] == "completed":
+                            completed = True
+                        elif item[0] == "failed":
+                            raise EmbeddingFailure("provider_request", "The AI provider could not finish this response.")
+                        else:
+                            yield item
+                if not completed and not stop.is_set():
+                    raise EmbeddingFailure("provider_incomplete", "The AI provider ended this response early.")
+        except (httpx.HTTPError, RuntimeError) as exc:
+            if not stop.is_set():
+                raise EmbeddingFailure("provider_unavailable", "The AI provider is unavailable or its usage limit was reached.") from exc
+        finally:
+            with self.guard:
+                self.responses.pop(key, None)
+            if owned_client:
+                client.close()
+
+    @staticmethod
+    def _standard_event(provider: str, raw: str) -> list[tuple[str, str]]:
+        if not raw:
+            return []
+        if raw == "[DONE]":
+            return [("completed", "")]
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        kind = value.get("type", "")
+        if provider == "google_generate_content":
+            if value.get("error") or (value.get("promptFeedback") or {}).get("blockReason"):
+                return [("failed", "")]
+            result = []
+            for candidate in value.get("candidates", [])[:1]:
+                for part in (candidate.get("content") or {}).get("parts", []):
+                    if part.get("text"):
+                        result.append(("thinking" if part.get("thought") else "answer", part["text"]))
+                finish = candidate.get("finishReason")
+                if finish in {"STOP", "MAX_TOKENS"}:
+                    result.append(("completed", ""))
+                elif finish:
+                    result.append(("failed", ""))
+            return result
+        if provider == "openai":
+            if kind == "response.output_text.delta":
+                return [("answer", value.get("delta", ""))]
+            if kind == "response.completed":
+                return [("completed", "")]
+            if kind in {"response.failed", "response.incomplete", "error"}:
+                return [("failed", "")]
+            return []
+        if provider == "anthropic":
+            if kind == "content_block_delta":
+                delta = value.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    return [("answer", delta.get("text", ""))]
+                if delta.get("type") == "thinking_delta":
+                    return [("thinking", delta.get("thinking", ""))]
+            if kind == "message_stop":
+                return [("completed", "")]
+            if kind == "error":
+                return [("failed", "")]
+            return []
+        if "error" in value:
+            return [("failed", "")]
+        result = []
+        for choice in value.get("choices", []):
+            delta = choice.get("delta") or {}
+            if delta.get("reasoning_content"):
+                result.append(("thinking", delta["reasoning_content"]))
+            if delta.get("content"):
+                result.append(("answer", delta["content"]))
+        return result
 
     @staticmethod
     def _provider_event(event_name: str | None, raw: str):
