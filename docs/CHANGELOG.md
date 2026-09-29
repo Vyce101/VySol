@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-29
+
+### Added
+
+- Added chat connections for Google, OpenAI, Anthropic, DeepSeek, and OpenAI-compatible servers, with per-credential model discovery.
+- Added Embedding Profiles for Google, OpenAI, and OpenAI-compatible embedding models.
+
+### Changed
+
+- Chronicle settings now adapt output limits and reasoning controls to model capabilities, with advanced request overrides for compatible servers.
+- World creation and Chronicle retrieval now use saved Embedding Profiles so each World's provider, model, dimensions, and input format remain consistent.
+
 ## 2026-09-25
 
 ### Added

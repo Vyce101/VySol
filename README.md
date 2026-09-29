@@ -28,7 +28,7 @@ Earlier prototypes are preserved in separate branches as previous iterations of 
 
 ## Get started
 
-The current local app creates worlds from ordered TXT or EPUB books, splits their text into chunks, and saves Gemini embeddings with resumable processing. Named API keys are managed in Settings. Chronicles provide separate saved conversations within each world, retrieving relevant book passages for Google-hosted chat models.
+The local app creates worlds from ordered TXT or EPUB books, splits their text into chunks, and saves embeddings with resumable processing. Chat connections support Google, OpenAI, Anthropic, DeepSeek, and OpenAI-compatible servers. Embedding Profiles use Google, OpenAI, or OpenAI-compatible embedding models and keep each World's retrieval model consistent. Chronicles provide separate saved conversations within each World and can use a shared chat connection and model.
 
 Follow the [Quickstart](docs/retype/quickstart.md) to run it on Windows. Usage details and supported behavior are covered in the documentation.
 

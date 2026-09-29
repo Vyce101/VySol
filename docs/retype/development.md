@@ -30,13 +30,16 @@ The frontend is served from `frontend/dist/client/`. Rebuild after frontend chan
 | --- | --- |
 | `frontend/src/CreateWorld.tsx` | Unsubmitted page, ordered selections, uploads, and progress. |
 | `frontend/src/ChroniclesView.tsx`, `ChronicleChat.tsx`, and `ChronicleSettingsDrawer.tsx` | Chronicle lists, conversation and local drafts, streamed response display, and shared drawer settings. |
-| `frontend/src/ProvidersView.tsx` | Provider selection, numbered credentials, and explicit secret reveal and replacement. |
+| `frontend/src/ProvidersView.tsx` and `EmbeddingProfiles.tsx` | Built-in provider groups, named credentials, model refresh, and World embedding choices. |
 | `src/vysol/server.py` | Loopback HTTP boundary, lifecycle, static frontend, and artwork. |
 | `src/vysol/creation_api.py` | Validated attempt, upload, and credential contracts. |
 | `src/vysol/creation.py` | Independent per-world workers, recovery, and whole-world publication. |
 | `src/vysol/creation_store.py` | SQLite checkpoints, operation IDs, ordered chunks, and vectors. |
 | `src/vysol/chronicles.py` and `chronicles_api.py` | Chronicle persistence, retrieval, provider streaming, and local HTTP contracts. |
-| `src/vysol/embeddings.py` | Gemini requests, input formatting, vector validation, and bounded retries. |
+| `src/vysol/provider_catalog.py` and `provider_profiles.py` | Per-credential model discovery, cached capability data, and coded model profiles. |
+| `src/vysol/chat_requests.py` | Chat request translation for each provider API. |
+| `src/vysol/embedding_profiles.py` and `embedding_profiles_api.py` | Saved embedding choices, World vector specifications, and safe credential replacement. |
+| `src/vysol/embeddings.py` | Provider embedding requests, vector validation, and bounded retries. |
 | `src/vysol/credentials.py` | Injectable credential adapter and atomic local key files. |
 | `src/vysol/books/` | Strict TXT/EPUB conversion, deterministic chunking, and legacy importer. |
 | `src/vysol/worlds.py` | World metadata, listing, accepted book order, and settings. |
@@ -50,9 +53,23 @@ The splitter preserves every Unicode code point of the working TXT in contiguous
 
 `CHUNKER_VERSION` is 2; version 2 adds punctuation between line breaks and whitespace in the boundary priority. `CreationStore.add_chunks` records the version in each chunk's processing profile, which also contributes to its stable ID. Resume skips splitting for books already marked `chunked` and reuses their stored chunks and completed vectors. Updating the splitter does not automatically regenerate those chunks or rebuild accepted worlds. Newly generated chunks, including smaller replacements for an oversized input, use the current version.
 
-Chronicle retrieval leaves stored chunks and embeddings unchanged. It embeds only the latest user message with Gemini Embedding 2's retrieval-query prefix, compares that vector with normalized vectors from the selected World, and keeps up to the configured number above Minimum Similarity. The preceding source characters are reconstructed from earlier contiguous chunks, so overlap can cross more than one chunk. The chat request includes previous user and answer text, selected passages with book names and source offsets, and the latest message. No roleplay system instruction or history truncation is added.
+Chronicle retrieval leaves stored chunks and embeddings unchanged. It embeds only the latest user message with the World's Embedding Profile, compares that vector with normalized vectors from the selected World, and keeps up to the configured number above Minimum Similarity. The preceding source characters are reconstructed from earlier contiguous chunks, so overlap can cross more than one chunk. The chat request includes previous user and answer text, selected passages with book names and source offsets, and the latest message. No roleplay system instruction or history truncation is added. The shared Chronicle chat credential never selects the retrieval embedding credential.
 
-The backend sends one chunk per Gemini request with retrieval-document formatting, `autoTruncate: false`, and 768 dimensions. The formatting prefix is separate from stored chunk text. Explicit size errors split only the affected chunk using the same boundary rules. Valid finite vectors are normalized and stored as little-endian float32 values. Transient failures retry at most four requests with cancellable backoff; other failures require attention. See Google's [embedding guide](https://ai.google.dev/gemini-api/docs/embeddings) and [REST configuration](https://ai.google.dev/api/embeddings#EmbedContentConfig).
+The backend sends one chunk per embedding request and checks the returned dimensions against the World's saved vector specification. New profiles use the model's highest known dimensions and input limit; a selected smaller OpenAI dimension is sent with each request. Keyless OpenAI-compatible embedding servers are supported when their fixed Base URL does not require a key. An unknown compatible embedding model must pass a preflight check before processing. Existing 768-dimensional Google Worlds retain their original input formatting and query prefix through a saved format version. Explicit size errors split only the affected chunk using the same boundary rules. Valid finite vectors are normalized and stored as little-endian float32 values. Transient failures retry with cancellable backoff; other failures require attention. See [Google embeddings](https://ai.google.dev/gemini-api/docs/embeddings) and [OpenAI embeddings](https://developers.openai.com/api/docs/guides/embeddings).
+
+## Provider and model contracts
+
+Model catalogs belong to individual credentials. Startup refreshes stale catalogs; saving a new credential or replacing its key and an explicit refresh also request an update. A failed refresh keeps the last successful catalog and reports its error and staleness. Catalog models are normalized into profiles with chat, embedding, token-limit, reasoning, and thinking capabilities. Chronicle request translation uses known capabilities to select supported controls and omit unsupported provider-specific fields; explicitly saved compatible overrides are forwarded. `create_app(..., catalog_client=...)` accepts an injected catalog HTTP client alongside `vault`, `embedder`, and `chat_client`.
+
+| Provider | Model discovery | Chronicle chat | Embeddings |
+| --- | --- | --- | --- |
+| Google | Gemini model list | Gemini Interactions or streaming Generate Content | Gemini `embedContent` |
+| OpenAI | `/v1/models` | Responses API | `/v1/embeddings` |
+| Anthropic | `/v1/models` | Messages API | — |
+| DeepSeek | `/models` | Chat Completions | — |
+| OpenAI-compatible | Configured `/models` | Configured Chat Completions | Configured `/embeddings` |
+
+Embedding Profiles select a credential, model, dimensions, and the model's highest known input limit. Only Google, OpenAI, and OpenAI-compatible credentials can back them. Worlds snapshot the vector specification, and Chronicle retrieval always uses that profile, independently of the shared chat connection. Create World uses the last-used profile, falling back to the configured default. Moving a World to another profile requires the same provider, model, dimensions, input format, and compatible Base URL. Credential deletion is blocked while any Embedding Profile references it or an unfinished creation depends on it.
 
 ## Persistence and recovery
 
@@ -86,7 +103,7 @@ The same SQLite database stores World-scoped Chronicles, ordered messages, gener
 
 Unsent Chronicle drafts remain in `ChronicleChat` component state, keyed by Chronicle ID. They are not stored in SQLite. The component stays mounted while switching Chronicles in one World, so each draft returns when that Chronicle is reopened. Reloading or leaving and reopening the World loses those drafts. The message field recalculates its height from the active draft and scrolls internally after reaching its CSS height limit.
 
-Before submission, setup values and File objects exist only in the mounted creation component. Navigating to **AI Connections** keeps that component mounted so the Settings X can return to the draft. A page reload loses unsubmitted file selections. Successful submission clears the draft; the next Create World page starts fresh with the last submitted model/key defaults and standard chunk settings.
+Before submission, setup values and File objects exist only in the mounted creation component. Navigating to **AI Connections** keeps that component mounted so the Settings X can return to the draft. A page reload loses unsubmitted file selections. Successful submission clears the draft; the next Create World page starts with the last used Embedding Profile or configured default and standard chunk settings.
 
 Submission begins durable recovery by saving the manifest before uploading books. Leaving the page while submission is in flight does not interrupt the uploads. Once an attempt exists, leaving preserves it; deletion requires the separate confirmed discard action.
 
@@ -96,7 +113,7 @@ Successful vectors checkpoint individually. Startup reconciles an interrupted di
 
 Publication verifies text coverage and file digests, then atomically renames a complete prepared world directory into `worlds/`. The final SQLite checkpoint may be recovered from that directory. `sources_locked` prevents the shared importer from appending to accepted worlds. Old worlds retain their existing files and are not migrated or embedded. Discard stops the worker before deleting only the attempt's owned directory and cascading its SQLite records.
 
-Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite stores provider groups and credential sequence numbers; a new credential takes the lowest available number. Ordinary API responses contain identifiers and labels, not secrets. Explicit local key reveal is uncached and must not be logged. A running attempt's selected credential cannot be changed or removed. `create_app` accepts injected `vault`, `embedder`, and `chat_client` adapters for tests. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
+Secrets are plain-text UTF-8 files in the runtime `credentials/` folder. The default runtime directory is ignored by the repository, and the adapter writes a folder-level `.gitignore` for custom locations. Updates replace files atomically; failed replacements retain the previous secret. SQLite stores provider groups, credential sequence numbers, per-credential model catalogs, and Embedding Profiles. A new credential takes the lowest available number. Ordinary API responses contain identifiers and labels, not secrets. Explicit local key reveal is uncached and must not be logged. OpenAI-compatible credentials may have no key; their Base URL is fixed after creation. `create_app` accepts injected `vault`, `embedder`, `chat_client`, and `catalog_client` adapters. Copy runtime data with the launcher stopped. Full runtime backups include the key files and must be kept private.
 
 ## Local API contract
 
@@ -106,30 +123,38 @@ Paths below are relative to the server. Ordinary responses contain public IDs, s
 | --- | --- |
 | `GET /api/health` | `status: ready`, `app: vysol`. |
 | `GET /api/worlds` | Accepted worlds with book counts, ordered by last use or creation. |
-| `GET /api/worlds/{id}` | Accepted or unfinished world details: ordered books, source lock, state, progress, and nullable processing settings. |
+| `GET /api/worlds/{id}` | Accepted or unfinished world details: ordered books, source lock, state, progress, nullable processing settings, and the active `embedding_profile` response. |
 | `POST /api/worlds/{id}/activity` | Record activity for an accepted World. Opening a World in the interface does not call this route. |
 | `GET /api/worlds/{id}/books` | Book metadata, ordered by explicit positions where available. |
 | `GET /api/creation` | Most recently updated unfinished attempt or null, retained for compatibility. |
 | `GET /api/creations` | All unfinished attempts. |
 | `GET /api/creation/{id}` | Specific attempt, including completed state for reconciliation. |
-| `PUT /api/creation/{id}` | Manifest: operation ID, revision, name, key ID, config `{model,size,search}`, ordered books `{id,filename,size}`. |
+| `PUT /api/creation/{id}` | Manifest: operation ID, revision, name, Embedding Profile ID, chunk config `{size,search}`, ordered books `{id,filename,size}`. The legacy `config.model` field is still accepted for old attempts; the profile controls new embeddings. The chosen profile and vector specification are snapshotted. |
 | `PUT /api/creation/{id}/books/{book_id}` | Raw bytes, percent-encoded `X-Filename`, query `revision` and `operation_id`. |
 | `POST /api/creation/{id}/start` | Start/resume with revision and operation ID. |
 | `POST /api/creation/{id}/pause` | Pause with revision. |
 | `DELETE /api/creation/{id}` | Discard with revision query; accepted worlds reject this action. |
-| `GET /api/providers` | Provider groups and numbered credential metadata, embedding and chat model catalogs, and last submitted creation defaults. |
-| `POST /api/providers/connections` | Idempotently add the Google provider group. |
+| `GET /api/providers` | Built-in provider groups, credential metadata with cached model catalogs, and creation defaults. |
+| `POST /api/providers/connections` | Idempotently select one of the built-in provider groups. |
 | `PUT /api/providers/connections/{id}` | Enable or disable a provider group while preserving credentials. |
-| `PUT /api/providers/keys/{id}` | Name, provider `google`, optional connection ID, and optional write-only secret; a new key requires a secret. The response includes a stable sequence number. |
+| `PUT /api/providers/keys/{id}` | Save a named provider credential. An OpenAI-compatible credential includes a fixed Base URL and may omit its key. The response includes a stable sequence number. |
+| `GET /api/providers/keys/{id}/models` | Cached model catalog, last successful update time, last refresh error, and whether the catalog is stale. Each model includes normalized capability data. |
+| `POST /api/providers/keys/{id}/models/refresh` | Refresh one credential's model list. A failure leaves the last successful list and its timestamp available. |
 | `GET /api/providers/keys/{id}/secret` | Explicit uncached local reveal of a saved key. |
-| `DELETE /api/providers/keys/{id}` | Delete secret and metadata unless used by running work. |
+| `DELETE /api/providers/keys/{id}` | Delete secret and metadata unless any Embedding Profile references the credential or an unfinished creation depends on it. |
+| `GET /api/embedding-profiles` | Profiles with provider, model, dimensions, maximum input size, usability, and World or pending-creation usage, plus default and last-used IDs. |
+| `POST /api/embedding-profiles` | Create a named profile from a discovered Google, OpenAI, or OpenAI-compatible embedding model; omitted dimensions use the highest known value. |
+| `PUT`, `DELETE /api/embedding-profiles/{id}` | Update or remove a profile, subject to World vector compatibility and usage checks. |
+| `PUT /api/embedding-profiles/default` | Set or clear the default Create World profile with `{profile_id}`. |
+| `POST /api/embedding-profiles/{id}/preflight` | Check an unknown compatible embedding model and record its returned dimensions. |
+| `PUT /api/worlds/{id}/embedding-profile` | Move a World to an equivalent profile with the same provider, model, dimensions, endpoint, and input format. |
 | `GET`, `PUT /api/settings` | Background transition speed, shelf/grid layout, and Chronicle Chat Appearance. |
 | `GET`, `POST /api/worlds/{id}/chronicles` | List and create Chronicles for an accepted or unfinished World. |
 | `GET`, `PATCH`, `DELETE /api/chronicles/{id}` | Chronicle detail, rename, and confirmed deletion from the interface. |
 | `GET /api/chronicles/{id}/messages` | Saved messages in conversation order. |
 | `POST /api/chronicles/{id}/messages/stream` | Send `{request_id,text}` and stream `user_message`, `thinking_delta`, `answer_delta`, `completed`, or `error` events. |
 | `POST /api/chronicles/{id}/generations/{request_id}/stop` | Stop an active response and retain usable partial text. |
-| `GET`, `PUT /api/chronicle-settings` | Shared model, connection, retrieval, response speed, section boundaries, and drawer section states. |
+| `GET`, `PUT /api/chronicle-settings` | Shared model and connection, `output_limit` (`max` or a token count), capability-aware `reasoning`, optional `thinking_budget`, compatible-provider `compatible_overrides`, retrieval, streaming speed, section boundaries, and drawer section states. |
 | `GET /api/worlds/{id}/artwork` | Registered artwork or bundled Frostwake. |
 
 The old `POST /api/worlds` and `PUT /api/worlds/{id}/imports/{operation_id}` mutations return 410. They cannot bypass the new acceptance rules. Revision conflicts return 409; stream limits return 413; invalid input returns 422; handled storage failures return 503. The UI polls attempt state while work is pending.

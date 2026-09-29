@@ -3,7 +3,7 @@ order: 70
 ---
 # Reference
 
-Supported values and behavior for the current local app. For the creation procedure, see [Create a world](create-world.md). Implementation contracts belong in [Development](development.md).
+Supported values and behavior for the current local app. For provider, model, and Embedding Profile facts, see the [AI Connections reference](ai-connections-reference.md). For the creation procedure, see [Create a world](create-world.md). Implementation contracts belong in [Development](development.md).
 
 ## Supported books
 
@@ -44,8 +44,7 @@ These fields appear under **Processing** on Create World. Chunk settings are ins
 
 | Field | Supported values | Default | Meaning |
 | --- | --- | --- | --- |
-| Embedding Model | Gemini Embedding 2 (`gemini-embedding-2`) | Last submitted model | Converts each chunk into a stored embedding for Chronicle retrieval. |
-| Credential | A saved Google AI Studio API key | Last submitted credential, if still available | A valid selection is required before submission. |
+| Embedding Profile | A usable saved profile using a discovered embedding model | Last used profile, otherwise the configured default | Fixes the provider, model, dimensions, input format, and compatible server used for a World's stored vectors and Chronicle retrieval. |
 | Maximum chunk size (chars) | Whole number from 1 to 1,000,000 | 8,000 | Maximum characters in each text chunk before any further splitting required by the model. |
 | Boundary search distance (chars) | Whole number from 0 to one less than Maximum chunk size | 1,000 | How far backward from the size limit VySol searches for a suitable break. Zero disables this search. |
 
@@ -55,7 +54,9 @@ Within the search window, the splitter prefers paragraph breaks, then line break
 
 If no suitable break is found, VySol cuts at **Maximum chunk size**. For example, an 8,000-character maximum with a 7,000-character search looks backward through the last 7,000 characters before that limit. A preferred break near character 1,000 can produce a much shorter chunk; with no break, the cut stays at 8,000, not 7,000. The final chunk can be shorter simply because the book ends.
 
-Gemini embeddings use a fixed 768 dimensions. If Google explicitly rejects a chunk as too large, VySol splits that chunk into smaller pieces using the same boundary priorities and retries. It saves the smaller chunks and updates the total chunk count without dropping text.
+An Embedding Profile starts at its model's highest known dimensions and can use a smaller supported value. Once an unfinished World uses a profile, only the profile name can change. A completed World can move only to an equivalent credential and profile with the same provider, model, dimensions, input format, and compatible Base URL. Existing Gemini Worlds retain their 768-dimensional vectors. See [Embedding Profiles](ai-connections-reference.md#embedding-profiles) for the full compatibility rules.
+
+If a provider explicitly rejects a chunk as too large, VySol splits that chunk using the same boundary priorities and retries. It saves the smaller chunks and updates the total chunk count without dropping text.
 
 ## Saved files
 
@@ -63,7 +64,7 @@ Each accepted upload produces an untouched original and a separate UTF-8 TXT wor
 
 The Windows launcher stores runtime data in the repository's `data/` folder by default. Books are inside `data/worlds/<world key>/books/<book key>/`, with `original/` and `text/` subfolders. The generated keys are internal identifiers, so folder names do not match world titles. Metadata records the correspondence.
 
-Worlds, book copies, settings, custom artwork, logs, and creation staging files remain under the configured runtime directory. `processing.sqlite3` stores creation checkpoints, source offsets, chunk text, vectors, credential labels, Chronicles, messages, and shared Chronicle settings. `creations/` holds attempt files. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory. API key secrets are plain-text files under `credentials/` and are included in a full runtime backup. Keep that folder and its backups private. The credentials folder has its own ignore file so keys and temporary writes remain ignored even with a custom runtime directory.
+Worlds, book copies, settings, custom artwork, logs, and creation staging files remain under the configured runtime directory. `processing.sqlite3` stores creation checkpoints, source offsets, chunk text, vectors, credential labels, per-credential model catalogs, Embedding Profiles, Chronicles, messages, and shared Chronicle settings. `creations/` holds attempt files. The repository excludes its root `data/` folder from Git. If you configure another location, choose one outside tracked source; the default exclusion does not automatically cover other folders. To back up the current application data, close the launcher first and copy the runtime directory. API key secrets are plain-text files under `credentials/` and are included in a full runtime backup. Keep that folder and its backups private. The credentials folder has its own ignore file so keys and temporary writes remain ignored even with a custom runtime directory.
 
 ## Browsing Worlds
 
@@ -87,12 +88,15 @@ Chronicle names must be nonblank and can contain at most 120 characters. A sent 
 
 Each send uses the latest user message to search embedded chunks belonging to that World. The number of chunks is a maximum: fewer are sent if they fall below Minimum Similarity. Chunk Overlap adds preceding source characters at retrieval time and can extend across several stored chunks. No qualifying chunks still permits a response. Sending the full conversation may exceed a model's context limit; VySol reports the provider error without automatically trimming or summarizing the history.
 
-Chronicle settings are shared across Worlds. Chat model choices remain available without an enabled connection, but sending requires a usable key saved under an enabled Google connection. The supported models are Gemini 3.8 Flash, Gemini 3.5 Flash-Lite, and Gemma 4 31B IT. Thinking is shown only when the provider returns a readable summary.
+Chronicle chat settings are shared across Worlds. Sending requires an enabled Google, OpenAI, Anthropic, DeepSeek, or OpenAI-compatible connection and a chat model returned by that connection's catalog. Tested models have documented VySol controls; other discovered models are labeled Untested. Chronicle retrieval always uses the World's Embedding Profile, regardless of the selected chat connection.
 
 | Setting | Supported values | Default |
 | --- | --- | --- |
-| Chat Model | The three supported models listed above | Gemini 3.8 Flash |
-| API Connection | A saved key on an enabled Google connection | None selected |
+| Chat Model | A discovered model on the selected connection | Gemini 3.8 Flash when available |
+| API Connection | A saved credential on an enabled connection | None selected |
+| Output Limit | Up to the selected model's documented maximum, or Provider Default when unknown | Model maximum when known |
+| Thinking Level / Reasoning | Model-supported levels and Off where available | Model default, or the closest supported value when switching models |
+| Thinking Budget | Gemini 2.5 model-specific token range, or blank | Provider default |
 | Number of Chunks | Whole number from 1 to 50 | 3 |
 | Minimum Similarity | 0.00 to 1.00, in 0.01 steps in the drawer | 0.60 |
 | Chunk Overlap (chars) | Whole number from 0 to 100,000 | 150 |
@@ -100,17 +104,20 @@ Chronicle settings are shared across Worlds. Chat model choices remain available
 
 The four **Section Tags** fields each allow up to 2,000 characters. Their defaults are `<chat_history>`, `</chat_history>`, `<rag_chunks>`, and `</rag_chunks>`, respectively. They are editable text, not parsed XML.
 
+OpenAI-compatible connections also expose optional Advanced Settings. See [OpenAI-compatible Advanced Settings](ai-connections-reference.md#openai-compatible-advanced-settings) for their supported values and limits.
+
 ## Settings
 
 The gear opens **Settings**. Use its X to return to the page you came from, including an unfinished Create World draft.
 
 | Section / setting | Choices | Initial value | Persistence |
 | --- | --- | --- | --- |
-| AI Connections | Enable or disable Google under Select Connections; add, rename, reveal, replace, or remove numbered credentials | No connection | Names and sequence numbers in SQLite; plain-text secrets in the ignored credentials folder |
+| AI Connections | Enable Google, OpenAI, Anthropic, DeepSeek, or OpenAI-compatible; manage credentials and Embedding Profiles | Provider groups available; no credential | Names, profiles, catalogs, and sequence numbers in SQLite; secrets in the ignored credentials folder |
 | General / World Display | Shelf; Grid | Shelf | Saved automatically |
 | General / Background Transition Speed | Fast — 150 ms; Normal — 300 ms; Slow — 600 ms | Normal — 300 ms | Saved automatically; controls artwork changes |
 | General / Chronicle Chat Appearance | Focus the Reading Area; Shade the Full Page | Focus the Reading Area | Saved automatically; controls artwork shading during Chronicle chat |
 | Developer / Homepage Preview | Your Saved Worlds; 4 Sample Worlds; 12 Sample Worlds; Empty Homepage | Your Saved Worlds | Resets on reload |
+| Developer / Model Picker Preview | Off; On | Off | Resets on reload; shows documented and previously discovered chat models, keeps preview choices temporary, and disables sending while On |
 
 **Horizontal shelf** keeps cards in one row. Use the mouse wheel over the homepage, horizontal touch scrolling, or keyboard focus to reach more cards. **Grid** wraps cards into rows and allows vertical page scrolling for larger collections. Shelf mode and grids with up to four worlds adapt to ordinary viewport sizes without vertical page scrolling; extremely short windows keep controls readable instead of shrinking them indefinitely.
 

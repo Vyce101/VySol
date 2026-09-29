@@ -10,6 +10,10 @@ VySol is a project for AI experiences set inside established fictional worlds. T
 
 Follow the [Quickstart](quickstart.md) to launch VySol on Windows and reach the Worlds homepage.
 
+## Connect an AI provider
+
+The [AI Connections guide](ai-connections.md) covers provider credentials, model discovery, and Embedding Profiles.
+
 ## Create a world
 
 The [Create a world guide](create-world.md) covers naming a world, arranging books, configuring embeddings, and recovering unfinished attempts.
