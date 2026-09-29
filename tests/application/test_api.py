@@ -79,6 +79,7 @@ def test_world_list_and_detail_include_book_counts_and_legacy_processing_fallbac
         'books': [],
         'progress': {'chunks_done': None, 'chunks_total': None, 'books_done': 0, 'books_total': 0},
         'processing': {'model': None, 'max_chunk_size': None, 'boundary_search_distance': None},
+        'embedding_profile': None,
     }
 
     assert client.get(f'/api/worlds/{uuid4()}').status_code == 404

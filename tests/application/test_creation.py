@@ -227,6 +227,8 @@ def test_credentials_never_return_or_persist_in_sqlite(setup, tmp_path, capsys):
     assert result.status_code == 200 and vault.read(key) == "synthetic-secret"
     bad = client.put(f"/api/providers/keys/{key}", json={"name": "", "secret": "private-value"})
     assert bad.status_code == 422 and "private-value" not in bad.text
+    assert client.delete(f"/api/providers/keys/{key}").status_code == 409
+    assert client.delete(f"/api/creation/{attempt['id']}", params={"revision": attempt["revision"]}).status_code == 200
     assert client.delete(f"/api/providers/keys/{key}").status_code == 200
     assert vault.read(key) is None
     captured = capsys.readouterr()

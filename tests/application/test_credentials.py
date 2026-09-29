@@ -2,6 +2,7 @@ import subprocess
 import sqlite3
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -60,16 +61,17 @@ def test_key_id_cannot_escape_credential_directory(tmp_path):
 
 def test_api_uses_local_files_across_restarts_without_returning_secrets(tmp_path):
     key, secret = str(uuid4()), "synthetic-persistent-secret"
-    with TestClient(create_app(tmp_path)) as client:
-        result = client.put(f"/api/providers/keys/{key}", json={"name": "Local key", "secret": secret})
-        assert result.status_code == 200 and secret not in result.text
-    assert (tmp_path / "credentials" / f"{key}.key").read_text(encoding="utf-8") == secret
-    with TestClient(create_app(tmp_path)) as client:
-        result = client.get("/api/providers")
-        assert result.json()["keys"][0]["name"] == "Local key"
-        assert secret not in result.text
-        assert client.app.state.creation.vault.read(key) == secret
-        assert client.delete(f"/api/providers/keys/{key}").status_code == 200
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"models": []}))) as catalog_client:
+        with TestClient(create_app(tmp_path, catalog_client=catalog_client)) as client:
+            result = client.put(f"/api/providers/keys/{key}", json={"name": "Local key", "secret": secret})
+            assert result.status_code == 200 and secret not in result.text
+        assert (tmp_path / "credentials" / f"{key}.key").read_text(encoding="utf-8") == secret
+        with TestClient(create_app(tmp_path, catalog_client=catalog_client)) as client:
+            result = client.get("/api/providers")
+            assert result.json()["keys"][0]["name"] == "Local key"
+            assert secret not in result.text
+            assert client.app.state.creation.vault.read(key) == secret
+            assert client.delete(f"/api/providers/keys/{key}").status_code == 200
     assert not (tmp_path / "credentials" / f"{key}.key").exists()
 
 
@@ -98,8 +100,8 @@ def test_provider_connections_are_idempotent_and_credential_numbers_reuse_gaps(t
         assert third.json()["sequence"] == 1
 
         providers = client.get("/api/providers").json()
-        assert len(providers["connections"]) == 1
-        group = providers["connections"][0]
+        assert len(providers["connections"]) == 5
+        group = next(item for item in providers["connections"] if item["provider"] == "google")
         assert group["id"] == connection["id"]
         assert [(item["name"], item["sequence"]) for item in group["credentials"]] == [
             ("Alpha", 2), ("Beta", 1),
@@ -108,7 +110,8 @@ def test_provider_connections_are_idempotent_and_credential_numbers_reuse_gaps(t
 
         assert client.delete(f"/api/providers/keys/{second_id}").status_code == 200
         assert client.delete(f"/api/providers/keys/{third_id}").status_code == 200
-        empty_group = client.get("/api/providers").json()["connections"][0]
+        empty_group = next(item for item in client.get("/api/providers").json()["connections"]
+                           if item["provider"] == "google")
         assert empty_group["credentials"] == []
         assert empty_group["next_sequence"] == 1
         assert client.post("/api/providers/connections", json={"provider": "google"}).json()["next_sequence"] == 1
@@ -124,7 +127,7 @@ def test_provider_connections_are_idempotent_and_credential_numbers_reuse_gaps(t
         })
         assert invalid.status_code == 422
         assert not (tmp_path / "credentials" / f"{invalid_id}.key").exists()
-        assert client.post("/api/providers/connections", json={"provider": "openai"}).status_code == 422
+        assert client.post("/api/providers/connections", json={"provider": "openai"}).status_code == 200
 
 
 def test_existing_provider_keys_migrate_in_rowid_order(tmp_path):
@@ -138,7 +141,7 @@ def test_existing_provider_keys_migrate_in_rowid_order(tmp_path):
         result = client.get("/api/providers").json()
         sequences = {key["id"]: key["sequence"] for key in result["keys"]}
         assert sequences == {first_id: 1, second_id: 2}
-        group = result["connections"][0]
+        group = next(item for item in result["connections"] if item["provider"] == "google")
         assert {key["id"] for key in group["credentials"]} == {first_id, second_id}
         assert all(key["connection_id"] == group["id"] for key in result["keys"])
 
@@ -187,13 +190,15 @@ def test_disabled_connection_hides_new_key_use_without_breaking_saved_attempts(t
         assert uploaded.status_code == 200
         attempt = uploaded.json()
         providers = client.get("/api/providers").json()
-        connection = providers["connections"][0]
+        connection = next(item for item in providers["connections"] if item["provider"] == "google")
         assert connection["enabled"] is True
 
         disabled = client.put(f"/api/providers/connections/{connection['id']}", json={"enabled": False})
         assert disabled.status_code == 200 and disabled.json()["enabled"] is False
         assert len(disabled.json()["credentials"]) == 1
-        assert client.get("/api/providers").json()["connections"][0]["enabled"] is False
+        google = next(item for item in client.get("/api/providers").json()["connections"]
+                      if item["provider"] == "google")
+        assert google["enabled"] is False
 
         new_body = {**body, "operation_id": str(uuid4())}
         assert client.put(f"/api/creation/{uuid4()}", json=new_body).status_code == 409

@@ -17,7 +17,8 @@ from .books.text import decode_text
 from .books.epub import extract_epub
 from .books.chunking import split_text
 from .creation_store import CreationStore, CreationConflict, now
-from .embeddings import GeminiEmbeddings, EmbeddingFailure, InputTooLarge, ProcessingPaused
+from .embeddings import ProfileEmbeddings, EmbeddingFailure, InputTooLarge, ProcessingPaused
+from .embedding_profiles import EmbeddingProfileService
 from .worlds import WorldStore, atomic_json
 
 
@@ -30,7 +31,7 @@ class Creation:
         self.store = CreationStore(root)
         self.worlds = WorldStore(root)
         self.vault = vault
-        self.embedder = embedder or GeminiEmbeddings()
+        self.embedder = embedder or ProfileEmbeddings()
         self.limits = limits or ImportLimits()
         self.guard = threading.RLock()
         self.stops = {}
@@ -41,6 +42,7 @@ class Creation:
         self.thread = None
         self.lease = FileLock(root / "locks" / "creation-worker.lock", timeout=0)
         self.logger = logging.getLogger("vysol.creation")
+        self.embedding_profiles = EmbeddingProfileService(self)
 
     def start_service(self, logger):
         self.lease.acquire()
@@ -89,6 +91,11 @@ class Creation:
         return value
 
     def save(self, attempt_id: str, manifest: dict):
+        profile_id = manifest.get("embedding_profile_id")
+        profile, embedding_spec = self.embedding_profiles.snapshot(profile_id) if profile_id else (None, None)
+        key_id = profile["key_id"] if profile else manifest.get("key_id")
+        if not key_id:
+            raise CreationConflict("Choose an Embedding Profile before creating this World.")
         with self.guard, self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = self.store.get(attempt_id, db=db)
@@ -100,8 +107,8 @@ class Creation:
                 raise CreationConflict("Submitted attempts cannot be edited. Discard this attempt and start again.")
             if manifest["revision"] != 0:
                 raise CreationConflict("This creation attempt no longer exists.")
-            if not self.store.enabled_key(manifest["key_id"], db=db):
-                raise CreationConflict("Choose a saved API key from an enabled connection before creating a world.")
+            if not self.store.enabled_key(key_id, db=db):
+                raise CreationConflict("Choose a saved credential from an enabled connection before creating this World.")
             value = {"id": attempt_id, "created_at": now(), "revision": 0, "state": "paused", "books": []}
             self.store.put(db, value)
             self.store.command(db, attempt_id, command_id, payload)
@@ -113,8 +120,11 @@ class Creation:
                     raise CreationConflict("Two selected books have the same name. Remove or rename one.")
                 comparisons.add(comparison)
                 books.append({**incoming, "position": position, "uploaded": False, "state": "waiting", "message": ""})
-            value.update(name=manifest["name"], config=manifest["config"], key_id=manifest["key_id"],
+            value.update(name=manifest["name"], config=manifest["config"], key_id=key_id,
                          books=books, state="paused", phase="uploading", message="", revision=value["revision"] + 1)
+            if profile:
+                value["embedding_profile_id"] = profile["id"]
+                value["embedding_spec"] = embedding_spec
             self.store.put(db, value)
         return self.store.public(value)
 
@@ -162,6 +172,18 @@ class Creation:
         self.logger.warning("Book upload failed attempt_id=%s book_id=%s", attempt_id, book_id)
 
     def start(self, attempt_id, revision, operation_id):
+        hinted = self.store.get(attempt_id)
+        if hinted and hinted.get("embedding_profile_id") and hinted["state"] not in BUSY | {"complete"}:
+            try:
+                resolved = self.embedding_profiles.resolve(
+                    hinted["embedding_profile_id"], hinted.get("embedding_spec"),
+                )
+            except EmbeddingFailure as exc:
+                raise CreationConflict(str(exc)) from None
+            hinted["key_id"] = resolved["profile"]["key_id"]
+            hinted["embedding_spec"] = resolved["spec"]
+            self.store.update(attempt_id, key_id=hinted["key_id"], embedding_spec=hinted["embedding_spec"])
+            self.embedding_profiles.record_used(hinted["embedding_profile_id"])
         with self.guard:
             with self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -180,8 +202,9 @@ class Creation:
                     raise CreationConflict("The selected API key is unavailable. Restore its secret in Providers, or discard this attempt and start again.")
                 value.update(state="running", message="", revision=value["revision"] + 1)
                 self.store.put(db, value)
+                model = (value.get("embedding_spec") or {}).get("model") or value["config"].get("model")
                 db.execute("INSERT INTO preferences VALUES('processing',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-                           (json.dumps({"model": value["config"]["model"], "key_id": value["key_id"]}),))
+                           (json.dumps({"model": model, "key_id": value["key_id"]}),))
             stop = threading.Event()
             thread = threading.Thread(target=self.run, args=(attempt_id, stop),
                                       name=f"world-creation-{attempt_id[:8]}", daemon=True)
@@ -241,6 +264,10 @@ class Creation:
         if stop.is_set():
             raise ProcessingPaused()
 
+    def embed_world_query(self, world_id: str, text: str, stop: threading.Event) -> list[float]:
+        """Embed a Chronicle query with the credential and vector model bound to its World."""
+        return self.embedding_profiles.embed_world_query(world_id, text, stop)
+
     def reconcile(self, value):
         try:
             world = self.worlds.get(value["id"])
@@ -257,6 +284,15 @@ class Creation:
             value = self.store.get(attempt_id)
             if self.reconcile(value):
                 return
+            try:
+                embedding = self.embedding_profiles.resolve_attempt(value)
+            except CreationConflict as exc:
+                raise EmbeddingFailure("embedding_profile", str(exc)) from None
+            embedding_model = embedding["profile"]["model"]
+            embedding_dimensions = embedding["profile"]["dimensions"]
+            embedding_format_version = embedding["profile"].get("input_format_version", 2)
+            if not embedding["secret"]:
+                raise EmbeddingFailure("credentials", "The selected connection key is missing. Restore it in AI Connections, or discard this attempt and start again.")
             failed = False
             self.store.update(attempt_id, phase="preparing")
             for book in value["books"]:
@@ -277,7 +313,9 @@ class Creation:
                     self.store.update_book(attempt_id, current_book, state="chunking")
                     # A terminated split is safe to repeat; chunk IDs are deterministic.
                     self.store.add_chunks(attempt_id, current_book,
-                                          split_text(text, value["config"]["size"], value["config"]["search"]), value["config"])
+                                          split_text(text, value["config"]["size"], value["config"]["search"]), value["config"],
+                                          dimensions=embedding_dimensions, model=embedding_model,
+                                          input_format_version=embedding_format_version)
                     self.store.update_book(attempt_id, current_book, state="prepared", chunked=True,
                                            text_digest=hashlib.sha256(text.encode("utf-8")).hexdigest())
                 except (ImportFailure, EmbeddingFailure) as exc:
@@ -287,9 +325,6 @@ class Creation:
             if failed:
                 raise EmbeddingFailure("preparation_failed", "Some books need attention. No books have been accepted.")
             self.store.update(attempt_id, phase="embedding")
-            secret = self.vault.read(value["key_id"])
-            if not secret:
-                raise EmbeddingFailure("credentials", "The selected API key is missing. Restore it in Providers, or discard this attempt and start again.")
             for book in value["books"]:
                 current_book = book["id"]
                 self.check_stop(stop)
@@ -297,15 +332,22 @@ class Creation:
                 while chunk := self.store.pending_chunk(attempt_id, current_book):
                     self.check_stop(stop)
                     try:
-                        vector = self.embedder.embed(chunk["text"], secret, stop, self.logger)
-                        self.store.save_vector(chunk["id"], vector)
+                        vector = self.embedding_profiles._embed(
+                            chunk["text"], embedding["credential"], embedding["secret"],
+                            embedding_model, embedding_dimensions, "document", stop,
+                            embedding_format_version,
+                        )
+                        self.store.save_vector(chunk["id"], vector,
+                                               dimensions=embedding_dimensions, model=embedding_model)
                     except InputTooLarge:
                         size = len(chunk["text"]) // 2
                         if size < 1:
                             raise EmbeddingFailure("input_limit", "Google rejected even the smallest text slice. Retry later.") from None
                         self.store.add_chunks(attempt_id, current_book,
                                               split_text(chunk["text"], size, min(value["config"]["search"], size - 1),
-                                                         offset=chunk["start"]), value["config"], replace_id=chunk["id"])
+                                                         offset=chunk["start"]), value["config"], replace_id=chunk["id"],
+                                              dimensions=embedding_dimensions, model=embedding_model,
+                                              input_format_version=embedding_format_version)
                         self.logger.warning("Oversized chunk split attempt_id=%s book_id=%s", attempt_id, current_book)
                 self.store.update_book(attempt_id, current_book, state="done")
             self.check_stop(stop)
@@ -359,9 +401,13 @@ class Creation:
                             "comparison_name": comparison, "position": book["position"],
                             "converter_version": CONVERTER_VERSION, "source_digest": book["digest"],
                             "text_digest": book["text_digest"]})
-            atomic_json(prepared / "world.json", {"id": value["id"], "name": value["name"],
-                        "created_at": now(), "last_used_at": None, "artwork": "frostwake",
-                        "creation_id": value["id"], "sources_locked": True, "processing": value["config"]})
+            world = {"id": value["id"], "name": value["name"], "created_at": now(),
+                     "last_used_at": None, "artwork": "frostwake", "creation_id": value["id"],
+                     "sources_locked": True, "processing": value["config"]}
+            if value.get("embedding_profile_id"):
+                world["embedding_profile_id"] = value["embedding_profile_id"]
+                world["embedding_spec"] = value["embedding_spec"]
+            atomic_json(prepared / "world.json", world)
             destination = self.worlds.directory(value["id"])
             destination.parent.mkdir(exist_ok=True)
             prepared.rename(destination)

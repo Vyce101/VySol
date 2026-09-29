@@ -20,6 +20,7 @@ from .books.models import ImportFailure
 from .books.import_logging import import_logger
 from .creation import Creation
 from .creation_api import creation_routes
+from .embedding_profiles_api import embedding_profile_routes
 from .creation_store import CreationConflict
 from .chronicles import ChronicleService
 from .chronicles_api import chronicle_routes
@@ -34,7 +35,8 @@ class Settings(BaseModel):
 
 
 def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
-               limits: ImportLimits | None = None, *, vault=None, embedder=None, chat_client=None) -> FastAPI:
+               limits: ImportLimits | None = None, *, vault=None, embedder=None, chat_client=None,
+               catalog_client=None) -> FastAPI:
     root = (data_dir or Path(os.environ.get("VYSOL_DATA_DIR", "data"))).resolve()
     frontend = frontend_dir or Path(__file__).resolve().parents[2] / "frontend" / "dist" / "client"
     store = WorldStore(root)
@@ -48,16 +50,20 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
             app.state.logger = logger
             creation.start_service(logger)
             chronicles.start_service(logger)
+            creation.provider_catalog.logger = logger
+            creation.provider_catalog.refresh_stale_background()
             logger.info("Application started")
             try:
                 yield
             finally:
                 chronicles.close()
+                creation.provider_catalog.close()
                 creation.close()
                 logger.info("Application stopped")
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.creation = creation
+    app.state.embedding_profiles = creation.embedding_profiles
     app.state.chronicles = chronicles
 
     @app.middleware("http")
@@ -99,7 +105,8 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
         except FileNotFoundError:
             raise HTTPException(404, "World not found.") from None
 
-    app.include_router(creation_routes(creation))
+    app.include_router(creation_routes(creation, catalog_client=catalog_client))
+    app.include_router(embedding_profile_routes(creation.embedding_profiles))
     app.include_router(chronicle_routes(chronicles))
 
     @app.get("/api/health")
@@ -174,6 +181,7 @@ def create_app(data_dir: Path | None = None, frontend_dir: Path | None = None,
                 "max_chunk_size": config.get("size"),
                 "boundary_search_distance": config.get("search"),
             },
+            "embedding_profile": creation.embedding_profiles.world_profile(world or attempt),
         }
 
     @app.post("/api/worlds/{world_id}/activity")
