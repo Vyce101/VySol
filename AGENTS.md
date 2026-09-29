@@ -89,3 +89,12 @@ Choose motion according to the relationship between states:
 All new motion must support prefers-reduced-motion. Under reduced motion, remove positional movement, breathing/pulsing, and decorative animation while preserving the correct final state and interaction behavior.
 
 Before adding a new hard-coded motion value, inspect the existing CSS/components for an equivalent interaction and reuse its established duration and easing when possible.
+
+## Models
+
+- When adding a new model, please always say the name and possible settings to expose beforehand for me to choose which to expose.
+
+### Embedding Models
+
+- Embedding models must by default use their highest input limit but be read only.
+- Embedding models must by default use their highest dimensions but can be set by a user.
