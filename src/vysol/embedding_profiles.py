@@ -1,6 +1,5 @@
 """Saved embedding choices and immutable vector specifications for Worlds."""
 
-
 from datetime import datetime, timezone
 import json
 import logging
@@ -404,3 +403,130 @@ class EmbeddingProfileService:
                        (default_id, last_used_id))
         self.creation.logger.info("Embedding Profile deleted profile_id=%s", profile_id)
         return {"deleted": True}
+
+    def rebind_world(self, world_id: str, profile_id: str) -> dict:
+        try:
+            UUID(world_id)
+            UUID(profile_id)
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("Choose a valid World and Embedding Profile.") from None
+        world = self.creation.worlds.get(world_id)
+        current = world.get("embedding_spec")
+        if not current:
+            raise CreationConflict("This World does not have a saved vector specification.")
+        profile, replacement = self.snapshot(profile_id)
+        if (current.get("provider") != replacement.get("provider")
+                or current.get("model") != replacement.get("model")
+                or current.get("dimensions") != replacement.get("dimensions")
+                or current.get("input_format_version", 2) != replacement.get("input_format_version", 2)
+                or current.get("base_url") != replacement.get("base_url")):
+            raise CreationConflict("Choose a profile with the same provider, model, dimensions, and Base URL to keep this World’s vectors compatible.")
+        with FileLock(self.root / "locks" / "worlds.lock", timeout=30):
+            world = self.creation.worlds.get(world_id)
+            if world.get("embedding_spec") != current:
+                raise CreationConflict("This World’s embedding settings changed. Reload the World and try again.")
+            world["embedding_profile_id"] = profile_id
+            atomic_json(self.creation.worlds.directory(world_id) / "world.json", world)
+        self.creation.logger.info("World Embedding Profile changed world_id=%s profile_id=%s", world_id, profile_id)
+        return self.world_profile(world)
+
+    def preflight(self, profile_id: str) -> dict:
+        profile, _spec = self.snapshot(profile_id)
+        credential = self._credential(profile["key_id"])
+        secret = self.creation.vault.read(profile["key_id"]) or ""
+        if not self._has_access(profile["key_id"], credential):
+            raise CreationConflict("The selected connection key is missing. Restore it in AI Connections.")
+        vector = self._embed("VySol embedding profile check", credential, secret, profile["model"],
+                             profile["dimensions"], "document", threading.Event(),
+                             profile.get("input_format_version", 2))
+        dimensions = len(vector)
+        expected_dimensions = profile.get("dimensions")
+        world_dimensions = {
+            world.get("embedding_spec", {}).get("dimensions")
+            for world in self._worlds_for_profile(profile_id)
+            if world.get("embedding_spec", {}).get("dimensions")
+        }
+        if ((expected_dimensions and expected_dimensions != dimensions)
+                or (world_dimensions and world_dimensions != {dimensions})):
+            raise EmbeddingFailure(
+                "dimension_mismatch",
+                "This connection returned a different vector size. The World’s saved vectors were kept unchanged.",
+            )
+        with self.store.connect() as db:
+            db.execute("UPDATE embedding_profiles SET dimensions=?,preflighted_at=?,updated_at=? WHERE id=?",
+                       (dimensions, _now(), _now(), profile_id))
+        self.creation.logger.info("Embedding Profile preflight succeeded profile_id=%s dimensions=%d", profile_id, dimensions)
+        return self.public(self._profile(profile_id))
+
+    def resolve(self, profile_id: str, world_spec: dict | None = None) -> dict:
+        profile, spec = self.snapshot(profile_id)
+        if world_spec:
+            if (spec["provider"] != world_spec.get("provider")
+                    or profile["model"] != world_spec.get("model")
+                    or (world_spec.get("dimensions") and profile["dimensions"] != world_spec["dimensions"])
+                    or profile.get("input_format_version", 2) != world_spec.get("input_format_version", 2)
+                    or (spec.get("base_url") != world_spec.get("base_url"))):
+                raise EmbeddingFailure("embedding_profile_changed",
+                                       "This Embedding Profile no longer matches the World’s saved vectors.")
+        model = self._model(profile["key_id"], profile["model"])
+        needs_preflight = (self._credential(profile["key_id"]).get("provider") == "openai_compatible"
+                           and self._capabilities(model)[1] is None)
+        if not profile["dimensions"] or (needs_preflight and not profile.get("preflighted_at")):
+            self.preflight(profile_id)
+            profile = self._profile(profile_id)
+            _profile, spec = self.snapshot(profile_id)
+        secret = self.creation.vault.read(profile["key_id"]) or ""
+        if not self._has_access(profile["key_id"], self._credential(profile["key_id"])):
+            raise EmbeddingFailure("credentials", "The selected connection key is missing. Restore it in AI Connections.")
+        return {"profile": profile, "credential": self._credential(profile["key_id"]),
+                "secret": secret, "spec": spec}
+
+    def resolve_attempt(self, attempt: dict) -> dict:
+        profile_id = attempt.get("embedding_profile_id")
+        if profile_id:
+            return self.resolve(profile_id, attempt.get("embedding_spec"))
+        key_id = attempt.get("key_id", "")
+        return {"profile": {"id": "legacy", "name": "Legacy Google Embedding 2", "key_id": key_id,
+                            "model": attempt.get("config", {}).get("model", LEGACY_MODEL),
+                            "dimensions": LEGACY_DIMENSIONS, "max_input_tokens": LEGACY_INPUT_LIMIT,
+                            "input_format_version": 1},
+                "credential": self._credential(key_id), "secret": self.creation.vault.read(key_id),
+                "spec": {"provider": "google", "model": attempt.get("config", {}).get("model", LEGACY_MODEL),
+                         "dimensions": LEGACY_DIMENSIONS, "max_input_tokens": LEGACY_INPUT_LIMIT,
+                         "input_format_version": 1, "base_url": None}}
+
+    def resolve_world(self, world_id: str) -> dict:
+        world = self.creation.worlds.get(world_id)
+        profile_id = world.get("embedding_profile_id")
+        spec = world.get("embedding_spec")
+        if profile_id:
+            return self.resolve(profile_id, spec)
+        attempt = self.store.get(world_id)
+        if attempt:
+            return self.resolve_attempt(attempt)
+        raise CreationConflict("This World does not have an Embedding Profile configured.")
+
+    def embed_world_query(self, world_id: str, text: str, stop: threading.Event):
+        resolved = self.resolve_world(world_id)
+        return self._embed(text, resolved["credential"], resolved["secret"], resolved["profile"]["model"],
+                           resolved["profile"]["dimensions"], "query", stop,
+                           resolved["profile"].get("input_format_version", 2))
+
+    def _embed(self, text: str, credential: dict, secret: str, model: str,
+               dimensions: int | None, purpose: str, stop: threading.Event,
+               input_format_version: int = 2):
+        if hasattr(self.embedder, "embed_profile"):
+            formatted = text
+            formatted_purpose = purpose
+            if input_format_version == 1 and credential.get("provider") == "google":
+                if purpose == "query":
+                    formatted = f"task: search result | query: {text}"
+                    formatted_purpose = "legacy_query"
+                else:
+                    formatted = f"title: none | text: {text}"
+                    formatted_purpose = "legacy_document"
+            return self.embedder.embed_profile(formatted, credential, secret, model, dimensions,
+                                               formatted_purpose, stop, self.creation.logger)
+        if purpose == "query" and hasattr(self.embedder, "embed_query"):
+            return self.embedder.embed_query(text, secret, stop, self.creation.logger)
+        return self.embedder.embed(text, secret, stop, self.creation.logger)
