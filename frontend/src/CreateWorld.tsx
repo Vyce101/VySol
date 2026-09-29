@@ -7,12 +7,14 @@ import {
 } from "@phosphor-icons/react";
 import { BookList } from "./BookList";
 import { WorldSectionsNav } from "./WorldSectionsNav";
+import { providerName } from "./providerNames";
 import {
   api,
   jsonRequest,
   type CreationAttempt,
+  type EmbeddingProfile,
+  type EmbeddingProfileList,
   type ProcessingConfig,
-  type Providers,
   type World,
   type WorldBook,
   type WorldDetail,
@@ -27,21 +29,9 @@ type Choice = {
 };
 
 const defaults: ProcessingConfig = {
-  model: "gemini-embedding-2",
   size: 8000,
   search: 1000,
 };
-
-function providerName(provider: string) {
-  if (provider === "google") return "Google";
-  return provider.charAt(0).toLocaleUpperCase() + provider.slice(1);
-}
-
-function ProviderMark({ provider }: { provider: string }) {
-  if (provider === "google")
-    return <img className="provider-logo-mark" src="/assets/google-g-logo.svg.webp" alt="" aria-hidden="true" />;
-  return <span aria-hidden="true">{providerName(provider).slice(0, 1)}</span>;
-}
 
 function ChunkingHelp() {
   const [open, setOpen] = useState(false);
@@ -92,145 +82,71 @@ function ChunkingHelp() {
 }
 
 function EmbeddingChoice({
-  providers,
-  config,
-  keyId,
-  onModel,
-  onKey,
+  profiles,
+  selectedProfileId,
+  onChange,
 }: {
-  providers: Providers | null;
-  config: ProcessingConfig;
-  keyId: string;
-  onModel: (model: string) => void;
-  onKey: (id: string) => void;
+  profiles: EmbeddingProfile[];
+  selectedProfileId: string;
+  onChange: (id: string) => void;
 }) {
-  const [openChoice, setOpenChoice] = useState<"model" | "key" | null>(null);
-  const enabledConnections = (providers?.connections ?? []).filter(
-    (connection) => connection.enabled,
-  );
-  const hasConnectionData = providers?.connections !== undefined;
-  const enabledConnectionIds = new Set(enabledConnections.map((item) => item.id));
-  const enabledProviders = new Set(enabledConnections.map((item) => item.provider));
-  const models = (providers?.models ?? []).filter(
-    (model) => !hasConnectionData || enabledProviders.has(model.provider),
-  );
-  const keys = [...(providers?.keys ?? [])]
-    .filter(
-      (key) =>
-        !hasConnectionData ||
-        enabledConnectionIds.has(key.connection_id ?? ""),
-    )
-    .sort(
-      (left, right) =>
-        left.provider.localeCompare(right.provider) ||
-        left.name.localeCompare(right.name),
-    );
-  const selectedModel = models.find((model) => model.id === config.model);
-  const selectedKey = keys.find((key) => key.id === keyId);
+  const [open, setOpen] = useState(false);
+  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId);
 
   return (
     <div className="embedding-choice">
       <div className="embedding-choice-labels">
-        <span>Embedding Model</span>
-        <span>API Connection</span>
+        <span>Embedding Profile</span>
       </div>
-      <div className="embedding-choice-row">
+      <div className="embedding-choice-row is-profile-choice">
         <div className="choice-menu-anchor">
           <button
             type="button"
             className="choice-card"
-            aria-label="Embedding model"
+            aria-label="Embedding profile"
             aria-haspopup="listbox"
-            aria-expanded={openChoice === "model"}
-            aria-controls="embedding-model-options"
-            onClick={() =>
-              setOpenChoice(openChoice === "model" ? null : "model")
-            }
+            aria-expanded={open}
+            aria-controls="embedding-profile-options"
+            onClick={() => setOpen((value) => !value)}
           >
-            <ProviderMark provider={selectedModel?.provider ?? "google"} />
             <span className="choice-card-copy">
-              <strong>{selectedModel?.name ?? "Select a model"}</strong>
-              <small>{providerName(selectedModel?.provider ?? "google")}</small>
+              <strong>{selectedProfile?.name ?? "Choose a profile"}</strong>
+              <small>{selectedProfile
+                ? `${providerName(selectedProfile.provider)} · ${selectedProfile.model_name || selectedProfile.model}`
+                : profiles.length
+                  ? "Choose a profile for this World"
+                  : "Create a profile in AI Connections before processing books."}</small>
             </span>
             <CaretDown size={18} />
           </button>
-          {openChoice === "model" && (
+          {open && (
             <div
-              id="embedding-model-options"
+              id="embedding-profile-options"
               className="choice-menu"
               role="listbox"
-              aria-label="Embedding model options"
+              aria-label="Embedding profile options"
             >
-              {models.map((model) => (
+              {profiles.map((profile) => (
                 <button
                   type="button"
                   role="option"
-                  aria-selected={model.id === config.model}
-                  key={model.id}
+                  aria-selected={profile.id === selectedProfileId}
+                  aria-disabled={!profile.usable}
+                  disabled={!profile.usable}
+                  key={profile.id}
                   onClick={() => {
-                    onModel(model.id);
-                    setOpenChoice(null);
+                    onChange(profile.id);
+                    setOpen(false);
                   }}
                 >
-                  <ProviderMark provider={model.provider} />
                   <span className="choice-card-copy">
-                    <strong>{model.name}</strong>
-                    <small>{providerName(model.provider)}</small>
+                    <strong>{profile.name}</strong>
+                    <small>{profile.usable ? `${providerName(profile.provider)} · ${profile.model_name || profile.model}` : "Connection needs attention"}</small>
                   </span>
-                  {model.id === config.model && <Check size={18} />}
+                  {profile.id === selectedProfileId && <Check size={18} />}
                 </button>
               ))}
-              {!models.length && <p role="status">No embedding models available.</p>}
-            </div>
-          )}
-        </div>
-        <span className="choice-via" aria-hidden="true">
-          via
-        </span>
-        <div className="choice-menu-anchor">
-          <button
-            type="button"
-            className="choice-card key-choice-card"
-            aria-label="API connection"
-            aria-haspopup="listbox"
-            aria-expanded={openChoice === "key"}
-            aria-controls="api-connection-options"
-            onClick={() => setOpenChoice(openChoice === "key" ? null : "key")}
-          >
-            <ProviderMark provider={selectedKey?.provider ?? "google"} />
-            <span className="choice-card-copy">
-              <strong>{selectedKey?.name ?? "Select a connection"}</strong>
-              <small>{providerName(selectedKey?.provider ?? "google")}</small>
-            </span>
-            <CaretDown size={18} />
-          </button>
-          {openChoice === "key" && (
-            <div
-              id="api-connection-options"
-              className="choice-menu"
-              role="listbox"
-              aria-label="API connection options"
-            >
-              {keys.map((key) => (
-                <button
-                  type="button"
-                  role="option"
-                  aria-selected={key.id === keyId}
-                  key={key.id}
-                  onClick={() => {
-                    onKey(key.id);
-                    setOpenChoice(null);
-                  }}
-                >
-                  <ProviderMark provider={key.provider} />
-                  <span className="choice-card-copy">
-                    <strong>{key.name}</strong>
-                    <small>{providerName(key.provider)}</small>
-                  </span>
-                  {key.id === keyId && <Check size={18} />}
-                </button>
-              ))}
-              {!keys.length && <p role="status">No saved connections.</p>}
+              {!profiles.length && <p role="status">No embedding profiles are available.</p>}
             </div>
           )}
         </div>
@@ -264,8 +180,8 @@ export function CreateWorld({
   const [name, setName] = useState("");
   const [choices, setChoices] = useState<Choice[]>([]);
   const [config, setConfig] = useState<ProcessingConfig>(defaults);
-  const [keyId, setKeyId] = useState("");
-  const [providers, setProviders] = useState<Providers | null>(null);
+  const [profileList, setProfileList] = useState<EmbeddingProfileList | null>(null);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
@@ -275,54 +191,25 @@ export function CreateWorld({
     if (!visible) return;
     heading.current?.focus({ preventScroll: true });
     let cancelled = false;
-    api<Providers>("/providers")
+    api<EmbeddingProfileList>("/embedding-profiles")
       .then((value) => {
         if (cancelled) return;
-        setProviders(value);
-        const enabledConnections = (value.connections ?? []).filter(
-          (connection) => connection.enabled,
-        );
-        const enabledConnectionIds = new Set(
-          enabledConnections.map((connection) => connection.id),
-        );
-        const selectableKeys = value.keys.filter(
-          (key) =>
-            value.connections === undefined ||
-            enabledConnectionIds.has(key.connection_id ?? ""),
-        );
-        const enabledProviders = new Set(
-          enabledConnections.map((connection) => connection.provider),
-        );
-        const selectableModels = value.models.filter(
-          (model) =>
-            value.connections === undefined || enabledProviders.has(model.provider),
-        );
-        setKeyId((current) =>
-          selectableKeys.some((key) => key.id === current)
-            ? current
-            : (selectableKeys.find((key) => key.id === value.defaults.key_id)?.id ??
-                selectableKeys[0]?.id ??
-                ""),
-        );
-        setConfig((previous) => {
-          const currentModelAvailable = selectableModels.some(
-            (model) => model.id === previous.model,
-          );
-          if (currentModelAvailable) return previous;
-          const defaultModelAvailable = selectableModels.some(
-            (model) => model.id === value.defaults.model,
-          );
-          return {
-            ...previous,
-            model:
-              (defaultModelAvailable ? value.defaults.model : selectableModels[0]?.id) ??
-              value.defaults.model,
-          };
+        const profiles = Array.isArray(value?.profiles) ? value.profiles : [];
+        setProfileList({
+          profiles,
+          default_profile_id: value?.default_profile_id ?? null,
+          last_used_profile_id: value?.last_used_profile_id ?? null,
         });
+        const preferred = value?.last_used_profile_id ?? "";
+        setSelectedProfileId((current) =>
+          profiles.some((profile) => profile.id === current)
+            ? current
+            : profiles.some((profile) => profile.id === preferred) ? preferred : "",
+        );
       })
       .catch(() => {
         if (!cancelled)
-          setError("Could not load your API connections. Try again or open Settings.");
+          setError("Could not load your Embedding Profiles. Try again or open AI Connections.");
       });
     return () => {
       cancelled = true;
@@ -364,30 +251,9 @@ export function CreateWorld({
       setError("Give your world a name and add at least one story.");
       return false;
     }
-    const enabledConnections = (providers?.connections ?? []).filter(
-      (connection) => connection.enabled,
-    );
-    const enabledConnectionIds = new Set(
-      enabledConnections.map((connection) => connection.id),
-    );
-    const selectableKeys = (providers?.keys ?? []).filter(
-      (key) =>
-        providers?.connections === undefined ||
-        enabledConnectionIds.has(key.connection_id ?? ""),
-    );
-    const enabledProviders = new Set(
-      enabledConnections.map((connection) => connection.provider),
-    );
-    const selectableModels = (providers?.models ?? []).filter(
-      (model) =>
-        providers?.connections === undefined || enabledProviders.has(model.provider),
-    );
-    if (!selectableKeys.some((key) => key.id === keyId)) {
-      setError("Choose an API connection in Processing before creating this world.");
-      return false;
-    }
-    if (!selectableModels.some((model) => model.id === config.model)) {
-      setError("Choose an available embedding model in Processing before creating this world.");
+    const selectedProfile = profileList?.profiles.find((profile) => profile.id === selectedProfileId);
+    if (!selectedProfile?.usable) {
+      setError("Choose a usable Embedding Profile in Processing before creating this World.");
       return false;
     }
     if (
@@ -482,8 +348,8 @@ export function CreateWorld({
         operation_id: crypto.randomUUID(),
         revision: 0,
         name: name.trim(),
-        key_id: keyId,
-        config,
+        embedding_profile_id: selectedProfileId,
+        config: { size: config.size, search: config.search },
         books: choices.map(({ id, filename, size }) => ({ id, filename, size })),
       });
       try {
@@ -497,7 +363,7 @@ export function CreateWorld({
       setName("");
       setChoices([]);
       setConfig(defaults);
-      setKeyId("");
+      setSelectedProfileId("");
       setAdvancedOpen(false);
       draftId.current = crypto.randomUUID();
       submissionId.current = null;
@@ -535,7 +401,7 @@ export function CreateWorld({
           setName("");
           setChoices([]);
           setConfig(defaults);
-          setKeyId("");
+          setSelectedProfileId("");
           setAdvancedOpen(false);
           draftId.current = crypto.randomUUID();
         }
@@ -549,24 +415,8 @@ export function CreateWorld({
     }
   }
 
-  const enabledConnections = (providers?.connections ?? []).filter(
-    (connection) => connection.enabled,
-  );
-  const enabledConnectionIds = new Set(enabledConnections.map((item) => item.id));
-  const enabledProviders = new Set(enabledConnections.map((item) => item.provider));
-  const selectableModels = (providers?.models ?? []).filter(
-    (model) =>
-      providers?.connections === undefined || enabledProviders.has(model.provider),
-  );
-  const selectableKeys = (providers?.keys ?? []).filter(
-    (key) =>
-      providers?.connections === undefined ||
-      enabledConnectionIds.has(key.connection_id ?? ""),
-  );
-  const choiceProviders: Providers | null = providers
-    ? { ...providers, models: selectableModels, keys: selectableKeys }
-    : null;
-  const selectedModel = selectableModels.find((model) => model.id === config.model);
+  const profiles = profileList?.profiles ?? [];
+  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId);
 
   return (
     <section
@@ -652,22 +502,13 @@ export function CreateWorld({
             <h2 id="processing-heading">Processing</h2>
           </div>
           <EmbeddingChoice
-            providers={choiceProviders}
-            config={config}
-            keyId={keyId}
-            onModel={(model) => setConfig((previous) => ({ ...previous, model }))}
-            onKey={setKeyId}
+            profiles={profiles}
+            selectedProfileId={selectedProfileId}
+            onChange={setSelectedProfileId}
           />
-          {!providers?.keys.length && (
-            <button type="button" className="text-action manage-connections" onClick={onManageKeys}>
-              Add an API connection in Settings
-            </button>
-          )}
-          {providers?.keys.length ? (
-            <button type="button" className="text-action manage-connections" onClick={onManageKeys}>
-              Manage API Connections
-            </button>
-          ) : null}
+          <button type="button" className="text-action manage-connections" onClick={onManageKeys}>
+            {profiles.length ? "Manage AI Connections" : "Add an Embedding Profile in AI Connections"}
+          </button>
 
           <section className={`world-disclosure ${advancedOpen ? "is-open" : ""}`}>
             <button
@@ -736,7 +577,7 @@ export function CreateWorld({
             {busy ? "Creating…" : "Create World"}
           </button>
         </footer>
-        <span className="sr-only">Selected model: {selectedModel?.name ?? config.model}</span>
+        <span className="sr-only">Selected embedding profile: {selectedProfile?.name ?? "none"}</span>
       </form>
     </section>
   );
@@ -818,8 +659,11 @@ export function WorldOverview({
   const processing = detail?.processing;
   const maxChunkSize = config?.size ?? processing?.max_chunk_size;
   const boundarySearchDistance = config?.search ?? processing?.boundary_search_distance;
-  const embeddingModel = config?.model ?? processing?.model;
-  const embeddingModelName = embeddingModel === "gemini-embedding-2" ? "Gemini Embedding 2" : embeddingModel;
+  const embeddingProfile = detail?.embedding_profile;
+  const legacyEmbeddingModel = config?.model ?? processing?.model;
+  const legacyModelName = legacyEmbeddingModel === "gemini-embedding-2"
+    ? "Gemini Embedding 2"
+    : legacyEmbeddingModel;
 
   return (
     <section
@@ -903,11 +747,22 @@ export function WorldOverview({
             inert={!detailsOpen}
           >
             <div className="world-disclosure-inner">
-              <dl className="world-details-grid">
-                <div><dt>Embedding Model</dt><dd>{embeddingModelName ?? "Unavailable"}</dd></div>
-                <div><dt>Maximum Chunk Size</dt><dd>{maxChunkSize ?? "Unavailable"}{maxChunkSize != null ? " characters" : ""}</dd></div>
-                <div><dt>Boundary Search Distance</dt><dd>{boundarySearchDistance ?? "Unavailable"}{boundarySearchDistance != null ? " characters" : ""}</dd></div>
-              </dl>
+              <section className="world-details-group" aria-labelledby="world-details-embedding">
+                <h3 id="world-details-embedding">Embedding</h3>
+                <dl className="world-details-grid">
+                  <div><dt>Embedding Profile</dt><dd>{embeddingProfile?.name ?? (legacyEmbeddingModel ? "Legacy Embedding Profile" : "Unavailable")}</dd></div>
+                  <div><dt>Embedding Model</dt><dd>{embeddingProfile ? `${providerName(embeddingProfile.provider)} · ${embeddingProfile.model}` : legacyModelName ?? "Unavailable"}</dd></div>
+                  <div><dt>Dimensions</dt><dd>{embeddingProfile?.dimensions?.toLocaleString() ?? "Unavailable"}</dd></div>
+                  <div><dt>Maximum Input</dt><dd>{embeddingProfile?.max_input_tokens?.toLocaleString() ?? "Unavailable"}{embeddingProfile?.max_input_tokens ? " tokens" : ""}</dd></div>
+                </dl>
+              </section>
+              <section className="world-details-group" aria-labelledby="world-details-chunking">
+                <h3 id="world-details-chunking">Chunking</h3>
+                <dl className="world-details-grid">
+                  <div><dt>Maximum Chunk Size</dt><dd>{maxChunkSize ?? "Unavailable"}{maxChunkSize != null ? " characters" : ""}</dd></div>
+                  <div><dt>Boundary Search Distance</dt><dd>{boundarySearchDistance ?? "Unavailable"}{boundarySearchDistance != null ? " characters" : ""}</dd></div>
+                </dl>
+              </section>
             </div>
           </div>
         </section>

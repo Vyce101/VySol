@@ -541,7 +541,7 @@ main.chronicle-returning > .view {
 .choice-card {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 8px;
   width: 100%;
   min-height: 57px;
   padding: 8px 12px;
@@ -549,12 +549,6 @@ main.chronicle-returning > .view {
   border-radius: 5px;
   background: #111b29dc;
   text-align: left;
-}
-.provider-logo-mark {
-  flex: 0 0 27px;
-  width: 27px;
-  height: 27px;
-  object-fit: contain;
 }
 .choice-card:hover,
 .choice-card[aria-expanded="true"] {
@@ -606,7 +600,7 @@ main.chronicle-returning > .view {
 .choice-menu button {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   width: 100%;
   min-height: 45px;
   padding: 7px 8px;
@@ -814,6 +808,17 @@ main.chronicle-returning > .view {
 .world-details-disclosure {
   margin-top: 17px;
 }
+.world-details-group + .world-details-group {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #dce3ef2c;
+}
+.world-details-group h3 {
+  margin: 0 0 11px;
+  color: #e9e6e0;
+  font-size: 17px;
+  font-weight: 500;
+}
 .world-details-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -821,7 +826,7 @@ main.chronicle-returning > .view {
   margin: 0;
   padding: 0;
 }
-.world-details-grid div:first-child {
+.world-details-group:first-child .world-details-grid div:first-child {
   grid-column: 1 / -1;
 }
 .world-details-grid div {
