@@ -343,3 +343,122 @@ test("confirms credential removal and keeps the row when the server rejects it",
   expect(vi.mocked(api).mock.calls.filter(([path]) => path === "/providers/keys/key-1"))
     .toHaveLength(1);
 });
+
+test("keeps the credential disclosure open when canceling removal", async () => {
+  const saved = {
+    id: "key-1",
+    name: "Personal",
+    provider: "google",
+    sequence: 1,
+    connection_id: connection.id,
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [saved],
+    connections: [{ ...connection, credentials: [saved] }],
+  } as never);
+
+  const { container } = render(<ProvidersView />);
+  fireEvent.click(await screen.findByRole("button", { name: "Google" }));
+  const credentialHeading = screen.getByRole("button", { name: "Credential 1 Personal" });
+  fireEvent.click(credentialHeading);
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+  const confirmation = screen.getByRole("alertdialog");
+  expect(confirmation.classList.contains("is-open")).toBe(true);
+  expect(credentialHeading.getAttribute("aria-expanded")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "Keep Credential" }));
+
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(credentialHeading.getAttribute("aria-expanded")).toBe("true");
+  expect(container.querySelector(".credential-disclosure.is-open")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Credential 1 Personal" })).toBeTruthy();
+});
+
+test("keeps multiple providers and credentials expanded independently", async () => {
+  const googleCredential = {
+    id: "google-key-1",
+    name: "Google Key",
+    provider: "google",
+    sequence: 1,
+    connection_id: connection.id,
+  };
+  const secondGoogleCredential = {
+    id: "google-key-2",
+    name: "Google Key Two",
+    provider: "google",
+    sequence: 2,
+    connection_id: connection.id,
+  };
+  const openAiConnection = {
+    id: "openai-connection",
+    provider: "openai",
+    enabled: true,
+    credentials: [{
+      id: "openai-key-1",
+      name: "OpenAI Key",
+      provider: "openai",
+      sequence: 1,
+      connection_id: "openai-connection",
+    }],
+  };
+  vi.mocked(api).mockResolvedValue({
+    keys: [googleCredential, secondGoogleCredential, ...openAiConnection.credentials],
+    connections: [
+      { ...connection, credentials: [googleCredential, secondGoogleCredential] },
+      openAiConnection,
+    ],
+  } as never);
+
+  render(<ProvidersView />);
+  const google = await screen.findByRole("button", { name: "Google" });
+  const openAi = screen.getByRole("button", { name: "OpenAI" });
+  fireEvent.click(google);
+  fireEvent.click(openAi);
+
+  expect(google.getAttribute("aria-expanded")).toBe("true");
+  expect(openAi.getAttribute("aria-expanded")).toBe("true");
+
+  const googleCredentialHeading = screen.getByRole("button", { name: "Credential 1 Google Key" });
+  const secondGoogleCredentialHeading = screen.getByRole("button", { name: "Credential 2 Google Key Two" });
+  const openAiCredentialHeading = screen.getByRole("button", { name: "Credential 1 OpenAI Key" });
+  fireEvent.click(googleCredentialHeading);
+  fireEvent.click(secondGoogleCredentialHeading);
+  fireEvent.click(openAiCredentialHeading);
+
+  expect(googleCredentialHeading.getAttribute("aria-expanded")).toBe("true");
+  expect(secondGoogleCredentialHeading.getAttribute("aria-expanded")).toBe("true");
+  expect(openAiCredentialHeading.getAttribute("aria-expanded")).toBe("true");
+});
+
+test("animates a credential card out after removal is confirmed", async () => {
+  const saved = {
+    id: "key-1",
+    name: "Personal",
+    provider: "google",
+    sequence: 1,
+    connection_id: connection.id,
+  };
+  vi.mocked(api).mockImplementation(async (path, request) => {
+    if (path === "/providers" && !request)
+      return {
+        keys: [saved],
+        connections: [{ ...connection, credentials: [saved] }],
+      } as never;
+    if (path === "/providers/keys/key-1" && request?.method === "DELETE")
+      return {} as never;
+    throw new Error(`Unexpected request ${path}`);
+  });
+
+  const { container } = render(<ProvidersView />);
+  fireEvent.click(await screen.findByRole("button", { name: "Google" }));
+  fireEvent.click(screen.getByRole("button", { name: "Credential 1 Personal" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove Credential" }));
+
+  await waitFor(() =>
+    expect(container.querySelector(".credential-card-track.is-leaving")).toBeTruthy(),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Credential 1 Personal" })).toBeNull(),
+  );
+});

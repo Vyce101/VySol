@@ -1,6 +1,8 @@
 import { CaretDown, Eye, EyeSlash, Plus } from "@phosphor-icons/react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, jsonRequest } from "./api";
+import { EmbeddingProfiles } from "./EmbeddingProfiles";
+import { providerModelAge } from "./providerModelAge";
 
 type Credential = {
   id: string;
@@ -8,6 +10,10 @@ type Credential = {
   provider: string;
   sequence: number;
   connection_id: string;
+  base_url?: string | null;
+  models?: { id: string; name: string; provider: string; tested?: boolean }[];
+  models_updated_at?: string | null;
+  models_error?: string | null;
 };
 
 type ProviderConnection = {
@@ -23,8 +29,16 @@ type ProviderResponse = {
   connections?: ProviderConnection[];
 };
 
-const providers = [{ id: "google", name: "Google" }] as const;
-const googleLogo = "/assets/google-g-logo.svg.webp";
+const providers = [
+  { id: "anthropic", name: "Anthropic" },
+  { id: "deepseek", name: "DeepSeek" },
+  { id: "google", name: "Google" },
+  { id: "openai", name: "OpenAI" },
+  { id: "openai_compatible", name: "OpenAI-compatible" },
+] as const;
+function providerName(provider: string) {
+  return providers.find((item) => item.id === provider)?.name ?? provider;
+}
 
 function sortCredentials(credentials: Credential[]) {
   return [...credentials].sort((left, right) => left.sequence - right.sequence);
@@ -39,33 +53,39 @@ function nextCredentialSequence(credentials: Credential[]) {
 
 function getConnections(data: ProviderResponse): ProviderConnection[] {
   if (data.connections) {
-    return data.connections.map((connection) => ({
-      ...connection,
-      enabled: connection.enabled ?? true,
-      credentials: sortCredentials(connection.credentials),
-    }));
+    const existing = new Map(data.connections.map((connection) => [connection.provider, connection]));
+    return providers.map(({ id }) => {
+      const connection = existing.get(id);
+      return connection
+        ? {
+            ...connection,
+            enabled: connection.enabled ?? true,
+            credentials: sortCredentials(connection.credentials),
+          }
+        : { id: `provider-${id}`, provider: id, enabled: false, credentials: [] };
+    });
   }
 
   // Keep older saved keys visible while the local store is upgraded.
   const credentials = sortCredentials(data.keys ?? []);
-  if (!credentials.length) return [];
-  return [
-    {
-      id: credentials[0].connection_id ?? "legacy-google",
-      provider: credentials[0].provider,
-      enabled: true,
-      credentials,
-    },
-  ];
+  return providers.map(({ id }) => {
+    const providerCredentials = credentials.filter((credential) => credential.provider === id);
+    return {
+      id: providerCredentials[0]?.connection_id ?? `provider-${id}`,
+      provider: id,
+      enabled: providerCredentials.length > 0,
+      credentials: providerCredentials,
+    };
+  });
 }
 
 export function ProvidersView() {
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
-  const [expandedConnection, setExpandedConnection] = useState<string | null>(
-    null,
+  const [expandedConnections, setExpandedConnections] = useState<Set<string>>(
+    () => new Set(),
   );
-  const [expandedCredential, setExpandedCredential] = useState<string | null>(
-    null,
+  const [expandedCredentials, setExpandedCredentials] = useState<Set<string>>(
+    () => new Set(),
   );
   const [draftCredential, setDraftCredential] = useState<Credential | null>(
     null,
@@ -74,8 +94,39 @@ export function ProvidersView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [chooserOpen, setChooserOpen] = useState(false);
+  const [leavingProvider, setLeavingProvider] = useState<string | null>(null);
+  const [enteringProvider, setEnteringProvider] = useState<string | null>(null);
+  const [leavingCredential, setLeavingCredential] = useState<string | null>(null);
   const selectorButtonRef = useRef<HTMLButtonElement>(null);
   const chooserRef = useRef<HTMLDivElement>(null);
+  const connectionListRef = useRef<HTMLDivElement>(null);
+  const cardPositions = useRef(new Map<string, number>());
+  const skipNextConnectionShiftAnimation = useRef(false);
+
+  useLayoutEffect(() => {
+    const positions = new Map<string, number>();
+    for (const card of connectionListRef.current?.querySelectorAll<HTMLElement>("[data-provider]") ?? []) {
+      const provider = card.dataset.provider!;
+      const top = card.offsetTop;
+      const previous = cardPositions.current.get(provider);
+      if (!skipNextConnectionShiftAnimation.current && previous !== undefined && previous !== top &&
+          !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        card.animate?.([
+          { transform: `translateY(${previous - top}px)` },
+          { transform: "translateY(0)" },
+        ], { duration: 180, easing: "cubic-bezier(0.2, 0, 0.38, 0.9)" });
+      }
+      positions.set(provider, top);
+    }
+    cardPositions.current = positions;
+    skipNextConnectionShiftAnimation.current = false;
+  }, [connections]);
+
+  useEffect(() => {
+    if (!enteringProvider) return;
+    const timer = window.setTimeout(() => setEnteringProvider(null), 240);
+    return () => window.clearTimeout(timer);
+  }, [enteringProvider]);
 
   useEffect(() => {
     if (!chooserOpen) return;
@@ -120,12 +171,12 @@ export function ProvidersView() {
     const existing = connections.find(
       (connection) => connection.provider === providerId,
     );
-    if (!existing && !enabled) return;
+    if ((!existing || existing.id.startsWith("provider-")) && !enabled) return;
 
     setBusy(true);
     setError("");
     try {
-      if (!existing) {
+      if (!existing || existing.id.startsWith("provider-")) {
         const created = await api<ProviderConnection>(
           "/providers/connections",
           jsonRequest("POST", { provider: providerId }),
@@ -142,8 +193,12 @@ export function ProvidersView() {
           );
           connection.enabled = true;
         }
-        setConnections((previous) => [...previous, connection]);
-        setExpandedConnection(connection.id);
+        setConnections((previous) => [
+          ...previous.filter((item) => item.provider !== providerId),
+          connection,
+        ]);
+        setEnteringProvider(providerId);
+        setExpandedConnections((previous) => new Set(previous).add(connection.id));
         return;
       }
 
@@ -151,6 +206,13 @@ export function ProvidersView() {
         `/providers/connections/${existing.id}`,
         jsonRequest("PUT", { enabled }),
       );
+      if (!enabled && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        setLeavingProvider(providerId);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 190));
+        // The list has already closed this card's layout space, so don't replay the
+        // same movement when React removes the disabled connection.
+        skipNextConnectionShiftAnimation.current = true;
+      }
       setConnections((previous) =>
         previous.map((connection) =>
           connection.id === existing.id
@@ -159,9 +221,20 @@ export function ProvidersView() {
         ),
       );
       if (!enabled) {
-        setExpandedConnection(null);
-        setExpandedCredential(null);
+        setLeavingProvider(null);
+        setExpandedConnections((previous) => {
+          const next = new Set(previous);
+          next.delete(existing.id);
+          return next;
+        });
+        setExpandedCredentials((previous) => {
+          const next = new Set(previous);
+          for (const credential of existing.credentials) next.delete(credential.id);
+          return next;
+        });
         setDraftCredential(null);
+      } else {
+        setEnteringProvider(providerId);
       }
     } catch (cause) {
       setError(
@@ -184,8 +257,8 @@ export function ProvidersView() {
       connection_id: connection.id,
     };
     setDraftCredential(credential);
-    setExpandedConnection(connection.id);
-    setExpandedCredential(credential.id);
+    setExpandedConnections((previous) => new Set(previous).add(connection.id));
+    setExpandedCredentials((previous) => new Set(previous).add(credential.id));
     setError("");
   }
 
@@ -194,6 +267,7 @@ export function ProvidersView() {
     credential: Credential,
     name: string,
     secret: string,
+    baseUrl: string,
   ): Promise<boolean> {
     if (busy) return false;
     setBusy(true);
@@ -205,6 +279,7 @@ export function ProvidersView() {
           name,
           provider: connection.provider,
           connection_id: connection.id,
+          ...(connection.provider === "openai_compatible" ? { base_url: baseUrl.trim() } : {}),
           ...(secret ? { secret } : {}),
         }),
       );
@@ -223,7 +298,11 @@ export function ProvidersView() {
         }),
       );
       setDraftCredential(null);
-      setExpandedCredential(null);
+      setExpandedCredentials((previous) => {
+        const next = new Set(previous);
+        next.delete(credential.id);
+        return next;
+      });
       return true;
     } catch (cause) {
       setError(
@@ -241,6 +320,10 @@ export function ProvidersView() {
     setError("");
     try {
       await api(`/providers/keys/${credential.id}`, { method: "DELETE" });
+      if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        setLeavingCredential(credential.id);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 190));
+      }
       setConnections((previous) =>
         previous.map((connection) => {
           const credentials = connection.credentials.filter(
@@ -254,7 +337,12 @@ export function ProvidersView() {
         }),
       );
       setDraftCredential(null);
-      setExpandedCredential(null);
+      setExpandedCredentials((previous) => {
+        const next = new Set(previous);
+        next.delete(credential.id);
+        return next;
+      });
+      setLeavingCredential(null);
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -302,9 +390,6 @@ export function ProvidersView() {
                 );
                 return (
                   <label className="provider-choice" key={provider.id}>
-                    <span className="provider-choice-logo" aria-hidden="true">
-                      <img src={googleLogo} alt="" />
-                    </span>
                     <span className="provider-choice-name">
                       <strong>{provider.name}</strong>
                     </span>
@@ -332,97 +417,121 @@ export function ProvidersView() {
         </p>
       ) : (
         <>
-          {connections.filter((connection) => connection.enabled).map((connection) => {
-            const isExpanded = expandedConnection === connection.id;
-            const draft =
-              draftCredential?.connection_id === connection.id
-                ? draftCredential
-                : null;
-            const credentials = sortCredentials([
-              ...connection.credentials,
-              ...(draft ? [draft] : []),
-            ]);
-            const isGoogle = connection.provider === "google";
+          {connections.some((connection) => connection.enabled) && (
+            <div className="connection-card-list" ref={connectionListRef}>
+              {connections
+                .filter((connection) => connection.enabled)
+                .sort((left, right) =>
+                  providerName(left.provider).localeCompare(providerName(right.provider)),
+                )
+                .map((connection) => {
+                  const isExpanded = expandedConnections.has(connection.id);
+                  const draft =
+                    draftCredential?.connection_id === connection.id
+                      ? draftCredential
+                      : null;
+                  const credentials = sortCredentials([
+                    ...connection.credentials,
+                    ...(draft ? [draft] : []),
+                  ]);
+                  const isLeaving = leavingProvider === connection.provider;
+                  const isEntering = enteringProvider === connection.provider;
 
-            return (
-              <section className="connection-card" key={connection.id}>
-                <button
-                  className="connection-heading"
-                  type="button"
-                  aria-expanded={isExpanded}
-                  aria-controls={`connection-content-${connection.id}`}
-                  onClick={() => {
-                    setExpandedConnection(isExpanded ? null : connection.id);
-                    setExpandedCredential(null);
-                  }}
-                >
-                  <span className="provider-logo" aria-hidden="true">
-                    {isGoogle ? <img src={googleLogo} alt="" /> : null}
-                  </span>
-                  <span className="connection-name">
-                    {providers.find((provider) => provider.id === connection.provider)
-                      ?.name ?? connection.provider}
-                  </span>
-                  <CaretDown
-                    className="connection-caret"
-                    size={20}
-                    aria-hidden="true"
-                  />
-                </button>
-
-                <div
-                  id={`connection-content-${connection.id}`}
-                  className={`connection-disclosure ${isExpanded ? "is-open" : ""}`}
-                  aria-hidden={!isExpanded}
-                  inert={!isExpanded}
-                >
-                  <div className="connection-disclosure-inner">
-                    <div className="connection-content">
-                      <div className="credential-list">
-                        {credentials.map((credential) => (
-                          <CredentialDisclosure
-                            key={credential.id}
-                            credential={credential}
-                            expanded={expandedCredential === credential.id}
-                            busy={busy}
-                            onToggle={() =>
-                              setExpandedCredential((previous) =>
-                                previous === credential.id ? null : credential.id,
-                              )
-                            }
-                            onSave={(name, secret) =>
-                              saveCredential(connection, credential, name, secret)
-                            }
-                            onRemove={() => {
-                              if (draft?.id === credential.id) {
-                                setDraftCredential(null);
-                                setExpandedCredential(null);
-                                return;
-                              }
-                              void removeCredential(credential);
-                            }}
-                          />
-                        ))}
-                      </div>
-
-                      {!draft && (
+                  return (
+                    <div
+                      className={`connection-card-track${isLeaving ? " is-leaving" : ""}${isEntering ? " is-entering" : ""}`}
+                      key={connection.id}
+                      data-provider={connection.provider}
+                    >
+                      <section className="connection-card">
                         <button
-                          className="add-credential"
+                          className="connection-heading"
                           type="button"
-                          disabled={busy}
-                          onClick={() => addCredential(connection)}
+                          aria-expanded={isExpanded}
+                          aria-controls={`connection-content-${connection.id}`}
+                          onClick={() => {
+                            setExpandedConnections((previous) => {
+                              const next = new Set(previous);
+                              if (isExpanded) next.delete(connection.id);
+                              else next.add(connection.id);
+                              return next;
+                            });
+                          }}
                         >
-                          <Plus size={18} /> Add Credential
+                          <span className="connection-name">
+                            {providerName(connection.provider)}
+                          </span>
+                          <CaretDown
+                            className="connection-caret"
+                            size={20}
+                            aria-hidden="true"
+                          />
                         </button>
-                      )}
+
+                        <div
+                          id={`connection-content-${connection.id}`}
+                          className={`connection-disclosure ${isExpanded ? "is-open" : ""}`}
+                          aria-hidden={!isExpanded}
+                          inert={!isExpanded}
+                        >
+                          <div className="connection-disclosure-inner">
+                            <div className="connection-content">
+                              <div className="credential-list">
+                                {credentials.map((credential) => (
+                                  <CredentialDisclosure
+                                    key={credential.id}
+                                    credential={credential}
+                                    leaving={leavingCredential === credential.id}
+                                    expanded={expandedConnections.has(connection.id) && expandedCredentials.has(credential.id)}
+                                    busy={busy}
+                                    onToggle={() => setExpandedCredentials((previous) => {
+                                      const next = new Set(previous);
+                                      if (next.has(credential.id)) next.delete(credential.id);
+                                      else next.add(credential.id);
+                                      return next;
+                                    })}
+                                    onSave={(name, secret, baseUrl) =>
+                                      saveCredential(connection, credential, name, secret, baseUrl)
+                                    }
+                                    onRemove={() => {
+                                      if (draft?.id === credential.id) {
+                                        setDraftCredential(null);
+                                        setExpandedCredentials((previous) => {
+                                          const next = new Set(previous);
+                                          next.delete(credential.id);
+                                          return next;
+                                        });
+                                        return;
+                                      }
+                                      void removeCredential(credential);
+                                    }}
+                                  />
+                                ))}
+                              </div>
+
+                              {!draft && (
+                                <button
+                                  className="add-credential"
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => addCredential(connection)}
+                                >
+                                  <Plus size={18} /> Add Credential
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </section>
                     </div>
-                  </div>
-                </div>
-              </section>
-            );
-          })}
+                  );
+                })}
+            </div>
+          )}
         </>
       )}
+
+      {!loading && <EmbeddingProfiles />}
 
       {error && !chooserOpen && (
         <p className="provider-error" role="alert">
@@ -440,6 +549,7 @@ export function ProvidersView() {
 
 function CredentialDisclosure({
   credential,
+  leaving,
   expanded,
   busy,
   onToggle,
@@ -447,14 +557,17 @@ function CredentialDisclosure({
   onRemove,
 }: {
   credential: Credential;
+  leaving: boolean;
   expanded: boolean;
   busy: boolean;
   onToggle: () => void;
-  onSave: (name: string, secret: string) => Promise<boolean>;
+  onSave: (name: string, secret: string, baseUrl: string) => Promise<boolean>;
   onRemove: () => void;
 }) {
   const isNew = !credential.name;
+  const isCompatible = credential.provider === "openai_compatible";
   const [name, setName] = useState(credential.name);
+  const [baseUrl, setBaseUrl] = useState(credential.base_url ?? "");
   const [secret, setSecret] = useState("");
   const [storedSecret, setStoredSecret] = useState<string | null>(null);
   const [secretVisible, setSecretVisible] = useState(false);
@@ -476,6 +589,7 @@ function CredentialDisclosure({
 
   useEffect(() => {
     setName(credential.name);
+    setBaseUrl(credential.base_url ?? "");
     setSecret("");
     setStoredSecret(null);
     setSecretVisible(false);
@@ -532,22 +646,23 @@ function CredentialDisclosure({
   }
 
   return (
-    <section className="credential-card">
-      <button
-        className="credential-heading"
-        type="button"
-        aria-expanded={expanded}
-        aria-controls={`credential-content-${credential.id}`}
-        onClick={onToggle}
-      >
-        <span className="credential-name">Credential {credential.sequence}</span>
-        {credential.name && <span className="credential-custom-name">{credential.name}</span>}
-        <CaretDown
-          className="credential-caret"
-          size={17}
-          aria-hidden="true"
-        />
-      </button>
+    <div className={`credential-card-track${leaving ? " is-leaving" : ""}`}>
+      <section className="credential-card">
+        <button
+          className="credential-heading"
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={`credential-content-${credential.id}`}
+          onClick={onToggle}
+        >
+          <span className="credential-name">Credential {credential.sequence}</span>
+          {credential.name && <span className="credential-custom-name">{credential.name}</span>}
+          <CaretDown
+            className="credential-caret"
+            size={17}
+            aria-hidden="true"
+          />
+        </button>
       <div
         id={`credential-content-${credential.id}`}
         className={`credential-disclosure ${expanded ? "is-open" : ""}`}
@@ -559,7 +674,7 @@ function CredentialDisclosure({
             className="credential-form"
             onSubmit={(event) => {
               event.preventDefault();
-              void onSave(name, secret).then((saved) => {
+              void onSave(name, secret, baseUrl).then((saved) => {
                 if (saved) {
                   setSecret("");
                   setStoredSecret(null);
@@ -575,10 +690,28 @@ function CredentialDisclosure({
                 value={name}
                 maxLength={100}
                 required
-                placeholder="Personal Google key"
+                placeholder={`Personal ${providerName(credential.provider)} connection`}
                 onChange={(event) => setName(event.target.value)}
               />
             </div>
+            {isCompatible && (
+              <div className="credential-field">
+                <label htmlFor={`credential-base-url-${credential.id}`}>Base URL</label>
+                <input
+                  id={`credential-base-url-${credential.id}`}
+                  type="url"
+                  value={baseUrl}
+                  required
+                  readOnly={!isNew}
+                  placeholder="https://api.example.com/v1"
+                  aria-describedby={`credential-base-url-help-${credential.id}`}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                />
+                <span id={`credential-base-url-help-${credential.id}`} className="credential-help">
+                  This address stays fixed after you save the connection.
+                </span>
+              </div>
+            )}
             <div className="credential-field">
               <label htmlFor={`credential-secret-${credential.id}`}>API Key</label>
               <div className="credential-secret-control">
@@ -588,8 +721,8 @@ function CredentialDisclosure({
                   autoComplete="new-password"
                   value={secret}
                   maxLength={1280}
-                  required={isNew}
-                  placeholder={isNew ? "Enter API key" : "••••••••••••••••••••"}
+                  required={isNew && !isCompatible}
+                  placeholder={isNew ? (isCompatible ? "Optional API key" : "Enter API key") : "••••••••••••••••••••"}
                   onChange={(event) => {
                     setSecret(event.target.value);
                     setSecretError("");
@@ -612,8 +745,42 @@ function CredentialDisclosure({
               {loadingSecret && <span className="secret-loading">Loading API key…</span>}
               {secretError && <span className="secret-error" role="alert">{secretError}</span>}
             </div>
-            {confirmRemove ? (
-              <div className="credential-confirmation" role="alertdialog" aria-label="Remove credential">
+            {!isNew && (
+              <div className="credential-models">
+                <div className="credential-models-heading">
+                  <span>Available Models</span>
+                </div>
+                {credential.models_updated_at && (
+                  <span className="credential-models-meta" title={new Date(credential.models_updated_at).toLocaleString()}>
+                    Last checked {providerModelAge(credential.models_updated_at)}
+                  </span>
+                )}
+                {credential.models_error && (
+                  <span className="credential-models-error" role="status">
+                    {credential.models_error} {credential.models?.length ? "Showing the last successful list." : ""}
+                  </span>
+                )}
+                {!credential.models_updated_at && !credential.models_error && (
+                  <span className="credential-models-meta">Model list has not been checked yet.</span>
+                )}
+                {credential.models_updated_at && !credential.models?.length && !credential.models_error && (
+                  <span className="credential-models-meta">No models were returned.</span>
+                )}
+                {credential.models?.length ? (
+                  <span className="credential-models-meta">
+                    {credential.models.length} models available for this connection.
+                  </span>
+                ) : null}
+              </div>
+            )}
+            <div className="credential-action-state">
+              <div
+                className={`credential-confirmation${confirmRemove ? " is-open" : ""}`}
+                role="alertdialog"
+                aria-label="Remove credential"
+                aria-hidden={!confirmRemove}
+                inert={!confirmRemove}
+              >
                 <p>Remove Credential {credential.sequence}?</p>
                 <button
                   type="button"
@@ -632,8 +799,11 @@ function CredentialDisclosure({
                   Remove Credential
                 </button>
               </div>
-            ) : (
-              <div className="credential-actions">
+              <div
+                className={`credential-actions${confirmRemove ? " is-hidden" : ""}`}
+                aria-hidden={confirmRemove}
+                inert={confirmRemove}
+              >
                 {isNew ? (
                   <button
                     type="button"
@@ -656,15 +826,16 @@ function CredentialDisclosure({
                 <button
                   type="submit"
                   className="primary-button"
-                  disabled={busy || !name.trim() || (isNew && !secret.trim())}
+                  disabled={busy || !name.trim() || (isNew && !isCompatible && !secret.trim()) || (isCompatible && !baseUrl.trim())}
                 >
                   {busy ? "Saving…" : "Save Changes"}
                 </button>
               </div>
-            )}
+            </div>
           </form>
         </div>
       </div>
-    </section>
+      </section>
+    </div>
   );
 }

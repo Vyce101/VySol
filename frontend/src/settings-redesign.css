@@ -133,6 +133,7 @@
 .settings-redesign .settings-content h2 {
   margin: 0 0 22px;
   font-size: clamp(25px, 2.5svh, 29px);
+  font-weight: 500;
   line-height: 1.15;
 }
 
@@ -222,6 +223,23 @@
   min-width: 0;
 }
 
+.settings-redesign .connection-card-list { display: grid; gap: 13px; }
+
+.settings-redesign .connection-card-track,
+.settings-redesign .credential-card-track {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  overflow: hidden;
+  transition: grid-template-rows 190ms cubic-bezier(0.2, 0, 1, 0.9);
+}
+
+.settings-redesign .connection-card-track.is-leaving,
+.settings-redesign .credential-card-track.is-leaving {
+  grid-template-rows: 0fr;
+  pointer-events: none;
+}
+
 .settings-redesign .connections-selector {
   position: relative;
   z-index: 3;
@@ -271,15 +289,32 @@
 
 .settings-redesign .connection-card {
   overflow: hidden;
+  min-height: 0;
   border: 1px solid #d6dfed36;
   border-radius: 7px;
   background: rgba(10, 18, 28, 0.66);
+  transition: opacity 190ms cubic-bezier(0.2, 0, 1, 0.9), transform 190ms cubic-bezier(0.2, 0, 1, 0.9);
+}
+
+.settings-redesign .connection-card-track.is-leaving .connection-card {
+  opacity: 0;
+  transform: translateY(-7px);
+  pointer-events: none;
+}
+
+.settings-redesign .connection-card-track.is-entering .connection-card {
+  animation: connection-card-enter 230ms cubic-bezier(0, 0, 0.38, 0.9) both;
+}
+
+@keyframes connection-card-enter {
+  from { opacity: 0; transform: translateY(-7px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .settings-redesign .connection-heading {
   display: flex;
   align-items: center;
-  gap: 17px;
+  gap: 12px;
   width: 100%;
   min-height: 74px;
   padding: 15px 20px;
@@ -289,20 +324,6 @@
 
 .settings-redesign .connection-heading:hover {
   background: #ffffff08;
-}
-
-.settings-redesign .provider-logo {
-  display: grid;
-  flex: 0 0 28px;
-  place-items: center;
-}
-
-.settings-redesign .provider-logo img,
-.settings-redesign .provider-choice-logo img {
-  display: block;
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
 }
 
 .settings-redesign .connection-name {
@@ -361,9 +382,16 @@
 
 .settings-redesign .credential-card {
   overflow: hidden;
+  min-height: 0;
   border: 1px solid #d6dfed2b;
   border-radius: 6px;
   background: rgba(17, 28, 41, 0.78);
+  transition: opacity 190ms cubic-bezier(0.2, 0, 1, 0.9), transform 190ms cubic-bezier(0.2, 0, 1, 0.9);
+}
+
+.settings-redesign .credential-card-track.is-leaving .credential-card {
+  opacity: 0;
+  transform: translateY(-5px);
 }
 
 .settings-redesign .credential-heading {
@@ -601,6 +629,30 @@
   padding-top: 3px;
 }
 
+.settings-redesign .credential-action-state {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+}
+
+.settings-redesign .credential-action-state > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  transition: opacity 150ms ease, transform 150ms cubic-bezier(0.2, 0, 0.38, 0.9);
+}
+
+.settings-redesign .credential-action-state > .credential-actions {
+  position: relative;
+  z-index: 1;
+}
+
+.settings-redesign .credential-actions.is-hidden {
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  visibility: hidden;
+}
+
 .settings-redesign .credential-actions .primary-button,
 .settings-redesign .connection-chooser-actions .primary-button {
   min-height: 40px;
@@ -639,15 +691,26 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 15px;
-  padding: 12px;
+  gap: 6px 12px;
+  padding: 5px 8px;
   border: 1px solid #f0b4a640;
   border-radius: 5px;
   background: #310f101c;
+  opacity: 0;
+  transform: translateY(3px);
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.settings-redesign .credential-confirmation.is-open {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  visibility: visible;
 }
 
 .settings-redesign .credential-confirmation p {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
   margin: 0;
   color: #f1d7d1;
 }
@@ -757,11 +820,11 @@
 
 .settings-redesign .provider-choice {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 20px;
+  grid-template-columns: minmax(0, 1fr) 20px;
   align-items: center;
-  gap: 13px;
-  min-height: 72px;
-  padding: 10px 12px;
+  gap: 10px;
+  min-height: 46px;
+  padding: 7px 12px;
   border: 1px solid #d6dfed2b;
   border-radius: 5px;
   cursor: pointer;
@@ -772,17 +835,12 @@
   background: #ffffff06;
 }
 
-.settings-redesign .provider-choice-logo {
-  display: grid;
-  place-items: center;
-}
-
 .settings-redesign .provider-choice-name strong {
   display: block;
   color: #f0eeea;
   font-weight: 400;
   font-size: 17px;
-  line-height: 28px;
+  line-height: 24px;
 }
 
 .settings-redesign .provider-choice input {
@@ -914,5 +972,18 @@
   .settings-redesign *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .settings-redesign .connection-card-track.is-entering .connection-card,
+  .settings-redesign .connection-card-track.is-leaving .connection-card,
+  .settings-redesign .credential-card-track.is-leaving .credential-card,
+  .settings-redesign .credential-actions.is-hidden,
+  .settings-redesign .credential-confirmation {
+    transform: none;
+  }
+
+  .settings-redesign .connection-card-track.is-entering .connection-card {
+    animation: none;
+    opacity: 1;
   }
 }
